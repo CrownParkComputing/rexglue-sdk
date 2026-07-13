@@ -50,6 +50,22 @@ function(rexglue_configure_target target_name)
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
         ${REXGLUE_SHARE_DIR}/rex_app.cpp)
 
+    # rex_app.cpp / windowed_app_main_sdl.cpp are host-app glue compiled directly
+    # into the game exe. They pull in the imgui console overlay and the generated
+    # rex/version.h. When the SDK is consumed via add_subdirectory() (source tree),
+    # imgui and rexcore are linked PRIVATE into librexruntime, so their PUBLIC
+    # headers (imgui/, and rexcore's $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+    # holding the generated version.h) do not reach the host target. Add those
+    # include dirs here (headers only, not objects, to avoid a second copy of
+    # imgui's global context). In installed-SDK mode the headers arrive via the
+    # install include prefix, so these are no-op guards.
+    foreach(_hdr_dep imgui::imgui rexcore)
+        if(TARGET ${_hdr_dep})
+            target_include_directories(${target_name} PRIVATE
+                $<TARGET_PROPERTY:${_hdr_dep},INTERFACE_INCLUDE_DIRECTORIES>)
+        endif()
+    endforeach()
+
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")
 

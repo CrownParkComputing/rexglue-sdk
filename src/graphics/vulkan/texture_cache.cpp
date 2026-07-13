@@ -1226,11 +1226,21 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       host_format_is_signed ? host_format_pair.format_signed : host_format_pair.format_unsigned;
   LoadShaderIndex load_shader = host_format.load_shader;
   if (load_shader == kLoadShaderIndexUnknown) {
+    // [diag] This drop was silent, which makes a missing texture look like a game bug
+    // rather than an unimplemented format. Name the format so it can be mapped.
+    const FormatInfo* fi = FormatInfo::Get(texture_key.format);
+    REXGPU_WARN("TEXTURE DROPPED (no load shader): format={} ({}) {}x{} signed_sep={}",
+                fi ? fi->name : "?", uint32_t(texture_key.format), texture_key.GetWidth(),
+                texture_key.GetHeight(), uint32_t(texture_key.signed_separate));
     return false;
   }
   VkPipeline pipeline = texture_key.scaled_resolve ? load_pipelines_scaled_[load_shader]
                                                    : load_pipelines_[load_shader];
   if (pipeline == VK_NULL_HANDLE) {
+    const FormatInfo* fi = FormatInfo::Get(texture_key.format);
+    REXGPU_WARN("TEXTURE DROPPED (no load pipeline): format={} ({}) {}x{} scaled_resolve={}",
+                fi ? fi->name : "?", uint32_t(texture_key.format), texture_key.GetWidth(),
+                texture_key.GetHeight(), uint32_t(texture_key.scaled_resolve));
     return false;
   }
   const LoadShaderInfo& load_shader_info = GetLoadShaderInfo(load_shader);
@@ -1543,10 +1553,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     }
     const texture_util::TextureGuestLayout::Level& level_guest_layout =
         is_base ? guest_layout.base : guest_layout.mips[level];
-    uint32_t level_guest_pitch = level_guest_layout.row_pitch_bytes;
+    // The load shaders take the pitch in BLOCKS for both tiled AND linear textures
+    // (upstream Xenia: row_pitch_bytes / bytes_per_block, unconditionally). The old code
+    // only divided for tiled textures and passed BYTES for linear ones — which matched the
+    // fork's stale shaders, but silently corrupts linear textures once the load shaders are
+    // updated from upstream (observed: Hydro Thunder's boat losing its texture).
+    uint32_t level_guest_pitch = level_guest_layout.row_pitch_bytes / bytes_per_block;
     if (texture_key.tiled) {
-      // Shaders expect pitch in blocks for tiled textures.
-      level_guest_pitch /= bytes_per_block;
       assert_zero(level_guest_pitch & (xenos::kTextureTileWidthHeight - 1));
     }
     load_constants.guest_pitch_aligned = level_guest_pitch;
@@ -1803,24 +1816,27 @@ void VulkanTextureCache::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask)
     if (uses_signed && host_format_pair.format_signed.format == VK_FORMAT_UNDEFINED) {
       unsupported_format_features_used_[uint32_t(format)] |= kUnsupportedSnormBit;
     }
+    // The view is selected by the GUEST's swizzled signs alone. Gating it on the host format
+    // having a distinct signed VkFormat is wrong: formats whose signedness is not a separate
+    // host format (every BC/DXT format - format_signed.format is VK_FORMAT_UNDEFINED there)
+    // would then never get a signed view, and a shader sampling them signed binds an empty
+    // descriptor and renders untextured. For those, GetView() just views the same image.
     if (IsSignedVersionSeparateForFormat(binding->key)) {
-      if (binding->texture && uses_unsigned &&
-          host_format_pair.format_unsigned.format != VK_FORMAT_UNDEFINED) {
+      if (binding->texture && uses_unsigned) {
         vulkan_binding.image_view_unsigned =
             static_cast<VulkanTexture*>(binding->texture)->GetView(false, binding->host_swizzle);
       }
-      if (binding->texture_signed && uses_signed &&
-          host_format_pair.format_signed.format != VK_FORMAT_UNDEFINED) {
+      if (binding->texture_signed && uses_signed) {
         vulkan_binding.image_view_signed = static_cast<VulkanTexture*>(binding->texture_signed)
                                                ->GetView(true, binding->host_swizzle);
       }
     } else {
       VulkanTexture* texture = static_cast<VulkanTexture*>(binding->texture);
       if (texture) {
-        if (uses_unsigned && host_format_pair.format_unsigned.format != VK_FORMAT_UNDEFINED) {
+        if (uses_unsigned) {
           vulkan_binding.image_view_unsigned = texture->GetView(false, binding->host_swizzle);
         }
-        if (uses_signed && host_format_pair.format_signed.format != VK_FORMAT_UNDEFINED) {
+        if (uses_signed) {
           vulkan_binding.image_view_signed = texture->GetView(true, binding->host_swizzle);
         }
       }
@@ -2372,7 +2388,14 @@ bool VulkanTextureCache::Initialize() {
   assert_true(host_format_gbgr.format_signed.format == VK_FORMAT_UNDEFINED);
   ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_G8B8G8R8_422_UNORM_KHR,
                                           &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
+  // Always decode the YUY2-style 422 format to RGBA8 in the load shader. This
+  // codebase never creates a VkSamplerYcbcrConversion, so sampling a raw
+  // single-plane _422 image is invalid per the Vulkan spec and comes back black
+  // on drivers that report the 422 format as linearly filterable (observed: all
+  // of Jetpac Refuelled's YUV menu/level backgrounds rendered fully black while
+  // sprites/text were fine). The compute-decode fallback below sidesteps the
+  // ycbcr-conversion requirement entirely, so force it unconditionally.
+  {
     host_format_gbgr.format_unsigned.load_shader = kLoadShaderIndexGBGR8ToRGB8;
     host_format_gbgr.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
     host_format_gbgr.format_unsigned.block_compressed = false;
@@ -2384,7 +2407,10 @@ bool VulkanTextureCache::Initialize() {
   assert_true(host_format_bgrg.format_signed.format == VK_FORMAT_UNDEFINED);
   ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_B8G8R8G8_422_UNORM_KHR,
                                           &format_properties);
-  if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
+  // Same as above for the other 422 ordering (k_Y1_Cr_Y0_Cb_REP, guest format
+  // 37) — force the RGBA8 compute-decode path unconditionally instead of raw
+  // 422 sampling, which has no ycbcr conversion and renders black.
+  {
     host_format_bgrg.format_unsigned.load_shader = kLoadShaderIndexBGRG8ToRGB8;
     host_format_bgrg.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
     host_format_bgrg.format_unsigned.block_compressed = false;

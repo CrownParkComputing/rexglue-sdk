@@ -934,6 +934,28 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
     // No texture data at all.
     return;
   }
+  {  // [TEMP DIAG] every large 2D texture, once per base — SC2's corrupt menu background is
+     // one of these; address + format + pitch + TILED bit classify the block-scramble.
+    if (fetch.dimension == xenos::DataDimension::k2DOrStacked && width_minus_1 + 1 >= 512) {
+      static thread_local uint32_t seen[64] = {};
+      static thread_local int nseen = 0;
+      uint32_t base = base_page << 12;
+      bool logged = false;
+      for (int i = 0; i < nseen; ++i) {
+        if (seen[i] == base) {
+          logged = true;
+          break;
+        }
+      }
+      if (!logged && nseen < 64) {
+        seen[nseen++] = base;
+        fprintf(stderr, "[BIGTEX] fmt=%u base=%08X %ux%u pitch=%u tiled=%u endian=%u\n",
+                uint32_t(fetch.format), base, width_minus_1 + 1, height_minus_1 + 1,
+                uint32_t(fetch.pitch) << 5, uint32_t(fetch.tiled), uint32_t(fetch.endianness));
+        fflush(stderr);
+      }
+    }
+  }
   if (fetch.dimension == xenos::DataDimension::k1D) {
     bool is_invalid_1d = false;
     // TODO(Triang3l): Support long 1D textures.

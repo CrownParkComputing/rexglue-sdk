@@ -50,7 +50,9 @@ set(REXKERNEL_SOURCES
     xboxkrnl/xboxkrnl_rtl.cpp
     xboxkrnl/xboxkrnl_strings.cpp
     xboxkrnl/xboxkrnl_threading.cpp
-    # xboxkrnl/xboxkrnl_usbcam.cpp  # TODO: lol eventually.
+    xboxkrnl/xboxkrnl_usbcam.cpp  # Rainbow Islands imports the XUsbcam* (Live Vision camera)
+                                  # exports; the impl already exists (2 real + 9 stubs), it was
+                                  # just never added to the build, so games importing it fail to LINK.
     xboxkrnl/xboxkrnl_video.cpp
     xboxkrnl/xboxkrnl_xconfig.cpp
     xboxkrnl/xboxkrnl_audio.cpp

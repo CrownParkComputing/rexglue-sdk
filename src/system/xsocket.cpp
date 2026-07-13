@@ -10,6 +10,9 @@
  */
 
 #include <cstring>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 
 #include <rex/kernel/xam/module.h>
 #include <rex/platform.h>
@@ -55,6 +58,27 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
   native_handle_ = socket(af, type, proto);
   if (native_handle_ == -1) {
     return X_STATUS_UNSUCCESSFUL;
+  }
+
+  // A blocking recv()/recvfrom() on a socket that never gets a reply (e.g. Xbox
+  // Live / LSP handshakes whose servers no longer exist) parks the guest thread
+  // forever (observed hanging Jetpac Refuelled's main thread in
+  // __skb_wait_for_more_packets — it polls a UDP socket via RecvFrom every frame).
+  // Bound blocking receives with a timeout so the guest gets a normal EAGAIN and
+  // continues its loop instead of deadlocking. The value is tunable at runtime via
+  // REX_SOCKET_RCVTIMEO_MS (milliseconds); default 16ms (~one 60 FPS frame). Xbox
+  // titles poll these sockets once per frame expecting a near-instant no-data
+  // return, so a large timeout throttles the whole game loop (3s => ~0.3 FPS)
+  // while one frame keeps it running at full speed and still fails dead links fast.
+  {
+    long timeout_ms = 16;
+    if (const char* env = std::getenv("REX_SOCKET_RCVTIMEO_MS")) {
+      timeout_ms = std::atol(env);
+    }
+    struct timeval rcv_timeout{};
+    rcv_timeout.tv_sec = timeout_ms / 1000;
+    rcv_timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(native_handle_, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
   }
 
   return X_STATUS_SUCCESS;
@@ -158,7 +182,12 @@ int XSocket::Shutdown(int how) {
 }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
-  return recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
+  int ret = recv(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags);
+  if (std::getenv("REX_SOCKET_LOG")) {
+    std::fprintf(stderr, "[xsocket] Recv fd=%lld len=%u flags=%u -> ret=%d errno=%d\n",
+                 (long long)native_handle_, buf_len, flags, ret, errno);
+  }
+  return ret;
 }
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
@@ -199,6 +228,11 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
 
   if (from_len) {
     *from_len = nfromlen;
+  }
+
+  if (std::getenv("REX_SOCKET_LOG")) {
+    std::fprintf(stderr, "[xsocket] RecvFrom fd=%lld len=%u flags=%u -> ret=%d errno=%d\n",
+                 (long long)native_handle_, buf_len, flags, ret, errno);
   }
 
   return ret;

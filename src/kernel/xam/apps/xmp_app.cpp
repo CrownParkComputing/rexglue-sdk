@@ -461,9 +461,10 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       return X_E_SUCCESS;
     }
     case 0x0007003D: {
-      // XMPCaptureOutput - not sure how this works :/
-      REXKRNL_DEBUG("XMPCaptureOutput(...)");
-      assert_always("XMP output not unimplemented");
+      // XMPCaptureOutput - audio visualisation capture. Not implemented, but it
+      // is an optional feature; failing (rather than asserting) lets titles that
+      // probe it continue booting. Space Giraffe calls this during startup.
+      REXKRNL_DEBUG("XMPCaptureOutput(...) - stubbed, returning failure");
       return X_E_FAIL;
     }
   }

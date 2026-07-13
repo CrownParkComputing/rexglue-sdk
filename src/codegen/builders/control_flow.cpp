@@ -45,8 +45,10 @@ bool build_b(BuilderContext& ctx) {
       break;
 
     case TargetKind::Unknown:
-      // Unknown target - fall back to range check
-      if (target >= ctx.fn.base() && target < ctx.fn.end()) {
+      // Unknown target - fall back to block-accurate containment. Only emit a local
+      // goto when a block actually covers the target (so its label is emitted);
+      // size-only coverage of a neighbour's shared tail must become a tail call.
+      if (ctx.fn.containsAddressInBlock(target)) {
         ctx.println("\tgoto loc_{:X};", target);
       } else {
         REXCODEGEN_WARN("Unresolved b target 0x{:08X} from 0x{:08X}", target, ctx.base);

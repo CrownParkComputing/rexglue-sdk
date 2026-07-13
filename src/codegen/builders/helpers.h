@@ -387,12 +387,24 @@ inline bool isMMIOUpperBits(uint32_t imm) {
  */
 inline void emitBranchWithBoundsCheck(BuilderContext& ctx, uint32_t target,
                                       std::string_view condition, std::string_view instr_name) {
-  if (target < ctx.fn.base() || target >= ctx.fn.end()) {
+  // Block-accurate: only a local goto when a block actually covers the target.
+  if (ctx.fn.containsAddressInBlock(target)) {
+    ctx.println("\tif ({}) goto loc_{:X};", condition, target);
+    return;
+  }
+  // Not a local label (e.g. a shared epilogue that lives in a neighbouring
+  // function). If it resolves to a callable function, tail-call it under the
+  // condition so register-restoring epilogues still run; else warn + return.
+  auto kind = ctx.graph().classifyTarget(target, ctx.base, false);
+  if (kind == TargetKind::Function || kind == TargetKind::Import) {
+    ctx.println("\tif ({}) {{", condition);
+    ctx.emit_function_call(target);
+    ctx.println("\t\treturn;");
+    ctx.println("\t}}");
+  } else {
     REXCODEGEN_WARN("{} at {:X} branches outside function to {:X}", instr_name, ctx.base, target);
     ctx.println("\tif ({}) {{ /* branch to 0x{:X} outside function */ return; }}", condition,
                 target);
-  } else {
-    ctx.println("\tif ({}) goto loc_{:X};", condition, target);
   }
 }
 

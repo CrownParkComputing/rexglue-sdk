@@ -264,6 +264,92 @@ void discoverAllFunctions(CodegenContext& ctx) {
   }
 
   REXCODEGEN_TRACE("Analyze: {} total functions after vtable scan", graph.functionCount());
+
+  // --- Promote cross-function shared-tail branch targets to entry points ---
+  // Optimized PPC binaries share function epilogues: one function `b`s into the
+  // middle of a neighbouring function (a shared register-restore + return tail).
+  // Such a target has no block in the branching function, so it cannot be emitted
+  // as a local `goto loc_X` (the label only exists in the owner) -> dangling goto
+  // / compile error. Promote each such target to its own entry so the branch
+  // resolves during Merge as a tail call instead. Runs to a fixed point; the
+  // isEntryPoint guard makes it idempotent (promoted targets are skipped).
+  {
+    const size_t maxIters = REXCVAR_GET(max_discovery_iterations);
+    for (size_t pass = 0; pass < maxIters; pass++) {
+      // 1. Promote cross-function mid-function branch targets to their own entry.
+      std::vector<uint32_t> promote;
+      for (const auto& [addr, node] : graph.functions()) {
+        for (const auto& uj : node->unresolvedJumps()) {
+          if (uj.isCall)
+            continue;  // bl calls are resolved elsewhere
+          uint32_t target = uj.target;
+          if (graph.isEntryPoint(target) || graph.isImport(target))
+            continue;
+          if (binary.isInImportExportRange(target))
+            continue;
+          const FunctionNode* owner = graph.getFunctionContaining(target);
+          // Only promote a target that lands strictly inside a DIFFERENT function
+          // at a non-entry address (a genuine shared tail). Own-function targets
+          // are internal labels; targets with no owner are left for later phases.
+          if (owner && owner->base() != node->base() && target != owner->base()) {
+            promote.push_back(target);
+          }
+        }
+      }
+      size_t promoted = 0;
+      for (uint32_t target : promote) {
+        if (graph.isEntryPoint(target))
+          continue;  // added earlier in this same batch
+        graph.addFunction(target, 4, FunctionAuthority::DISCOVERED, true);
+        promoted++;
+      }
+      if (promoted > 0) {
+        // Re-discover so the freshly promoted entries get their own blocks.
+        size_t it = 0;
+        while (it < maxIters) {
+          it++;
+          auto knownFunctions = buildKnownFunctions(graph);
+          if (discoverPendingFunctions(ctx, knownFunctions) == 0)
+            break;
+        }
+      }
+
+      // 2. Directly turn every cross-function tail branch whose target is now an
+      //    entry into a tail-call edge. tryResolveAgainst()/Merge only resolve
+      //    NON-sealed functions, but the branching function is often sealed by
+      //    the time we promote (PDATA/early seal), which would otherwise leave a
+      //    REX_FATAL. addTailCall has no seal guard, so wire the edge ourselves
+      //    (both conditional and unconditional; findCallTarget keys off the site).
+      size_t resolvedNow = 0;
+      for (const auto& [addr, nodePtr] : graph.functions()) {
+        FunctionNode* node = nodePtr.get();
+        std::vector<std::pair<uint32_t, uint32_t>> toResolve;  // (site, target)
+        for (const auto& uj : node->unresolvedJumps()) {
+          if (uj.isCall)
+            continue;
+          FunctionNode* tgt = graph.getFunction(uj.target);
+          if (tgt && tgt->base() != node->base()) {
+            toResolve.emplace_back(uj.site, uj.target);
+          }
+        }
+        for (const auto& [site, target] : toResolve) {
+          graph.addTailCallToFunction(node->base(), site,
+                                      CallTarget::function(graph.getFunction(target)));
+          graph.removeUnresolvedJumpFromFunction(node->base(), site);
+          resolvedNow++;
+        }
+      }
+
+      if (promoted == 0 && resolvedNow == 0)
+        break;
+
+      REXCODEGEN_DEBUG("Analyze: shared-tail pass {}: promoted {}, wired {} cross-fn tail-call(s)",
+                       pass + 1, promoted, resolvedNow);
+    }
+  }
+
+  REXCODEGEN_TRACE("Analyze: {} total functions after shared-tail promotion",
+                   graph.functionCount());
 }
 
 //=============================================================================

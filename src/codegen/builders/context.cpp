@@ -241,6 +241,19 @@ void BuilderContext::emit_function_call(uint32_t address) {
     return;
   }
 
+  // No pre-resolved site edge. If the raw target is itself a known function entry
+  // (e.g. a shared epilogue promoted to its own function, reached from an
+  // overlapping block copy that never received the per-site edge), call it by name.
+  if (const auto* directFn = graph().getFunction(address)) {
+    const auto& name = directFn->name();
+    if (cfg.nonVolatileRegistersAsLocalVariables &&
+        (name.find("__rest") == 0 || name.find("__save") == 0)) {
+      return;  // handled by local variable tracking
+    }
+    println("\t{}(ctx, base);", name);
+    return;
+  }
+
   // No pre-resolved target found - this is an error
   REXCODEGEN_ERROR("Unresolved function 0x{:08X} from 0x{:08X} (no CallTarget in FunctionNode)",
                    address, base);
@@ -282,6 +295,14 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
           println("\t\treturn;");
           println("\t}}");
         }
+      } else if (const auto* directFn = graph().getFunction(target)) {
+        // No per-site edge, but the target is a known function entry (e.g. a
+        // promoted shared epilogue reached from an overlapping copy) - emit the
+        // conditional tail call directly by name.
+        println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
+        println("\t\t{}(ctx, base);", directFn->name());
+        println("\t\treturn;");
+        println("\t}}");
       } else {
         REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X} (no CallTarget)",
                          target, base);

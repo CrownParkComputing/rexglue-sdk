@@ -172,6 +172,26 @@ bool FunctionNode::containsAddress(uint32_t addr) const {
   return false;
 }
 
+bool FunctionNode::containsAddressInBlock(uint32_t addr) const {
+  // Overall bounds first (matches containsAddress).
+  if (addr < base_ || addr >= base_ + size_) {
+    return false;
+  }
+  // A blockless function emits a stub with no labels; nothing to jump into.
+  if (blocks_.empty()) {
+    return false;
+  }
+  for (const auto& block : blocks_) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  // Intentionally NO CONFIG/PDATA declared-size fallback here (unlike
+  // containsAddress). If no discovered block covers addr, no `loc_addr:` label is
+  // emitted, so a branch to it must NOT be classified as an internal label/goto.
+  return false;
+}
+
 void FunctionNode::addLabel(uint32_t addr) {
   labels_.insert(addr);
 }
@@ -257,8 +277,10 @@ bool FunctionNode::tryResolveAgainstImport(uint32_t importAddr, const std::strin
 }
 
 bool FunctionNode::tryResolveAsInternalLabel(uint32_t target) {
-  // Check if target is within our blocks
-  if (!containsAddress(target)) {
+  // Only an internal label if an actual block covers it (so `loc_target:` will be
+  // emitted). Size-only coverage of another function's shared tail must fall
+  // through to function-entry / tail-call resolution instead.
+  if (!containsAddressInBlock(target)) {
     return false;
   }
 
@@ -920,6 +942,12 @@ void FunctionGraph::addTailCallToFunction(uint32_t entry, uint32_t site, CallTar
   }
 }
 
+void FunctionGraph::removeUnresolvedJumpFromFunction(uint32_t entry, uint32_t site) {
+  if (auto* node = getFunction(entry)) {
+    node->removeUnresolvedJump(site);
+  }
+}
+
 void FunctionGraph::addJumpTableToFunction(uint32_t entry, JumpTable jt) {
   if (auto* node = getFunction(entry)) {
     node->addJumpTable(std::move(jt));
@@ -1188,16 +1216,22 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
     return isCallInstruction ? TargetKind::Function : TargetKind::InternalLabel;
   }
 
-  // Case 3: Target is a DIFFERENT function's entry point - this is a call/tail-call
-  // This handles cases where a small thunk function branches to another function
-  // whose entry point happens to fall within the thunk's address range
+  // Case 3: Target is a DIFFERENT function's entry point -> call/tail-call.
+  // Checked before the internal-block test: with overlapping functions sharing an
+  // epilogue, several functions' blocks span the same promoted-tail address, so an
+  // entry-point target must resolve to a (direct) tail call from ALL of them rather
+  // than a `goto` into a label only one of them emits. emit_function_call /
+  // emit_conditional_branch fall back to a by-name call when there is no site edge.
   if (isEntryPoint(target)) {
     return TargetKind::Function;
   }
 
   // Case 4: Target is inside caller's function -> InternalLabel
-  // For bl, this would be a rare PIC code pattern
-  if (callerFn && callerFn->containsAddress(target)) {
+  // For bl, this would be a rare PIC code pattern.
+  // Block-accurate: a target only covered by the caller's declared size (e.g. a
+  // shared epilogue that lives in a neighbouring function and was NOT promoted) has
+  // no emitted `loc_target:` label, so it must NOT be treated as an internal label.
+  if (callerFn && callerFn->containsAddressInBlock(target)) {
     return TargetKind::InternalLabel;
   }
 

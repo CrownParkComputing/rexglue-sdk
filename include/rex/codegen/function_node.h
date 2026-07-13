@@ -108,6 +108,12 @@ class FunctionNode {
   // Blocks
   const std::vector<Block>& blocks() const { return blocks_; }
   bool containsAddress(uint32_t addr) const;
+  // Like containsAddress(), but requires an actual discovered block to cover addr
+  // (NO PDATA/CONFIG declared-size trust fallback). Branch classification must use
+  // this: a `goto loc_X` is only valid when `loc_X:` is actually emitted, and labels
+  // are only emitted for addresses inside this function's blocks(). Using the
+  // size-trust path here produces dangling cross-function gotos into shared epilogues.
+  bool containsAddressInBlock(uint32_t addr) const;
 
   // Check if address is within overall function bounds (ignores blocks)
   // Use this for branch target detection where address may be in a gap between blocks

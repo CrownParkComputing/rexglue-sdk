@@ -124,6 +124,9 @@ class FunctionGraph {
 
   // Add a resolved tail call to a function
   void addTailCallToFunction(uint32_t entry, uint32_t site, CallTarget target);
+  // Drop a still-unresolved jump from a function (used after wiring a tail-call
+  // edge directly, so Validate doesn't flag it and the function can seal).
+  void removeUnresolvedJumpFromFunction(uint32_t entry, uint32_t site);
 
   // Add a jump table to a function
   void addJumpTableToFunction(uint32_t entry, JumpTable jt);

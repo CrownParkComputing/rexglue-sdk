@@ -344,9 +344,44 @@ bool Runtime::SetupVfs() {
     REXSYS_DEBUG("  Registered NullDevice for \\Device\\Harddisk0\\{{Partition0,Cache0,Cache1}}");
   }
 
-  // NOTE: Do NOT register a device for cache: paths
-  // Games handle "device not found" gracefully but don't handle actual device
-  // errors (like NAME_COLLISION) well. Let cache: fail cleanly.
+  // Mount the cache devices, as xenia does (its mount_cache defaults to true).
+  //
+  // This tree previously left cache: unmounted on the theory that games handle "device not
+  // found" gracefully. They do not always: Bionic Commando Rearmed opens cache:\ during startup
+  // and, when it gets [no device], renders forever without ever advancing.
+  //
+  // cache: MUST be registered AFTER cache0:/cache1: — VirtualFileSystem::ResolvePath matches a
+  // device by path prefix, so "\CACHE" would otherwise swallow "\CACHE0" and "\CACHE1".
+  {
+    const auto cache_root = abs_game_root.parent_path() / "cache";
+    const struct {
+      const char* mount;
+      const char* link;
+      const char* subdir;
+    } kCaches[] = {
+        {"\\CACHE0", "cache0:", "cache0"},
+        {"\\CACHE1", "cache1:", "cache1"},
+        {"\\CACHE", "cache:", "cache"},
+    };
+    for (const auto& c : kCaches) {
+      std::error_code ec;
+      const auto host_dir = cache_root / c.subdir;
+      std::filesystem::create_directories(host_dir, ec);
+      if (ec) {
+        REXSYS_ERROR("Runtime::SetupVfs: could not create cache dir {}: {}", host_dir.string(),
+                     ec.message());
+        continue;
+      }
+      auto cache_device =
+          std::make_unique<rex::filesystem::HostPathDevice>(c.mount, host_dir, false);
+      if (cache_device->Initialize() && file_system_->RegisterDevice(std::move(cache_device))) {
+        file_system_->RegisterSymbolicLink(c.link, c.mount);
+      } else {
+        REXSYS_ERROR("Runtime::SetupVfs: failed to register {}", c.link);
+      }
+    }
+    REXSYS_INFO("  Mounted cache:, cache0:, cache1: at {}", cache_root.string());
+  }
 
   return true;
 }

@@ -883,10 +883,17 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
     y1 = y0 + int32_t(xenos::kMaxResolveSize);
   }
 
-  assert_true(x0 < x1 && y0 < y1);
+  // If the region is empty or inverted after clipping (e.g., entirely outside
+  // EDRAM bounds due to window offset), treat as a no-op rather than an error —
+  // upstream Xenia fix (draw_util.cc). Predicated-tiling games (SoulCalibur II:
+  // 3 horizontal 720p tiles at 4xMSAA) issue every tile's resolve UNPREDICATED
+  // in every tile pass, so two thirds of resolves legitimately clip to nothing.
+  // Returning false here made those draws "Failed in backend" ~13000 times per
+  // run and corrupted the frame; the caller already no-ops on zero size.
   if (x0 >= x1 || y0 >= y1) {
-    REXGPU_ERROR("Resolve region is empty");
-    return false;
+    info_out.coordinate_info.width_div_8 = 0;
+    info_out.height_div_8 = 0;
+    return true;
   }
 
   info_out.coordinate_info.width_div_8 = uint32_t(x1 - x0) >> xenos::kResolveAlignmentPixelsLog2;
@@ -948,13 +955,19 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
   uint32_t copy_dest_base_adjusted = rb_copy_dest_base;
   uint32_t copy_dest_extent_start, copy_dest_extent_end;
   auto rb_copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
-  uint32_t copy_dest_pitch_aligned_div_32 =
-      (rb_copy_dest_pitch.copy_dest_pitch + (xenos::kTextureTileWidthHeight - 1)) >>
-      xenos::kTextureTileWidthHeightLog2;
-  info_out.copy_dest_coordinate_info.pitch_aligned_div_32 = copy_dest_pitch_aligned_div_32;
+  // Tiled addressing is a function of the pitch/height, and the guest's storage is laid
+  // out with pitch and height ALIGNED UP to 32. Pass the aligned values to the tiling math
+  // (upstream Xenia does this) — passing the raw register values placed resolved pixels in
+  // the wrong tiles, which is what corrupted every render-to-texture surface (SoulCalibur
+  // II's menu/versus/FMV screens, Choplifter's white sprites).
+  const uint32_t copy_dest_pitch_aligned =
+      rex::align(uint32_t(rb_copy_dest_pitch.copy_dest_pitch), xenos::kTextureTileWidthHeight);
+  const uint32_t copy_dest_height_aligned =
+      rex::align(uint32_t(rb_copy_dest_pitch.copy_dest_height), xenos::kTextureTileWidthHeight);
+  info_out.copy_dest_coordinate_info.pitch_aligned_div_32 =
+      copy_dest_pitch_aligned >> xenos::kTextureTileWidthHeightLog2;
   info_out.copy_dest_coordinate_info.height_aligned_div_32 =
-      (rb_copy_dest_pitch.copy_dest_height + (xenos::kTextureTileWidthHeight - 1)) >>
-      xenos::kTextureTileWidthHeightLog2;
+      copy_dest_height_aligned >> xenos::kTextureTileWidthHeightLog2;
   const FormatInfo& dest_format_info = *FormatInfo::Get(dest_format);
   if (is_depth || dest_format_info.type == FormatType::kResolvable) {
     uint32_t bpp_log2 = rex::log2_floor(dest_format_info.bits_per_pixel >> 3);
@@ -974,28 +987,25 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
       // The base pointer is already adjusted to the Z / 8 (copy_dest_slice is
       // 3-bit).
       copy_dest_base_adjusted += texture_util::GetTiledOffset3D(
-          int32_t(dest_base_x), int32_t(dest_base_y), 0, rb_copy_dest_pitch.copy_dest_pitch,
-          rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+          int32_t(dest_base_x), int32_t(dest_base_y), 0, copy_dest_pitch_aligned,
+          copy_dest_height_aligned, bpp_log2);
       copy_dest_extent_start =
           rb_copy_dest_base + texture_util::GetTiledAddressLowerBound3D(
                                   uint32_t(x0), uint32_t(y0), rb_copy_dest_info.copy_dest_slice,
-                                  rb_copy_dest_pitch.copy_dest_pitch,
-                                  rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+                                  copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2);
       copy_dest_extent_end =
           rb_copy_dest_base + texture_util::GetTiledAddressUpperBound3D(
                                   uint32_t(x1), uint32_t(y1), rb_copy_dest_info.copy_dest_slice + 1,
-                                  rb_copy_dest_pitch.copy_dest_pitch,
-                                  rb_copy_dest_pitch.copy_dest_height, bpp_log2);
+                                  copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2);
     } else {
       copy_dest_base_adjusted += texture_util::GetTiledOffset2D(
-          int32_t(dest_base_x), int32_t(dest_base_y), rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
+          int32_t(dest_base_x), int32_t(dest_base_y), copy_dest_pitch_aligned, bpp_log2);
       copy_dest_extent_start =
-          rb_copy_dest_base +
-          texture_util::GetTiledAddressLowerBound2D(uint32_t(x0), uint32_t(y0),
-                                                    rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
-      copy_dest_extent_end = rb_copy_dest_base + texture_util::GetTiledAddressUpperBound2D(
-                                                     uint32_t(x1), uint32_t(y1),
-                                                     rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
+          rb_copy_dest_base + texture_util::GetTiledAddressLowerBound2D(
+                                  uint32_t(x0), uint32_t(y0), copy_dest_pitch_aligned, bpp_log2);
+      copy_dest_extent_end =
+          rb_copy_dest_base + texture_util::GetTiledAddressUpperBound2D(
+                                  uint32_t(x1), uint32_t(y1), copy_dest_pitch_aligned, bpp_log2);
     }
   } else {
     REXGPU_ERROR("Tried to resolve to format {}, which is not a ColorFormat",

@@ -50,6 +50,11 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(dev_overlays, false, "UI",
+                    "Register the developer overlay hotkeys (F3 debug, F4 settings, F7 "
+                    "achievements, backtick console). Off by default: games take real keyboard "
+                    "input and these keys collide with it.");
+
 namespace rex {
 
 // --- ReXApp ---
@@ -385,6 +390,13 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
   // lazily on the first Draw instead).
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
+  // Standalone game builds don't want the developer overlays: games take real
+  // keyboard input, and F3/F4/F7/backtick collide with it (a player hitting F4
+  // mid-game gets the settings modal). --dev_overlays=true restores them.
+  if (!REXCVAR_GET(dev_overlays)) {
+    OnCreateDialogs(imgui_drawer_.get());
+    return;
+  }
   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
     if (debug_overlay_) {
       debug_overlay_.reset();

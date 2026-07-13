@@ -14,8 +14,11 @@
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 
 #include <signal.h>
+#include <unistd.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <rex/assert.h>
@@ -39,6 +42,14 @@ constexpr size_t kMaxHandlerCount = 8;
 // All custom handlers, left-aligned and null terminated.
 // Executed in order.
 std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
+
+// Diagnostic, opt-in via REX_FATAL_ON_UNHANDLED_FAULT=1 (read ONCE in Install(), never
+// inside the signal handler — getenv/lazy-static guards are not async-signal-safe).
+// When set, an unhandled SIGSEGV/SIGILL reports itself and re-raises instead of the
+// default behaviour of returning without advancing RIP, which silently re-executes the
+// faulting instruction forever (a pegged, logless, undying thread — this masked the
+// null-object fault in Bubble Bobble / SoulCalibur / Geometry Wars / Space Giraffe).
+bool fatal_on_unhandled_fault_ = false;
 
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
@@ -205,10 +216,36 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // Nothing claimed this fault. Default (flag off): legacy behaviour — return without
+  // advancing RIP, i.e. silently retry the faulting instruction. With the flag on,
+  // report and die at the fault so a core dump lands at the offending instruction.
+  if (fatal_on_unhandled_fault_) {
+    char msg[256];
+    uint64_t pc = 0;
+#if REX_ARCH_AMD64
+    pc = thread_context.rip;
+#elif REX_ARCH_ARM64
+    pc = thread_context.pc;
+#endif
+    int n = snprintf(msg, sizeof(msg),
+                     "\n[REX FATAL] Unhandled signal %d: fault addr %p, host pc 0x%llx. "
+                     "Re-raising for a core dump.\n",
+                     signal_number, signal_info ? signal_info->si_addr : nullptr,
+                     (unsigned long long)pc);
+    if (n > 0) {
+      ssize_t ignored = write(STDERR_FILENO, msg, size_t(n));
+      (void)ignored;
+    }
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+  }
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
   if (!signal_handlers_installed_) {
+    const char* fatal_env = std::getenv("REX_FATAL_ON_UNHANDLED_FAULT");
+    fatal_on_unhandled_fault_ = fatal_env && fatal_env[0] == '1';
     struct sigaction signal_handler;
 
     std::memset(&signal_handler, 0, sizeof(signal_handler));

@@ -13,7 +13,11 @@
  *              role as a function dispatch table rather than a CPU emulator.
  */
 
+#include <mutex>
+#include <unordered_set>
+
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
@@ -22,6 +26,14 @@
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
+
+// Bringup aid: when set, an indirect call to an unrecompiled address logs the
+// target once (deduplicated, prefixed [UNREGFN]) and returns instead of aborting.
+// A single run then surfaces MANY missing functions to batch-add as [functions]
+// hints, rather than crashing on the first one. Behaviour past the skipped call
+// is undefined (registers unchanged) — this is for discovery, not for play.
+REXCVAR_DEFINE_BOOL(unregistered_function_nonfatal, false, "CPU",
+                    "Log unregistered indirect-call targets and continue (bringup discovery)");
 
 namespace rex::runtime {
 
@@ -35,8 +47,25 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 }  // namespace
 
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
+  const uint32_t target = ctx.last_indirect_target;
+  if (REXCVAR_GET(unregistered_function_nonfatal)) {
+    static std::mutex mtx;
+    static std::unordered_set<uint32_t> seen;
+    bool is_new;
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      is_new = seen.insert(target).second;
+    }
+    if (is_new) {
+      REXLOG_ERROR("[UNREGFN] 0x{:08X}", target);
+    }
+    // Return a null/zero result so callers that null-check the (missing)
+    // function's return value take their graceful path instead of dereferencing
+    // garbage — this lets one discovery run reach many more missing functions.
+    ctx.r3.u64 = 0;
+    return;
+  }
+  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}", target);
 }
 
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {

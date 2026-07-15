@@ -713,7 +713,16 @@ bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uin
       "(+{:08X} thunk reserve)",
       table_base, table_size, code_base, code_base + code_size, kThunkReserveSize);
 
-  if (!heaps_.v80000000.AllocFixed(
+  // The table lives just past the module image, so it belongs to whichever guest
+  // heap covers that address — NOT always v80000000. A module based at 0x92000000
+  // (e.g. Split/Second's DEFAULT.XEX launcher) puts its table in the v90000000
+  // heap; hardcoding v80000000 fails AllocFixed as out-of-range.
+  auto* table_heap = LookupHeap(table_base);
+  if (!table_heap) {
+    REXSYS_ERROR("No guest heap covers function table base {:08X}", table_base);
+    return false;
+  }
+  if (!table_heap->AllocFixed(
           table_base, table_size, 0x10000,
           memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
           memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
@@ -757,7 +766,10 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
   REXSYS_DEBUG("Destroying function table at {:08X}, size {:08X} for code {:08X}-{:08X}",
                table_base, table_size, logged_code_base, logged_code_base + logged_code_size);
 
-  heaps_.v80000000.Release(table_base);
+  // Free from the same heap the table was allocated in (see InitializeFunctionTable).
+  if (auto* table_heap = LookupHeap(table_base)) {
+    table_heap->Release(table_base);
+  }
   return true;
 }
 

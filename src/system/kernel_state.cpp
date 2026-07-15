@@ -16,9 +16,11 @@
 
 #include <fmt/format.h>
 #include <rex/assert.h>
+#include <rex/filesystem.h>
 #include <rex/image_info.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/platform.h>
 #include <rex/ppc/function.h>
 #include <rex/runtime.h>
 #include <rex/stream.h>
@@ -758,10 +760,24 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
       }
     }
 
+    // Resolve the recompiled module's shared library to a real, platform-correct
+    // path next to the executable. The registry stores a bare base name (e.g.
+    // "splitsecond_SPLITSECOND1"); Windows' LoadLibrary auto-appends .dll, but
+    // POSIX dlopen does NOT add the lib prefix / .so suffix, so a bare name fails
+    // to load on Linux/macOS. Mirror LoadGpuPlugin's filename convention.
+#if REX_PLATFORM_WIN32
+    std::string lib_file = recomp->shared_lib_name + ".dll";
+#elif REX_PLATFORM_MAC
+    std::string lib_file = "lib" + recomp->shared_lib_name + ".dylib";
+#else
+    std::string lib_file = "lib" + recomp->shared_lib_name + ".so";
+#endif
+    auto lib_path = rex::filesystem::GetExecutableFolder() / lib_file;
+
     rex::platform::DynamicLibrary library_local;
-    if (!library_local.Load(std::filesystem::path(recomp->shared_lib_name),
-                            rex::platform::SymbolResolution::kImmediate)) {
-      REXSYS_ERROR("Failed to load shared library for module '{}'", recomp->pe_name);
+    if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {
+      REXSYS_ERROR("Failed to load shared library for module '{}' ({})", recomp->pe_name,
+                   lib_path.string());
     } else {
       auto register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
           library_local.GetRawSymbol("ReXModule_Register"));

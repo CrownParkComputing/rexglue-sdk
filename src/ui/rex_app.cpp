@@ -18,6 +18,7 @@
 #include <rex/ui/flags.h>
 #include <rex/kernel/crt/heap.h>
 #include <rex/filesystem.h>
+#include <rex/string/utf8.h>
 #include <rex/logging/sink.h>
 #include <rex/logging.h>
 #include <rex/ui/overlay/achievement_toast.h>
@@ -276,10 +277,30 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     std::replace(host_tail.begin(), host_tail.end(), '\\', '/');
     auto xex_host = paths.game_data_root / host_tail;
     if (!std::filesystem::is_regular_file(xex_host)) {
-      auto msg = fmt::format("Entrypoint XEX not found: {}", xex_host.string());
-      REXLOG_ERROR("{}", msg);
-      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
-      return false;
+      // Xbox 360's filesystem is case-insensitive. A raw disc dump can store the
+      // boot module as DEFAULT.XEX while we request the canonical lowercase
+      // default.xex, so an exact host-path check spuriously fails on Linux. Fall
+      // back to a case-insensitive scan of the containing directory — the same
+      // tolerance HostPathDevice::ResolvePath applies to the actual load below.
+      bool found = false;
+      std::error_code ec;
+      const auto dir = xex_host.parent_path();
+      const auto want = rex::path_to_utf8(xex_host.filename());
+      if (std::filesystem::is_directory(dir, ec)) {
+        for (const auto& de : std::filesystem::directory_iterator(dir, ec)) {
+          if (de.is_regular_file(ec) &&
+              rex::string::utf8_equal_case(rex::path_to_utf8(de.path().filename()), want)) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        auto msg = fmt::format("Entrypoint XEX not found: {}", xex_host.string());
+        REXLOG_ERROR("{}", msg);
+        rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+        return false;
+      }
     }
   }
 

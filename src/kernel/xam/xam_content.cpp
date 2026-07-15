@@ -23,6 +23,16 @@
 
 REXCVAR_DEFINE_UINT32(license_mask, 0, "Kernel", "Set license mask for activated content");
 
+// [RR6 SAVE] Some titles (Ridge Racer 6) open their save with OPEN_EXISTING only and
+// never issue a CREATE — so on a fresh profile the open returns PATH_NOT_FOUND and the
+// game reports the save as corrupt instead of creating one. When this is set, an
+// OPEN_EXISTING on a missing package is treated like OPEN_ALWAYS: create it and report
+// disposition=Create so the game initialises a fresh save. Default OFF (no behaviour
+// change for other titles).
+REXCVAR_DEFINE_BOOL(content_open_existing_creates, false, "Kernel",
+                    "Treat XamContentCreate OPEN_EXISTING on a missing package as OPEN_ALWAYS "
+                    "(create it) instead of returning PATH_NOT_FOUND");
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -135,6 +145,17 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
     xuid = 0;
   }
 
+  // [RR6 SAVE DIAG] log exactly what the game asks for.
+  {
+    uint32_t diag_ctype = static_cast<uint32_t>(content_data.content_type.get());
+    uint32_t diag_title = static_cast<uint32_t>(content_data.title_id.get());
+    std::string diag_fname = content_data.file_name();
+    REXKRNL_WARN(
+        "[SAVEDIAG] XamContentCreate root='{}' flags={:08X} (op={}) content_type={:08X} "
+        "file_name='{}' title_id={:08X} xuid={:016X}",
+        root_name.value(), flags, flags & 0xF, diag_ctype, diag_fname, diag_title, xuid);
+  }
+
   auto content_manager = REX_KERNEL_STATE()->content_manager();
 
   if (overlapped_ptr && disposition_ptr) {
@@ -174,7 +195,12 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
       case 3:  // OPEN_EXISTING
                // Open only if exists.
         if (!content_manager->ContentExists(xuid, content_data)) {
-          result = X_ERROR_PATH_NOT_FOUND;
+          if (REXCVAR_GET(content_open_existing_creates)) {
+            // [RR6 SAVE] create-on-open workaround (see cvar def above).
+            disposition = kDispositionState::Create;
+          } else {
+            result = X_ERROR_PATH_NOT_FOUND;
+          }
         } else {
           disposition = kDispositionState::Open;
         }

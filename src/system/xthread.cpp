@@ -1446,6 +1446,16 @@ void XHostThread::Execute() {
   REXSYS_INFO("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)", thread_id_,
               handle(), thread_name_, thread_->system_id());
 
+  // A host thread still RUNS GUEST CODE (the audio worker drives guest callbacks through
+  // FunctionDispatcher::Execute), and MXCSR is per-thread. XThread::Execute() seeds the
+  // context's cached csr from the host and masks the FP exceptions; without the same call
+  // here, PPCContext::fpscr.csr is left UNINITIALISED (FPSCRRegister has no default member
+  // initialiser). The first guest flush-mode/rounding change then does setcsr(garbage),
+  // clearing the MXCSR exception-mask bits (7..12) and UNMASKING every FP exception — so the
+  // next merely-inexact op traps. Ridge Racer 6 died this way: SIGFPE on a `vcvtsi2sd` (an
+  // int->double convert, which can only raise Precision) on the Audio Worker thread.
+  thread_state_->context()->fpscr.InitHost();
+
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
 

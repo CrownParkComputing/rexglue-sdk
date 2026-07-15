@@ -3375,7 +3375,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
             color_rt.src_alpha_blend_factor != PipelineBlendFactor::kOne ||
             color_rt.dst_alpha_blend_factor != PipelineBlendFactor::kZero ||
             color_rt.alpha_blend_op != xenos::BlendOp::kAdd) {
-          color_blend_attachment.blendEnable = VK_TRUE;
+          color_blend_attachment.blendEnable = getenv("REX_NO_BLEND") ? VK_FALSE : VK_TRUE;
           color_blend_attachment.srcColorBlendFactor =
               kBlendFactorMap[uint32_t(color_rt.src_color_blend_factor)];
           color_blend_attachment.dstColorBlendFactor =
@@ -3388,6 +3388,23 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
           color_blend_attachment.alphaBlendOp = kBlendOpMap[uint32_t(color_rt.alpha_blend_op)];
         }
         color_blend_attachment.colorWriteMask = VkColorComponentFlags(color_rt.color_write_mask);
+        // [TEMP DIAG] blend state per bound RT format
+        if (getenv("REX_LOG_RTBLEND") && color_rt_index == 0) {
+          static std::set<uint64_t> seen;
+          uint64_t k = (uint64_t(description.render_pass_key.color_0_view_format) << 32) |
+                       (uint64_t(color_rt.color_write_mask) << 24) |
+                       (uint64_t(color_rt.src_color_blend_factor) << 16) |
+                       (uint64_t(color_rt.dst_color_blend_factor) << 8) |
+                       uint64_t(color_rt.color_blend_op);
+          if (seen.insert(k).second) {
+            REXGPU_WARN(
+                "[RTBLEND] rt0_fmt={} blendEnable={} wmask={} csrc={} cdst={} cop={}",
+                uint32_t(description.render_pass_key.color_0_view_format),
+                uint32_t(color_blend_attachment.blendEnable),
+                uint32_t(color_rt.color_write_mask), uint32_t(color_rt.src_color_blend_factor),
+                uint32_t(color_rt.dst_color_blend_factor), uint32_t(color_rt.color_blend_op));
+          }
+        }
       }
     }
     color_blend_state.attachmentCount = 32 - rex::lzcnt(color_rts_used);

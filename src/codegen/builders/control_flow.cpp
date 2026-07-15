@@ -168,8 +168,19 @@ bool build_bctr(BuilderContext& ctx) {
       }
     }
 
+    // Fall back to a REAL indirect branch rather than trapping. `bctr` means "jump to
+    // CTR"; the switch is only an optimisation over a jump table we *think* we decoded.
+    // When that detection is wrong, __builtin_trap() emits a bare `ud2`: the guest dies on
+    // SIGILL with no log, and because an unclaimed fault resumes at the same instruction it
+    // presents as a thread pegged at 100% forever (Ridge Racer 6 died exactly this way — its
+    // dispatch scales the index by 4, `rlwinm r10,r10,2,0,29`, so the detector latched onto
+    // r11, which holds the *loaded target address*, not the index; every real dispatch then
+    // landed in `default`). Dispatching on CTR is what the hardware does, so this is correct
+    // for a mis-detected table and unreachable for a correctly-detected one.
     ctx.println("\tdefault:");
-    ctx.println("\t\t__builtin_trap(); // Switch case out of range");
+    ctx.println("\t\tREX_CALL_INDIRECT_FUNC({}.u32); // switch fell through; bctr = jump to CTR",
+                ctx.ctr());
+    ctx.println("\t\treturn;");
     ctx.println("\t}}");
 
     ctx.reset_switch_table();

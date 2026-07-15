@@ -1227,6 +1227,28 @@ void VulkanRenderTargetCache::InitializeTraceCompleteDownloads() {
   ResetTraceDownload();
 }
 
+// [TEMP DIAG]
+void VulkanRenderTargetCache::DebugWriteEdramDownload(const char* path) {
+  if (edram_snapshot_download_buffer_memory_ == VK_NULL_HANDLE) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  void* mapping = nullptr;
+  if (dfn.vkMapMemory(device, edram_snapshot_download_buffer_memory_, 0, VK_WHOLE_SIZE, 0,
+                      &mapping) == VK_SUCCESS) {
+    FILE* f = fopen(path, "wb");
+    if (f) {
+      fwrite(mapping, 1, xenos::kEdramSizeBytes, f);
+      fclose(f);
+      REXGPU_WARN("[EDRAMRES] wrote {}", path);
+    }
+    dfn.vkUnmapMemory(device, edram_snapshot_download_buffer_memory_);
+  }
+  ResetTraceDownload();
+}
+
 void VulkanRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
   if (IsDrawResolutionScaled()) {
     // No 1:1 mapping.
@@ -1366,6 +1388,30 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
+      // [TEMP DIAG]
+      {
+        static const char* edram_env = getenv("REX_DUMP_EDRAM_RESOLVE_PATH");
+        static uint32_t n = 0;
+        static uint32_t all = 0;
+        uint32_t src_format = resolve_info.color_edram_info.format;
+        if (edram_env && ++all <= 20) {
+          REXGPU_WARN("[RESDIAG] resolve #{} is_depth={} color_fmt={} copy_src_select={}", all,
+                      uint32_t(resolve_info.color_edram_info.is_depth), src_format,
+                      uint32_t(resolve_info.rb_copy_control.copy_src_select));
+        }
+        if (edram_env && !resolve_info.color_edram_info.is_depth &&
+            (src_format == uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) ||
+             src_format ==
+                 uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16))) {
+          if (++n == 5) {
+            command_processor_.SubmitBarriers(true);
+            if (InitializeTraceSubmitDownloads()) {
+              command_processor_.DebugAwaitAllQueueOperationsCompletion();
+              DebugWriteEdramDownload(edram_env);
+            }
+          }
+        }
+      }
       bool direct_resolved = false;
       if (GetPath() == Path::kHostRenderTargets) {
         if (REXCVAR_GET(direct_host_resolve)) {

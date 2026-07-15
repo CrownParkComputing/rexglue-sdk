@@ -113,6 +113,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Returns true if any downloads were submitted to the command processor.
   bool InitializeTraceSubmitDownloads();
   void InitializeTraceCompleteDownloads();
+  void DebugWriteEdramDownload(const char* path);  // [TEMP DIAG]
   void RestoreEdramSnapshot(const void* snapshot);
 
   bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,

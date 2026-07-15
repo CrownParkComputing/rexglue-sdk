@@ -16,6 +16,8 @@
 #include <SPIRV/GLSL.std.450.h>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
+#include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/render_target/cache.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/util/draw.h>
@@ -515,6 +517,13 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
                                       id_vector_temp_),
           spv::NoPrecision);
       // The comparison function is not "always" - perform the alpha test.
+      // [NVIDIA tree-flicker fix] Fuzzy alpha epsilon: NVIDIA's alpha-test precision sits
+      // exactly on the leaf/background boundary and flip-flops frame-to-frame (RR6 2D
+      // foliage flicker). Comparing with an epsilon window instead of exactly makes it
+      // stable. Ported from the DXBC translator (dxbc_translator_om.cpp) where it was
+      // Vulkan-missing; controlled by --use_fuzzy_alpha_epsilon.
+      const bool fuzzy_alpha = REXCVAR_GET(use_fuzzy_alpha_epsilon);
+      const spv::Id fuzzy_epsilon = fuzzy_alpha ? builder_->makeFloatConstant(1e-3f) : spv::NoResult;
       // Handle "not equal" specially (specifically as "not equal" so it's true
       // for NaN, not "less or greater" which is false for NaN).
       SpirvBuilder::IfBuilder if_alpha_test_function_is_not_equal(
@@ -525,8 +534,21 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
       spv::Id alpha_test_result_not_equal;
       {
         // "Not equal" function.
-        alpha_test_result_not_equal = builder_->createBinOp(spv::OpFUnordNotEqual, type_bool_,
-                                                            alpha_test_alpha, alpha_test_reference);
+        if (fuzzy_alpha) {
+          // not-equal := NOT(|alpha - ref| < epsilon). FOrdLessThan is false for NaN, so
+          // the negation is true for NaN (matching the exact OpFUnordNotEqual behaviour).
+          spv::Id diff = builder_->createBinOp(spv::OpFSub, type_float_, alpha_test_alpha,
+                                               alpha_test_reference);
+          spv::Id absdiff = builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                                             GLSLstd450FAbs, diff);
+          spv::Id within = builder_->createBinOp(spv::OpFOrdLessThan, type_bool_, absdiff,
+                                                 fuzzy_epsilon);
+          alpha_test_result_not_equal =
+              builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, within);
+        } else {
+          alpha_test_result_not_equal = builder_->createBinOp(
+              spv::OpFUnordNotEqual, type_bool_, alpha_test_alpha, alpha_test_reference);
+        }
       }
       if_alpha_test_function_is_not_equal.makeBeginElse();
       spv::Id alpha_test_result_non_not_equal;
@@ -535,10 +557,31 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
         static const spv::Op kAlphaTestOps[] = {spv::OpFOrdLessThan, spv::OpFOrdEqual,
                                                 spv::OpFOrdGreaterThan};
         for (uint32_t i = 0; i < 3; ++i) {
+          spv::Id alpha_cmp;
+          if (fuzzy_alpha) {
+            // Fuzzy: less := (alpha - eps) < ref ; equal := |alpha - ref| < eps ;
+            // greater := ref < (alpha + eps).
+            if (i == 1) {
+              spv::Id diff = builder_->createBinOp(spv::OpFSub, type_float_, alpha_test_alpha,
+                                                   alpha_test_reference);
+              spv::Id absdiff = builder_->createUnaryBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs, diff);
+              alpha_cmp =
+                  builder_->createBinOp(spv::OpFOrdLessThan, type_bool_, absdiff, fuzzy_epsilon);
+            } else {
+              spv::Id biased = builder_->createBinOp(
+                  i == 0 ? spv::OpFSub : spv::OpFAdd, type_float_, alpha_test_alpha, fuzzy_epsilon);
+              alpha_cmp = (i == 0) ? builder_->createBinOp(spv::OpFOrdLessThan, type_bool_, biased,
+                                                           alpha_test_reference)
+                                   : builder_->createBinOp(spv::OpFOrdLessThan, type_bool_,
+                                                            alpha_test_reference, biased);
+            }
+          } else {
+            alpha_cmp = builder_->createBinOp(kAlphaTestOps[i], type_bool_, alpha_test_alpha,
+                                              alpha_test_reference);
+          }
           spv::Id alpha_test_comparison_result = builder_->createBinOp(
-              spv::OpLogicalAnd, type_bool_,
-              builder_->createBinOp(kAlphaTestOps[i], type_bool_, alpha_test_alpha,
-                                    alpha_test_reference),
+              spv::OpLogicalAnd, type_bool_, alpha_cmp,
               builder_->createBinOp(
                   spv::OpINotEqual, type_bool_,
                   builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, alpha_test_function,
@@ -1360,6 +1403,16 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
           builder_->getBuildPoint()->addInstruction(std::move(color_rgba_shuffle_op));
         }
 
+        // [TEMP DIAG] Force a known constant colour to separate "shader output
+        // red is wrong" from "something downstream of the shader is wrong".
+        if (getenv("REX_CONST_COLOR")) {
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeFloatConstant(0.125f));
+          id_vector_temp_.push_back(builder_->makeFloatConstant(0.25f));
+          id_vector_temp_.push_back(builder_->makeFloatConstant(0.5f));
+          id_vector_temp_.push_back(builder_->makeFloatConstant(1.0f));
+          color = builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+        }
         builder_->createStore(color, color_variable);
       }
     }

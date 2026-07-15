@@ -248,6 +248,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Returns the text to display in the GPU backend name in the window title.
   std::string GetWindowTitleText() const;
 
+  bool DebugAwaitAllQueueOperationsCompletion() { return AwaitAllQueueOperationsCompletion(); }
+
  protected:
   bool SetupContext() override;
   void ShutdownContext() override;

@@ -2988,6 +2988,21 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
           builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_uint_,
                                    "xe_var_fsi_color_written", const_uint_0_);
     }
+  } else {
+    // Host render targets - the color values are written directly to the
+    // Output variables, which, unlike the function-scoped variables used with
+    // fragment shader interlock, have no initializer. Guest pixel shaders don't
+    // necessarily write all the components of a color target (or write it at
+    // all on some execution paths), and the components left unwritten would
+    // otherwise contain undefined values - which end up in the render target
+    // because whether a component is written is controlled by the guest color
+    // write mask, not by whether the shader has actually written it. Initialize
+    // them to zero, like the fragment shader interlock path does.
+    for (spv::Id output_fragment_data_rt : output_or_var_fragment_data_) {
+      if (output_fragment_data_rt != spv::NoResult) {
+        builder_->createStore(const_float4_0_, output_fragment_data_rt);
+      }
+    }
   }
 
   if (edram_fragment_shader_interlock_ && FSI_IsDepthStencilEarly()) {

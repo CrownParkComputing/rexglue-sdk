@@ -2296,6 +2296,46 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     return;
   }
 
+  // [TEMP DIAG] Dump presented frames as PPM so rendering can be compared against a
+  // reference (xenia) without a screen grab. REX_DUMP_FRAME=<prefix>, dumps every
+  // REX_DUMP_FRAME_EVERY frames (default 150), up to 12 files: <prefix>_<frame>.ppm
+  {
+    static const char* dump_prefix = getenv("REX_DUMP_FRAME");
+    static const uint32_t dump_every =
+        getenv("REX_DUMP_FRAME_EVERY") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_EVERY"))) : 150u;
+    // REX_DUMP_FRAME_START: only begin dumping once this many frames have elapsed, so
+    // consecutive (EVERY=1) dumps can capture mid-race gameplay instead of boot logos.
+    static const uint32_t dump_start =
+        getenv("REX_DUMP_FRAME_START") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_START"))) : 0u;
+    static const uint32_t dump_max =
+        getenv("REX_DUMP_FRAME_MAX") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_MAX"))) : 12u;
+    static uint32_t frame_counter = 0;
+    static uint32_t dumped = 0;
+    ++frame_counter;
+    if (dump_prefix && dumped < dump_max && dump_every && frame_counter >= dump_start &&
+        (frame_counter % dump_every) == 0) {
+      ui::RawImage raw_image;
+      if (presenter->CaptureGuestOutput(raw_image)) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s_%04u.ppm", dump_prefix, frame_counter);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", raw_image.width, raw_image.height);
+          const uint8_t* src = raw_image.data.data();
+          for (uint32_t y = 0; y < raw_image.height; ++y) {
+            const uint8_t* row = src + size_t(y) * raw_image.stride;
+            for (uint32_t x = 0; x < raw_image.width; ++x) {
+              fwrite(row + size_t(x) * 4, 1, 3, f);
+            }
+          }
+          fclose(f);
+          ++dumped;
+          REXGPU_WARN("[DUMP] frame {} -> {}", frame_counter, path);
+        }
+      }
+    }
+  }
+
   // In case the swap command is the only one in the frame.
   if (!BeginSubmission(true)) {
     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");

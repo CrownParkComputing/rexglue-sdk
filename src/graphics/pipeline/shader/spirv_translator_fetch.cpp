@@ -1146,12 +1146,22 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // Stacked case.
           builder_->setBuildPoint(&block_dimension_stacked);
           spv::Id z_stacked = z_coordinate_ref;
+          spv::Id z_stacked_orig = z_stacked;
           assert_true(z_size != spv::NoResult);
           z_stacked =
               builder_->createNoContractionBinOp(spv::OpFMul, type_float_, z_stacked, z_size);
           if (z_offset != spv::NoResult) {
             z_stacked =
                 builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, z_stacked, z_offset);
+          }
+          // [Jetpac fix — xenia Gliniak 3a3f069 "[GPU] Added NaN->0 conversion in tfetch"]
+          // A NaN stacked-texture Z coordinate must become 0, otherwise the fetch samples
+          // garbage and the background renders black (Jetpac Refuelled missing backgrounds).
+          // Ported from the DXBC translator to the Vulkan/SPIR-V path.
+          {
+            spv::Id z_is_nan = builder_->createUnaryOp(spv::OpIsNan, type_bool_, z_stacked_orig);
+            z_stacked = builder_->createTriOp(spv::OpSelect, type_float_, z_is_nan,
+                                              builder_->makeFloatConstant(0.0f), z_stacked);
           }
           builder_->createBranch(&block_dimension_merge);
           // Select one of the two.

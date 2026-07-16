@@ -261,6 +261,20 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   ReportBinaryInfo(opts.reporter, entry_display_name,
                    *runtime->kernel_state()->GetExecutableModule()->xex_module());
 
+  // Snapshot each module's section bytes IMMEDIATELY after its own load, before
+  // any later module load can clobber them. The 360 memory map aliases the
+  // 0x80000000 (64K-page) and 0x90000000 (4K-page) ranges onto the SAME physical
+  // backing, so two modules based in aliasing ranges overlap RVA-for-RVA in guest
+  // memory (Split/Second: engine at 0x88000000, SKIPPER.DLL at 0x98000000 —
+  // loading SKIPPER second overwrote the engine's entire .rdata/.pdata view, so
+  // codegen scanned skipper bytes as engine jump tables and function boundaries).
+  // BinaryView::fromModule copies the bytes it needs, so a snapshot taken here is
+  // immune to later loads. At runtime the game is unaffected: modules load in the
+  // guest's own order and executed code lives in the recompiled libraries.
+  std::vector<BinaryView> moduleViews;
+  moduleViews.push_back(
+      BinaryView::fromModule(*runtime->kernel_state()->GetExecutableModule()->xex_module()));
+
   std::vector<rex::system::object_ref<rex::system::UserModule>> dllModules;
   for (size_t i = 1; i < targeted.size(); ++i) {
     const auto& dllConfig = targeted[i].config;
@@ -289,6 +303,7 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
                      userMod->xex_module()->base_address());
     auto dll_display_name = std::filesystem::path(targeted[i].config.filePath).filename().string();
     ReportBinaryInfo(opts.reporter, dll_display_name, *userMod->xex_module());
+    moduleViews.push_back(BinaryView::fromModule(*userMod->xex_module()));
     dllModules.push_back(std::move(userMod));
   }
 
@@ -306,8 +321,7 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   auto* resolver = runtime->export_resolver();
 
   {
-    auto execMod = runtime->kernel_state()->GetExecutableModule();
-    auto bv = BinaryView::fromModule(*execMod->xex_module());
+    auto bv = std::move(moduleViews[0]);
 
     auto entry_display = make_display_name(targeted[0].config.filePath);
     RecompilerConfig cfg = std::move(targeted[0].config);
@@ -329,8 +343,7 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   }
 
   for (size_t i = 0; i < dllModules.size(); ++i) {
-    auto& userMod = dllModules[i];
-    auto bv = BinaryView::fromModule(*userMod->xex_module());
+    auto bv = std::move(moduleViews[i + 1]);
 
     auto dll_display = make_display_name(targeted[i + 1].config.filePath);
     RecompilerConfig cfg = std::move(targeted[i + 1].config);

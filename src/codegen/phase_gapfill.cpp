@@ -11,6 +11,7 @@
 
 #include "ppc/instruction.h"
 
+#include <algorithm>
 #include <unordered_set>
 
 #include <rex/codegen/phases.h>
@@ -180,26 +181,50 @@ void cleanupAbsorbedGapFills(CodegenContext& ctx) {
   auto& graph = ctx.graph;
   std::vector<uint32_t> toRemove;
 
+  // A GAP_FILL at addr is absorbed when ANY other function contains addr:
+  // containsAddress() implies other.base <= addr, so the containing function
+  // either has higher authority or is an earlier GAP_FILL - both remove addr.
+  // Instead of the O(f^2) all-pairs scan, snapshot functions sorted by base
+  // with a running max of [base, base+size) ends; per query, only the
+  // predecessors that can still reach addr (prefix max end > addr) are tested.
+  std::vector<const FunctionNode*> byBase;
+  byBase.reserve(graph.functionCount());
+  for (const auto& [addr, node] : graph.functions()) {
+    byBase.push_back(node.get());
+  }
+  std::sort(byBase.begin(), byBase.end(),
+            [](const FunctionNode* a, const FunctionNode* b) { return a->base() < b->base(); });
+
+  std::vector<uint32_t> prefixMaxEnd(byBase.size());
+  uint32_t runningMax = 0;
+  for (size_t i = 0; i < byBase.size(); i++) {
+    runningMax = std::max(runningMax, byBase[i]->base() + byBase[i]->size());
+    prefixMaxEnd[i] = runningMax;
+  }
+
+  auto absorbedByOther = [&](uint32_t addr) -> bool {
+    // Last index with base <= addr
+    auto it = std::upper_bound(byBase.begin(), byBase.end(), addr,
+                               [](uint32_t a, const FunctionNode* n) { return a < n->base(); });
+    if (it == byBase.begin())
+      return false;
+    for (size_t i = static_cast<size_t>(it - byBase.begin()); i-- > 0;) {
+      if (prefixMaxEnd[i] <= addr)
+        break;  // no function at or before i extends past addr
+      if (byBase[i]->base() == addr)
+        continue;  // self
+      if (byBase[i]->containsAddress(addr))
+        return true;
+    }
+    return false;
+  };
+
   for (const auto& [addr, node] : graph.functions()) {
     if (node->authority() != FunctionAuthority::GAP_FILL)
       continue;
 
-    for (const auto& [otherAddr, otherNode] : graph.functions()) {
-      if (otherAddr == addr)
-        continue;
-      if (!otherNode->containsAddress(addr))
-        continue;
-
-      // This GAP_FILL is inside another function's blocks
-      if (otherNode->authority() != FunctionAuthority::GAP_FILL) {
-        // Absorbed by higher authority - remove
-        toRemove.push_back(addr);
-        break;
-      } else if (otherAddr < addr) {
-        // Both GAP_FILL, other has lower address - it survives
-        toRemove.push_back(addr);
-        break;
-      }
+    if (absorbedByOther(addr)) {
+      toRemove.push_back(addr);
     }
   }
 

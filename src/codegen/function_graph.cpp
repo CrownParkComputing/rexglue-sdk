@@ -989,6 +989,7 @@ void FunctionGraph::addUnresolvedJumpToFunction(uint32_t entry, uint32_t site, u
 
   // Not resolvable yet - add as unresolved
   node->addUnresolvedJump(site, target, isCall, conditional);
+  pendingJumpTargets_[target].push_back(entry);
   REXCODEGEN_TRACE("FunctionGraph: added unresolved {} 0x{:08X}->0x{:08X} to function 0x{:08X}",
                    isCall ? "call" : "jump", site, target, entry);
 }
@@ -1240,8 +1241,27 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
 }
 
 void FunctionGraph::notifyFunctionAdded(FunctionNode* newFunction) {
-  for (auto& [base, node] : functions_) {
-    if (node.get() != newFunction && node->isPending()) {
+  // Only functions that recorded an unresolved jump to this exact address can
+  // resolve against it (tryResolveAgainst is a no-op for every other function),
+  // so consult the reverse index instead of scanning the whole graph.
+  auto it = pendingJumpTargets_.find(newFunction->base());
+  if (it == pendingJumpTargets_.end()) {
+    return;
+  }
+
+  // Take ownership of the bucket: every PENDING holder resolves below, and any
+  // future jump to this target resolves immediately in
+  // addUnresolvedJumpToFunction (the target is now a known function).
+  std::vector<uint32_t> holders = std::move(it->second);
+  pendingJumpTargets_.erase(it);
+
+  for (uint32_t base : holders) {
+    auto fit = functions_.find(base);
+    if (fit == functions_.end()) {
+      continue;  // stale: holder was removed (absorbed GAP_FILL)
+    }
+    FunctionNode* node = fit->second.get();
+    if (node != newFunction && node->isPending()) {
       node->tryResolveAgainst(newFunction);
     }
   }

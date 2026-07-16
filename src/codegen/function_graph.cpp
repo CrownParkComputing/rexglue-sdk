@@ -145,6 +145,26 @@ void FunctionNode::addBlock(Block block) {
   }
 }
 
+bool FunctionNode::coveredByBlock(uint32_t addr) const {
+  // seal() sorts blocks_ by base and merges overlaps, so a sealed function can
+  // binary-search. This matters during the Write phase: every emitted branch
+  // classifies its target, and a degenerate function with thousands of blocks
+  // (data mis-discovered as code) turns the linear probe into an
+  // emission-time quadratic (50+ min on Raiden Fighters Aces' jj6.xex).
+  // Before sealing, block order is discovery order - keep the linear scan.
+  if (state_ == FunctionState::kSealed) {
+    auto it = std::upper_bound(blocks_.begin(), blocks_.end(), addr,
+                               [](uint32_t a, const Block& b) { return a < b.base; });
+    return it != blocks_.begin() && std::prev(it)->contains(addr);
+  }
+  for (const auto& block : blocks_) {
+    if (block.contains(addr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool FunctionNode::containsAddress(uint32_t addr) const {
   // First check overall bounds
   if (addr < base_ || addr >= base_ + size_) {
@@ -157,10 +177,8 @@ bool FunctionNode::containsAddress(uint32_t addr) const {
   }
 
   // Check individual blocks
-  for (const auto& block : blocks_) {
-    if (block.contains(addr)) {
-      return true;
-    }
+  if (coveredByBlock(addr)) {
+    return true;
   }
 
   // For CONFIG and PDATA functions, trust the declared size even if blocks don't cover it
@@ -181,15 +199,10 @@ bool FunctionNode::containsAddressInBlock(uint32_t addr) const {
   if (blocks_.empty()) {
     return false;
   }
-  for (const auto& block : blocks_) {
-    if (block.contains(addr)) {
-      return true;
-    }
-  }
   // Intentionally NO CONFIG/PDATA declared-size fallback here (unlike
   // containsAddress). If no discovered block covers addr, no `loc_addr:` label is
   // emitted, so a branch to it must NOT be classified as an internal label/goto.
-  return false;
+  return coveredByBlock(addr);
 }
 
 void FunctionNode::addLabel(uint32_t addr) {
@@ -221,6 +234,30 @@ void FunctionNode::removeUnresolvedJump(uint32_t site) {
   auto it = std::remove_if(unresolvedJumps_.begin(), unresolvedJumps_.end(),
                            [site](const UnresolvedJump& j) { return j.site == site; });
   unresolvedJumps_.erase(it, unresolvedJumps_.end());
+}
+
+void FunctionNode::unresolveCallsTo(const std::unordered_set<const FunctionNode*>& removed) {
+  auto sweep = [&](std::vector<CallEdge>& edges) {
+    for (auto& edge : edges) {
+      FunctionNode* target = edge.target.asFunction();
+      if (target && removed.contains(target)) {
+        edge.target = CallTarget::unresolved(target->base());
+      }
+    }
+  };
+  sweep(calls_);
+  sweep(tailCalls_);
+}
+
+void FunctionGraph::unresolveCallsTo(const std::unordered_set<const FunctionNode*>& removed) {
+  if (removed.empty()) {
+    return;
+  }
+  for (const auto& [addr, node] : functions_) {
+    if (!removed.contains(node.get())) {
+      node->unresolveCallsTo(removed);
+    }
+  }
 }
 
 bool FunctionNode::tryResolveAgainst(FunctionNode* newFunction) {
@@ -516,10 +553,20 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
   std::string body;
   body.reserve(4096);
 
+  // Emission safety valve. No real function emits anywhere near this much C++
+  // (the largest legitimate bodies are a few MB); only data mis-discovered as
+  // code does — overlapping multi-megabyte garbage functions took Raiden
+  // Fighters Aces' jj7.xex to std::bad_alloc. Emit a fatal stub instead so the
+  // build completes and the offender is identifiable at runtime.
+  constexpr size_t kMaxEmittedBodyBytes = 64u * 1024 * 1024;
+  bool bodyOverflow = false;
+
   ppc_insn insn;
   std::unordered_set<size_t> emittedLabels;
 
   for (const auto& block : blocks()) {
+    if (bodyOverflow)
+      break;
     auto blockBase = block.base;
     auto blockEnd = block.end();
     auto* data = reinterpret_cast<const uint32_t*>(ctx.binary.translate(block.base));
@@ -530,6 +577,18 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     }
 
     while (blockBase < blockEnd) {
+      if (body.size() > kMaxEmittedBodyBytes) {
+        REXCODEGEN_ERROR(
+            "Function 0x{:08X} ({}) exceeded {} MB of emitted code at 0x{:08X} - almost "
+            "certainly data mis-discovered as code; emitting a fatal stub. Consider "
+            "[analysis] reject_data_functions = true for this module.",
+            base(), name, kMaxEmittedBodyBytes >> 20, blockBase);
+        body.clear();
+        emit_println(body, "\tREX_FATAL(\"{} was truncated at codegen time: data "
+                     "mis-discovered as code\");", name);
+        bodyOverflow = true;
+        break;
+      }
       // Only emit each label once
       if (labels.find(blockBase) != labels.end() && emittedLabels.insert(blockBase).second) {
         emit_println(body, "loc_{:X}:", blockBase);

@@ -93,6 +93,12 @@ struct RecompilerConfig {
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
   uint32_t dataRegionThreshold = 16;  ///< Consecutive invalid instructions to mark as data region
   uint32_t largeFunctionThreshold = 1048576;  ///< 1MB - warn if function exceeds this size
+  /// Reject data mis-discovered as code: gap-fill segments that start on (or are
+  /// >1/8) undecodable words are skipped, and a block scan hard-stops at a run of
+  /// 4+ undecodable words. Off by default: it changes discovery on any binary
+  /// with data embedded in .text, so existing games stay byte-identical unless a
+  /// game's toml opts in ([analysis] reject_data_functions = true).
+  bool rejectDataFunctions = false;
 
   // Optional override for DLL module flag. If unset, the orchestrator infers
   // from the module's position in the manifest (entrypoint = false, modules = true).

@@ -260,7 +260,8 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
                                     const CodeRegion& containingRegion,
                                     const std::unordered_set<uint32_t>& knownFunctions,
                                     uint32_t pdataSize = 0,
-                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables = nullptr);
+                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables = nullptr,
+                                    bool rejectDataRuns = false);
 
 //=============================================================================
 // Jump Table Detection

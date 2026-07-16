@@ -145,6 +145,12 @@ class FunctionGraph {
   // Returns number of jumps resolved
   size_t tryResolveFunction(uint32_t entry);
 
+  // Downgrade every call/tail-call edge that resolved to one of `removed` back
+  // to Unresolved. MUST run before destroying those nodes (absorbed GAP_FILL
+  // cleanup): resolution stores raw FunctionNode pointers in caller edges, and
+  // emission reads the target's name through them.
+  void unresolveCallsTo(const std::unordered_set<const FunctionNode*>& removed);
+
   // Absorb a region into a function (for vacancy expansion)
   void absorbRegionIntoFunction(uint32_t entry, uint32_t regionBase, uint32_t regionSize);
 

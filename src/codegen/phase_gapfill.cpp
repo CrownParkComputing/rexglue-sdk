@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include <rex/codegen/phases.h>
+#include "decoded_binary.h"
 #include "phase_helpers.h"
 
 #include <rex/logging.h>
@@ -154,6 +155,41 @@ void gapFillCodeRegions(CodegenContext& ctx) {
       if (looksLikeExceptionData(binary, graph, segment.start))
         continue;
 
+      // Skip segments that are plainly data, not code. GAP_FILL is speculative;
+      // a segment gap-filled over a data blob becomes a garbage function whose
+      // thousands of pseudo-branch words make discovery and emission crawl
+      // (Raiden Fighters Aces' jj6.xex ground in the Write phase for 50+
+      // minutes on one such function). Real code contains essentially zero
+      // undecodable words; data blobs are full of them. Two cheap tests:
+      // a real function cannot START on an undecodable word, and a segment
+      // where more than 1 in 8 words fails to decode is not code.
+      // Opt-in per game ([analysis] reject_data_functions): it removes
+      // functions on any binary with data in .text, so existing games stay
+      // byte-identical by default.
+      if (ctx.Config().rejectDataFunctions) {
+        auto* firstInsn = ctx.decoded().get(segment.start);
+        if (firstInsn && isInvalid(*firstInsn)) {
+          REXCODEGEN_DEBUG("GapFill: skipping 0x{:08X} (starts on undecodable word)",
+                           segment.start);
+          continue;
+        }
+        uint32_t invalidWords = 0;
+        uint32_t totalWords = 0;
+        for (uint32_t addr = segment.start; addr < segment.end; addr += 4) {
+          auto* insn = ctx.decoded().get(addr);
+          if (!insn)
+            break;
+          totalWords++;
+          if (isInvalid(*insn))
+            invalidWords++;
+        }
+        if (totalWords >= 16 && invalidWords * 8 > totalWords) {
+          REXCODEGEN_DEBUG("GapFill: skipping 0x{:08X}-0x{:08X} as data ({}/{} words undecodable)",
+                           segment.start, segment.end, invalidWords, totalWords);
+          continue;
+        }
+      }
+
       uint32_t segmentSize = segment.size();
       graph.addFunction(segment.start, segmentSize, FunctionAuthority::GAP_FILL, false);
 
@@ -219,14 +255,23 @@ void cleanupAbsorbedGapFills(CodegenContext& ctx) {
     return false;
   };
 
+  std::unordered_set<const FunctionNode*> removedNodes;
   for (const auto& [addr, node] : graph.functions()) {
     if (node->authority() != FunctionAuthority::GAP_FILL)
       continue;
 
     if (absorbedByOther(addr)) {
       toRemove.push_back(addr);
+      removedNodes.insert(node.get());
     }
   }
+
+  // Resolution stores raw FunctionNode pointers in caller call edges
+  // (tryResolveAgainst -> CallTarget::function). Downgrade any edge pointing at
+  // a function we are about to destroy back to Unresolved, or emission later
+  // reads a freed name through the dangling pointer (Raiden Fighters Aces'
+  // garbage-heavy modules died with std::bad_alloc printing one).
+  graph.unresolveCallsTo(removedNodes);
 
   for (uint32_t addr : toRemove) {
     graph.removeFunction(addr);

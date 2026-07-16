@@ -108,6 +108,9 @@ class FunctionNode {
   // Blocks
   const std::vector<Block>& blocks() const { return blocks_; }
   bool containsAddress(uint32_t addr) const;
+  // Shared block-coverage probe: binary search once sealed (seal() sorts and
+  // merges blocks), linear scan in discovery order before that.
+  bool coveredByBlock(uint32_t addr) const;
   // Like containsAddress(), but requires an actual discovered block to cover addr
   // (NO PDATA/CONFIG declared-size trust fallback). Branch classification must use
   // this: a `goto loc_X` is only valid when `loc_X:` is actually emitted, and labels
@@ -168,6 +171,11 @@ class FunctionNode {
 
   // Resolution (reactive - called by graph on events)
   bool tryResolveAgainst(FunctionNode* newFunction);
+  // Downgrade any call/tail-call edge whose resolved target is in `removed` back
+  // to Unresolved(target base). Resolution stores raw FunctionNode pointers, so
+  // callers MUST be swept before a referenced node is destroyed (absorbed
+  // GAP_FILL cleanup) or emission reads a freed name through the dangling edge.
+  void unresolveCallsTo(const std::unordered_set<const FunctionNode*>& removed);
   bool tryResolveAgainstImport(uint32_t importAddr, const std::string& importName);
   bool tryResolveAsInternalLabel(uint32_t target);
 

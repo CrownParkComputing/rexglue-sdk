@@ -1816,7 +1816,8 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
                                     const CodeRegion& containingRegion,
                                     const std::unordered_set<uint32_t>& knownFunctions,
                                     uint32_t pdataSize,
-                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables) {
+                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables,
+                                    bool rejectDataRuns) {
   BlockDiscoveryResult result;
   std::unordered_set<uint32_t> visited;
   std::unordered_set<uint32_t> blockStarts;
@@ -1867,6 +1868,33 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
       if (!insn) {
         REXCODEGEN_TRACE("discoverBlocks: 0x{:08X} no instruction at addr, breaking", entryPoint);
         break;
+      }
+
+      // A RUN of undecodable words hard-terminates the block. A single
+      // undecodable word is NOT proof of data: the decoder has gaps (VMX
+      // forms), so real code shows isolated kUnknown words (__restvmx_*
+      // helpers). But no plausible decoder gap yields four in a row, while a
+      // data blob is full of long runs. Without this, a function
+      // mis-discovered inside a data blob linearly swallows the whole blob and
+      // its fake branch words spawn further such functions — Raiden Fighters
+      // Aces' jj6.xex built overlapping multi-megabyte garbage functions this
+      // way, exhausting memory in the Write phase (and grinding 50+ minutes
+      // before the sealed-block binary search existed).
+      if (rejectDataRuns && isInvalid(*insn)) {
+        bool runOfInvalid = true;
+        for (uint32_t look = addr + 4; look < addr + 16; look += 4) {
+          auto* nextInsn = isWithinFunction(look) ? decoded.get(look) : nullptr;
+          if (!nextInsn || !isInvalid(*nextInsn)) {
+            runOfInvalid = false;
+            break;
+          }
+        }
+        if (runOfInvalid) {
+          REXCODEGEN_TRACE("discoverBlocks: 0x{:08X} run of undecodable words at 0x{:08X}, "
+                           "terminating block",
+                           entryPoint, addr);
+          break;
+        }
       }
 
       // Mark as visited

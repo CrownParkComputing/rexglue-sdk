@@ -135,6 +135,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
     if (auto v = (*analysisTable)["max_jump_extension"].value<uint32_t>()) {
       MergeScalar(cfg.maxJumpExtension, *v, "analysis.max_jump_extension");
     }
+    if (auto v = (*analysisTable)["reject_data_functions"].value<bool>()) {
+      MergeScalar(cfg.rejectDataFunctions, *v, "analysis.reject_data_functions");
+    }
     if (auto v = (*analysisTable)["data_region_threshold"].value<uint32_t>()) {
       MergeScalar(cfg.dataRegionThreshold, *v, "analysis.data_region_threshold");
     }

@@ -115,9 +115,19 @@ target_include_directories(rexcodegen
         ${CMAKE_CURRENT_BINARY_DIR}/generated/templates
 )
 
+# rexcore's object files are already compiled into librexruntime (shared),
+# which exports every rexcore symbol. Linking the rexcore OBJECT library here
+# as well would propagate a second, static copy of those objects into every
+# executable that links rexcodegen (rexglue, unit_tests). Two copies of
+# cvar.cpp/logging.cpp in one process means both images' static FlagRegistrars
+# register into one interposed registry ("duplicate registration" spew at
+# startup) and librexruntime's fini then calls UnregisterFlag on the
+# executable's already-destroyed registry (heap corruption / SIGSEGV at exit).
+# $<COMPILE_ONLY:...> keeps rexcore's include dirs and compile definitions
+# without its objects; the symbols resolve from librexruntime at link time.
 target_link_libraries(rexcodegen
     PUBLIC
-        rexcore
+        $<COMPILE_ONLY:rexcore>
         rexruntime
         fmt::fmt
         spdlog::spdlog

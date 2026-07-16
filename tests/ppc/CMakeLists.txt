@@ -64,7 +64,8 @@ target_include_directories(ppc_tests PRIVATE
 target_link_libraries(ppc_tests PRIVATE
     simde
     rexruntime
-    rexcore
+    # compile-only: rexcore's objects live in librexruntime (see src/codegen/CMakeLists.txt)
+    $<COMPILE_ONLY:rexcore>
     fmt::fmt
     Catch2::Catch2WithMain
 )

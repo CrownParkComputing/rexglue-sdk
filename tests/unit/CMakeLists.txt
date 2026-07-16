@@ -33,7 +33,8 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_libraries(unit_tests PRIVATE
-    rexcore
+    # compile-only: rexcore's objects live in librexruntime (see src/codegen/CMakeLists.txt)
+    $<COMPILE_ONLY:rexcore>
     rexcodegen
     rexruntime
     Catch2::Catch2WithMain

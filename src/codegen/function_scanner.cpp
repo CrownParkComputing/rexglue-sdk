@@ -1815,7 +1815,8 @@ std::optional<JumpTable> detectJumpTable(DecodedBinary& decoded, uint32_t bctrAd
 BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
                                     const CodeRegion& containingRegion,
                                     const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize) {
+                                    uint32_t pdataSize,
+                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables) {
   BlockDiscoveryResult result;
   std::unordered_set<uint32_t> visited;
   std::unordered_set<uint32_t> blockStarts;
@@ -1925,10 +1926,27 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
           }
           // Do not break: continue scanning the fall-through path.
         } else if (insn->opcode == rex::codegen::ppc::Opcode::bcctr) {
-          // Unconditional bctr - try to detect jump table
-          REXCODEGEN_TRACE("discoverBlocks: bctr at 0x{:08X} in func 0x{:08X}, funcEnd=0x{:08X}",
-                           addr, entryPoint, funcEnd);
-          auto jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);
+          // Unconditional bctr - a manually-specified [[switch_tables]] entry takes
+          // precedence over auto-detection (config.cpp / function_graph.cpp key it the
+          // same way: labels emitted from config.switchTables at the bctr address).
+          // This lets a hand-verified table survive where detectJumpTable's region/arm
+          // validation rejects a genuine cross-region switch (arms placed in a later
+          // .text region past embedded data islands).
+          std::optional<JumpTable> jt;
+          if (configSwitchTables) {
+            auto cfgIt = configSwitchTables->find(addr);
+            if (cfgIt != configSwitchTables->end()) {
+              jt = cfgIt->second;
+              REXCODEGEN_TRACE("discoverBlocks: bctr at 0x{:08X} using config switch table with "
+                               "{} targets",
+                               addr, jt->targets.size());
+            }
+          }
+          if (!jt) {
+            REXCODEGEN_TRACE("discoverBlocks: bctr at 0x{:08X} in func 0x{:08X}, funcEnd=0x{:08X}",
+                             addr, entryPoint, funcEnd);
+            jt = detectJumpTable(decoded, addr, containingRegion, entryPoint, funcEnd);
+          }
           if (jt) {
             REXCODEGEN_TRACE("discoverBlocks: detected jump table at bctr 0x{:08X} with {} targets",
                              addr, jt->targets.size());

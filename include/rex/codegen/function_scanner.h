@@ -251,12 +251,16 @@ struct BlockDiscoveryResult {
  * @param entryPoint Starting address of the function
  * @param containingRegion Code region containing the entry point
  * @param knownFunctions Set of known function entry points (to detect tail calls)
+ * @param configSwitchTables Manual [[switch_tables]] entries keyed by bctr address;
+ *        takes precedence over automatic jump-table detection so hand-verified
+ *        tables survive even where detection fails (e.g. a mis-decoded image region)
  * @return BlockDiscoveryResult containing blocks, branches, and jump tables
  */
 BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
                                     const CodeRegion& containingRegion,
                                     const std::unordered_set<uint32_t>& knownFunctions,
-                                    uint32_t pdataSize = 0);
+                                    uint32_t pdataSize = 0,
+                                    const std::unordered_map<uint32_t, JumpTable>* configSwitchTables = nullptr);
 
 //=============================================================================
 // Jump Table Detection

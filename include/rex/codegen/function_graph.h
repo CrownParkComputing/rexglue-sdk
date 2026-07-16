@@ -198,6 +198,13 @@ class FunctionGraph {
   std::vector<std::pair<uint32_t, uint32_t>> chunks_;    // base, size pairs
   MemoryReader memoryReader_;
 
+  // Reverse index: unresolved jump target -> bases of functions holding such a
+  // jump. Lets notifyFunctionAdded() touch only the functions that can resolve
+  // against the new entry instead of scanning the whole graph per addFunction().
+  // Entries may go stale (jump resolved elsewhere, function removed); consumers
+  // re-validate against the live function and its actual jump list.
+  std::unordered_map<uint32_t, std::vector<uint32_t>> pendingJumpTargets_;
+
   // Notify all PENDING functions that a new function was added
   void notifyFunctionAdded(FunctionNode* newFunction);
 };

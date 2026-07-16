@@ -1,6 +1,8 @@
 # ReXGlue SDK - Xbox 360 Recompilation Toolkit
 # Modern C++23 cross-platform SDK for recompiling Xbox 360 executables
-cmake_minimum_required(VERSION 3.25)
+# 3.27 needed for $<COMPILE_ONLY:...> (rexcore is linked into rexruntime only;
+# other consumers must see its headers/defines without duplicating its objects)
+cmake_minimum_required(VERSION 3.27)
 
 project(ReXGlue
     VERSION 0.8.0

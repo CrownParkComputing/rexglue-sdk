@@ -85,9 +85,14 @@ bool build_bl(BuilderContext& ctx) {
       break;
 
     case TargetKind::Unknown:
-      REXCODEGEN_ERROR("Unresolved bl target 0x{:08X} from 0x{:08X}", target, ctx.base);
-      ctx.println("\t// ERROR: unresolved bl target 0x{:08X}", target);
-      ctx.println("\tREX_FATAL(\"Unresolved call from 0x{:08X} to 0x{:08X}\");", ctx.base, target);
+      // Resolve the call through the runtime dispatcher instead of aborting at
+      // codegen-unknown time: a real function registered at runtime (cross-region
+      // or cross-module) dispatches correctly; an genuinely missing one hits the
+      // dispatcher trap, which --unregistered_function_nonfatal can log+skip.
+      REXCODEGEN_WARN("Unresolved bl target 0x{:08X} from 0x{:08X} -> runtime dispatch", target,
+                      ctx.base);
+      ctx.println("\tREX_CALL_INDIRECT_FUNC(uint32_t(0x{:08X}u));", target);
+      ctx.csrState = CSRState::Unknown;  // Call could change CSR state
       break;
   }
   return true;

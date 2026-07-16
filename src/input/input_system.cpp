@@ -10,8 +10,11 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <string>
 
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/input/flags.h>
 #include <rex/input/input_driver.h>
@@ -27,6 +30,69 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
 namespace rex::input {
+
+// Synthetic input injection — a bringup/testing aid for headless runs. Holds a
+// named controller button for a time window so a run can advance past a screen
+// that waits for input (e.g. Split/Second's "PRESS B TO SKIP" content prompt)
+// without a real gamepad or a focused window. The bits are OR'd into the merged
+// device state, so this composes with any real input.
+//   --synth_button=<a|b|x|y|start|back|lb|rb|ls|rs|dup|ddown|dleft|dright>
+//   --synth_start_ms / --synth_end_ms : window (ms since first poll) to hold it
+//   --synth_period_ms : if >0, repeat the [start,end) window every period_ms
+REXCVAR_DEFINE_STRING(synth_button, "", "Input",
+                      "Hold this controller button during the synthetic-input window (test aid)");
+REXCVAR_DEFINE_UINT32(synth_start_ms, 0, "Input",
+                      "Start of synthetic-input window, ms since first poll");
+REXCVAR_DEFINE_UINT32(synth_end_ms, 0, "Input",
+                      "End of synthetic-input window, ms since first poll");
+REXCVAR_DEFINE_UINT32(synth_period_ms, 0, "Input",
+                      "If >0, repeat the synthetic-input window every this many ms");
+
+namespace {
+
+uint16_t SynthButtonBit(const std::string& name) {
+  if (name == "a") return X_INPUT_GAMEPAD_A;
+  if (name == "b") return X_INPUT_GAMEPAD_B;
+  if (name == "x") return X_INPUT_GAMEPAD_X;
+  if (name == "y") return X_INPUT_GAMEPAD_Y;
+  if (name == "start") return X_INPUT_GAMEPAD_START;
+  if (name == "back") return X_INPUT_GAMEPAD_BACK;
+  if (name == "lb") return X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (name == "rb") return X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+  if (name == "ls") return X_INPUT_GAMEPAD_LEFT_THUMB;
+  if (name == "rs") return X_INPUT_GAMEPAD_RIGHT_THUMB;
+  if (name == "dup") return X_INPUT_GAMEPAD_DPAD_UP;
+  if (name == "ddown") return X_INPUT_GAMEPAD_DPAD_DOWN;
+  if (name == "dleft") return X_INPUT_GAMEPAD_DPAD_LEFT;
+  if (name == "dright") return X_INPUT_GAMEPAD_DPAD_RIGHT;
+  return 0;
+}
+
+// Returns the synthetic button bits to hold right now (0 if outside the window
+// or unconfigured). Only affects controller 0.
+uint16_t SyntheticButtons(uint32_t user_index) {
+  if (user_index != 0) return 0;
+  const std::string& name = REXCVAR_GET(synth_button);
+  if (name.empty()) return 0;
+  uint16_t bit = SynthButtonBit(name);
+  if (!bit) return 0;
+
+  static const auto t0 = std::chrono::steady_clock::now();
+  uint64_t ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - t0)
+          .count());
+
+  uint32_t start = REXCVAR_GET(synth_start_ms);
+  uint32_t end = REXCVAR_GET(synth_end_ms);
+  uint32_t period = REXCVAR_GET(synth_period_ms);
+  if (period > 0) {
+    ms %= period;
+  }
+  return (ms >= start && ms < end) ? bit : 0;
+}
+
+}  // namespace
 
 InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
 
@@ -114,6 +180,20 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
         }
       }
     }
+  }
+
+  // Synthetic input injection (test aid): OR a scripted button into the merged
+  // state. Reports "connected" even if no real device is, so a headless run can
+  // drive input-gated screens.
+  if (uint16_t synth = SyntheticButtons(user_index)) {
+    if (first_result) {
+      merged = {};
+      first_result = false;
+    }
+    merged.gamepad.buttons =
+        static_cast<uint16_t>(static_cast<uint16_t>(merged.gamepad.buttons) | synth);
+    static uint16_t synth_pkt = 0;
+    merged.packet_number = ++synth_pkt;
   }
 
   if (first_result) {

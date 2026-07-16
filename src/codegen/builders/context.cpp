@@ -304,18 +304,25 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
         println("\t\treturn;");
         println("\t}}");
       } else {
-        REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X} (no CallTarget)",
-                         target, base);
-        println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
-                not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+        // Target isn't a known function entry at codegen time. Rather than a hard
+        // FATAL, emit a conditional indirect tail call through the runtime
+        // dispatcher: if the target is a real function registered at runtime (e.g.
+        // a cross-region/cross-module entry, common in large engine DLLs), it
+        // resolves correctly; otherwise the dispatcher's trap fires — which
+        // --unregistered_function_nonfatal can log+skip during bringup instead of
+        // aborting on the first such branch.
+        REXCODEGEN_WARN("Unresolved conditional branch to 0x{:08X} from 0x{:08X} -> runtime dispatch",
+                        target, base);
+        println("\tif ({}{}.{}) {{ REX_CALL_INDIRECT_FUNC(uint32_t(0x{:08X}u)); return; }}",
+                not_ ? "!" : "", cr(insn.operands[0]), cond, target);
       }
       break;
 
     case TargetKind::Unknown:
-      REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X}", target, base);
-      println("\t// ERROR: conditional branch to unknown address 0x{:08X}", target);
-      println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",
-              not_ ? "!" : "", cr(insn.operands[0]), cond, base, target);
+      REXCODEGEN_WARN("Unresolved conditional branch to 0x{:08X} from 0x{:08X} -> runtime dispatch",
+                      target, base);
+      println("\tif ({}{}.{}) {{ REX_CALL_INDIRECT_FUNC(uint32_t(0x{:08X}u)); return; }}",
+              not_ ? "!" : "", cr(insn.operands[0]), cond, target);
       break;
   }
 }

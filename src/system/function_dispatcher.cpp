@@ -57,7 +57,10 @@ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
       is_new = seen.insert(target).second;
     }
     if (is_new) {
-      REXLOG_ERROR("[UNREGFN] 0x{:08X}", target);
+      // lr identifies the calling site (bctrl return address = site + 4), which is
+      // what you need to find HOW a computed target was derived (offset tables etc.).
+      REXLOG_ERROR("[UNREGFN] 0x{:08X} (lr=0x{:08X} ctr=0x{:08X})", target,
+                   static_cast<uint32_t>(ctx.lr), static_cast<uint32_t>(ctx.ctr.u32));
     }
     // Return a null/zero result so callers that null-check the (missing)
     // function's return value take their graceful path instead of dereferencing

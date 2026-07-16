@@ -268,6 +268,18 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
   // false = branch instruction (not a call), so own-base means loop back
   auto kind = graph().classifyTarget(target, base, false);
 
+  // classifyTarget resolves the caller BY ADDRESS (getFunctionContaining), which
+  // with overlapping functions can pick a different node than the one being
+  // emitted here — misclassifying a branch to a block THIS function demonstrably
+  // covers as external (Split/Second: sub_888C6200 emits loc_888C6308 yet the
+  // bne to it dispatched). Block-accurate override, mirroring build_b: if this
+  // function emits the target's label, branch to it locally. Entry-point targets
+  // keep tail-call semantics (see classifyTarget Case 3 rationale).
+  if (kind != TargetKind::InternalLabel && !graph().isEntryPoint(target) && fn.isLabel(target) &&
+      fn.containsAddressInBlock(target)) {
+    kind = TargetKind::InternalLabel;
+  }
+
   switch (kind) {
     case TargetKind::InternalLabel:
       // Target is within this function - local goto

@@ -1837,6 +1837,15 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
   worklist.push(entryPoint);
   blockStarts.insert(entryPoint);
 
+  // Out-of-line block rescue: jump-table detection EXTENDS funcEnd mid-scan (see
+  // the bcctr case below), but a branch scanned BEFORE that extension has already
+  // recorded its — now internal — target as external/unresolved, and no block or
+  // label is ever created for it (the Split/Second engine stalls on exactly this:
+  // bne 0x888C6308 recorded external, then a jump table grows the function past
+  // 0x888C6D3C). After each worklist drain, rescue any non-call branch target the
+  // grown extent now covers and rescan to a fixpoint. Functions whose extent never
+  // grows mid-scan (the common case) take one pass and see no behavior change.
+  for (;;) {
   while (!worklist.empty()) {
     uint32_t blockStart = worklist.front();
     worklist.pop();
@@ -2009,6 +2018,40 @@ BlockDiscoveryResult discoverBlocks(DecodedBinary& decoded, uint32_t entryPoint,
       result.blocks.push_back(block);
     }
   }
+
+  // Rescue pass (see comment above the loop): reclassify recorded external
+  // branch targets that the (possibly jump-table-grown) extent now covers.
+  bool rescued = false;
+  for (auto it = result.unresolvedBranches.begin(); it != result.unresolvedBranches.end();) {
+    const uint32_t t = it->target;
+    const bool nowInternal = !it->isCall && t >= entryPoint && t < funcEnd &&
+                             !(t != entryPoint && knownFunctions.contains(t));
+    if (!nowInternal) {
+      ++it;
+      continue;
+    }
+    REXCODEGEN_TRACE("discoverBlocks: 0x{:08X} rescued out-of-line branch target 0x{:08X} "
+                     "(funcEnd grew to 0x{:08X} after the branch was scanned)",
+                     entryPoint, t, funcEnd);
+    result.labels.insert(t);
+    if (!visited.contains(t) && !blockStarts.contains(t)) {
+      blockStarts.insert(t);
+      worklist.push(t);
+    }
+    // An unconditional b also recorded a tail call; retract it.
+    if (!it->isConditional) {
+      auto tc = std::find(result.tailCalls.begin(), result.tailCalls.end(), t);
+      if (tc != result.tailCalls.end()) {
+        result.tailCalls.erase(tc);
+      }
+    }
+    it = result.unresolvedBranches.erase(it);
+    rescued = true;
+  }
+  if (!rescued) {
+    break;
+  }
+  }  // for (;;)
 
   // Sort blocks by address
   std::sort(result.blocks.begin(), result.blocks.end(),

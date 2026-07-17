@@ -69,6 +69,7 @@ bool IsGpuDebugMarkersEnabled();
 
 // GPU Alpha Test
 REXCVAR_DECLARE(bool, use_fuzzy_alpha_epsilon);
+REXCVAR_DECLARE(bool, alpha_to_mask);
 
 // GPU Shader Translation / Tracing
 REXCVAR_DECLARE(std::string, dump_shaders);

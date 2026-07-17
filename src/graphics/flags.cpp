@@ -28,6 +28,9 @@ REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
 REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
                     "Use approximate compare for alpha test values to prevent "
                     "flickering on NVIDIA graphics cards");
+REXCVAR_DEFINE_BOOL(alpha_to_mask, true, "GPU",
+                    "Honor the guest's alpha-to-mask (dithered coverage) state. Disable to "
+                    "diagnose or work around stipple-pattern artifacts on translucent surfaces.");
 REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
                     "Insert debug markers into GPU command streams for tools "
                     "like PIX and RenderDoc. Automatically enabled when "

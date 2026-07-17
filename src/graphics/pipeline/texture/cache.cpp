@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <unordered_set>
 #include <utility>
 
 #include <rex/assert.h>
@@ -932,6 +933,18 @@ void TextureCache::BindingInfoFromFetchConstant(const xenos::xe_gpu_texture_fetc
                                                  &mip_page, nullptr, &mip_max_level);
   if (base_page == 0 && mip_page == 0) {
     // No texture data at all.
+    // [TEMP DIAG] This rejection is normally silent; log each unique constant
+    // once — a material sampling the null texture because of this shows up as
+    // saturated dither noise (PGR3 car glass).
+    static std::unordered_set<uint64_t> logged_no_data;
+    uint64_t no_data_key = (uint64_t(fetch.dword_0) << 32) | fetch.dword_1;
+    if (logged_no_data.insert(no_data_key).second) {
+      REXGPU_WARN(
+          "Texture fetch constant ({:08X} {:08X} {:08X} {:08X} {:08X} {:08X}) has no base/mip "
+          "address - binding null texture (dim={}, format={})",
+          fetch.dword_0, fetch.dword_1, fetch.dword_2, fetch.dword_3, fetch.dword_4, fetch.dword_5,
+          uint32_t(fetch.dimension), uint32_t(fetch.format));
+    }
     return;
   }
   if (fetch.dimension == xenos::DataDimension::k1D) {

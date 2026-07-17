@@ -2282,6 +2282,10 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
 }
 
+// [TEMP DIAG] Per-frame draw counter for the REX_RENDERDOC_CAPTURE_DRAWS
+// trigger below. CP thread only, diagnostics only.
+static uint32_t g_diag_frame_draw_count = 0;
+
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
@@ -2332,6 +2336,71 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           ++dumped;
           REXGPU_WARN("[DUMP] frame {} -> {}", frame_counter, path);
         }
+      }
+    }
+    // [TEMP DIAG] RenderDoc capture without the overlay/keyboard: run with
+    // ENABLE_VULKAN_RENDERDOC_CAPTURE=1 (implicit layer) and either
+    // REX_RENDERDOC_CAPTURE_FRAME=<n> (capture at guest swap <n>) or
+    // REX_RENDERDOC_CAPTURE_SIZE=<w>x<h>:<k> (capture at the k-th swap whose
+    // guest frontbuffer is <w>x<h> — attract menus and races present at
+    // different sizes, so this catches "the race" without knowing its frame).
+    // REX_RENDERDOC_CAPTURE_PATH sets the .rdc path template.
+    static const char* rd_frame_env = getenv("REX_RENDERDOC_CAPTURE_FRAME");
+    static const char* rd_size_env = getenv("REX_RENDERDOC_CAPTURE_SIZE");
+    static const char* rd_draws_env = getenv("REX_RENDERDOC_CAPTURE_DRAWS");
+    uint32_t frame_draws = g_diag_frame_draw_count;
+    g_diag_frame_draw_count = 0;
+    // REX_LOG_FRAME_DRAWS=<n>: log the per-frame draw count every n swaps, to
+    // calibrate the REX_RENDERDOC_CAPTURE_DRAWS threshold per title.
+    static const char* rd_logdraws_env = getenv("REX_LOG_FRAME_DRAWS");
+    if (rd_logdraws_env) {
+      static const uint32_t rd_logdraws_every =
+          std::max(1, atoi(rd_logdraws_env));
+      if ((frame_counter % rd_logdraws_every) == 0) {
+        REXGPU_WARN("[DRAWS] swap {} ({}x{}): {} draws", frame_counter, frontbuffer_width,
+                    frontbuffer_height, frame_draws);
+      }
+    }
+    if (rd_frame_env || rd_size_env || rd_draws_env) {
+      static auto renderdoc = ui::RenderDocAPI::CreateIfConnected();
+      bool rd_trigger = false;
+      if (rd_frame_env && frame_counter == uint32_t(atoi(rd_frame_env))) {
+        rd_trigger = true;
+      }
+      if (rd_size_env) {
+        static uint32_t rd_w = 0, rd_h = 0, rd_k = 1;
+        static bool rd_parsed =
+            sscanf(rd_size_env, "%ux%u:%u", &rd_w, &rd_h, &rd_k) >= 2;
+        static uint32_t rd_size_hits = 0;
+        static bool rd_size_fired = false;
+        if (rd_parsed && !rd_size_fired && frontbuffer_width == rd_w &&
+            frontbuffer_height == rd_h && ++rd_size_hits == rd_k) {
+          rd_size_fired = true;
+          rd_trigger = true;
+        }
+      }
+      // REX_RENDERDOC_CAPTURE_DRAWS=<min>:<k> — capture at the k-th swap whose
+      // frame issued at least <min> draws (a 3D race frame has hundreds; the
+      // attract's press-start ident has a handful). More robust than swap size.
+      if (rd_draws_env) {
+        static uint32_t rd_min_draws = 0, rd_draws_k = 1;
+        static bool rd_draws_parsed =
+            sscanf(rd_draws_env, "%u:%u", &rd_min_draws, &rd_draws_k) >= 1;
+        static uint32_t rd_draws_hits = 0;
+        static bool rd_draws_fired = false;
+        if (rd_draws_parsed && !rd_draws_fired && frame_draws >= rd_min_draws &&
+            ++rd_draws_hits == rd_draws_k) {
+          rd_draws_fired = true;
+          rd_trigger = true;
+        }
+      }
+      if (renderdoc && rd_trigger) {
+        if (const char* rd_path = getenv("REX_RENDERDOC_CAPTURE_PATH")) {
+          renderdoc->api_1_0_0()->SetLogFilePathTemplate(rd_path);
+        }
+        renderdoc->api_1_0_0()->TriggerCapture();
+        REXGPU_WARN("[RENDERDOC] triggered capture at guest swap {} ({}x{}, {} draws)",
+                    frame_counter, frontbuffer_width, frontbuffer_height, frame_draws);
       }
     }
   }
@@ -3646,6 +3715,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+  ++g_diag_frame_draw_count;
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
@@ -6280,7 +6350,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.alpha_test_reference != rb_alpha_ref;
   system_constants_.alpha_test_reference = rb_alpha_ref;
   uint32_t alpha_to_mask =
-      rb_colorcontrol.alpha_to_mask_enable ? (rb_colorcontrol.value >> 24) | (UINT32_C(1) << 8) : 0;
+      rb_colorcontrol.alpha_to_mask_enable && REXCVAR_GET(alpha_to_mask)
+          ? (rb_colorcontrol.value >> 24) | (UINT32_C(1) << 8)
+          : 0;
   dirty |= system_constants_.alpha_to_mask != alpha_to_mask;
   system_constants_.alpha_to_mask = alpha_to_mask;
 

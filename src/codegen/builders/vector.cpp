@@ -1501,20 +1501,26 @@ bool build_vupkd3d128(BuilderContext& ctx) {
     {
       auto vSrc = ctx.v(ctx.insn.operands[1]);
       auto vDst = ctx.v(ctx.insn.operands[0]);
-      // Format: w(4 bits):z(20 bits):y(20 bits):x(20 bits) in 64 bits
-      // x, y, z --> floats, w --> float
-      ctx.println("\t{}.u64[0] = {}.u64[1];", ctx.v_temp(), vSrc);
-      // x (bits 0-19) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 44) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[0] = float({}.s32);", vDst, ctx.temp());
-      // y (bits 20-39) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 24) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[1] = float({}.s32);", vDst, ctx.temp());
-      // z (bits 40-59) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 4) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[2] = float({}.s32);", vDst, ctx.temp());
-      // w (bits 60-63) - 4 bits
-      ctx.println("\t{}.f32[3] = float({}.u64[0] >> 60);", vDst, ctx.v_temp());
+      // Format: w(4 bits):z(20 bits):y(20 bits):x(20 bits) packed in Guest
+      // elements 2-3 (host u64[0], numerically intact after byte reversal).
+      // x, y, z --> 3.0+X form (signed 20-bit, QNaN at -524288), w --> 1.0+w form
+      // Output: x --> Guest element 0 (host u32[3]), y --> Guest element 1 (host u32[2]),
+      //         z --> Guest element 2 (host u32[1]), w --> Guest element 3 (host u32[0])
+      ctx.println("\t{}.u64[0] = {}.u64[0];", ctx.v_temp(), vSrc);
+      // x (bits 0-19) - sign extend from 20 bits --> Guest element 0 (host u32[3])
+      ctx.println("\t{}.s32 = int32_t(int64_t({}.u64[0] << 44) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.u32[3] = {}.s32 == -524288 ? 0x7FC00000 : uint32_t({}.s32 + 0x40400000);",
+                  vDst, ctx.temp(), ctx.temp());
+      // y (bits 20-39) - sign extend from 20 bits --> Guest element 1 (host u32[2])
+      ctx.println("\t{}.s32 = int32_t(int64_t({}.u64[0] << 24) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.u32[2] = {}.s32 == -524288 ? 0x7FC00000 : uint32_t({}.s32 + 0x40400000);",
+                  vDst, ctx.temp(), ctx.temp());
+      // z (bits 40-59) - sign extend from 20 bits --> Guest element 2 (host u32[1])
+      ctx.println("\t{}.s32 = int32_t(int64_t({}.u64[0] << 4) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.u32[1] = {}.s32 == -524288 ? 0x7FC00000 : uint32_t({}.s32 + 0x40400000);",
+                  vDst, ctx.temp(), ctx.temp());
+      // w (bits 60-63) - 4 bits, 1.0+w form --> Guest element 3 (host u32[0])
+      ctx.println("\t{}.u32[0] = uint32_t({}.u64[0] >> 60) | 0x3F800000;", vDst, ctx.v_temp());
       break;
     }
 

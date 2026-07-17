@@ -238,6 +238,16 @@ bool build_rldic(BuilderContext& ctx) {
   return true;
 }
 
+bool build_rotld(BuilderContext& ctx) {
+  // Extended mnemonic for rldcl rA,rS,rB,0: pure 64-bit rotate left, full mask.
+  // Decoded with only 3 operands (no MB6), so it cannot share build_rldcl.
+  ctx.println("\t{}.u64 = __builtin_rotateleft64({}.u64, {}.u8 & 0x3F);",
+              ctx.r(ctx.insn.operands[0]), ctx.r(ctx.insn.operands[1]),
+              ctx.r(ctx.insn.operands[2]));
+  emitRecordFormCompare(ctx);
+  return true;
+}
+
 bool build_rldcl(BuilderContext& ctx) {
   uint64_t mask = compute_mask(ctx.insn.operands[3], 63);
   ctx.println("\t{}.u64 = __builtin_rotateleft64({}.u64, {}.u8 & 0x3F) & 0x{:X};",

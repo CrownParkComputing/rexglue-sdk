@@ -36,6 +36,24 @@ bool build_adde(BuilderContext& ctx) {
   return true;
 }
 
+bool build_addeo(BuilderContext& ctx) {
+  // adde plus XER[OV]/[SO] tracking (32-bit signed overflow). Operands may
+  // alias (addeo. r10,r10,r11), so snapshot the inputs before writing rD.
+  ctx.println("\t{{ const uint32_t addeo_a = {}.u32, addeo_b = {}.u32;",
+              ctx.r(ctx.insn.operands[1]), ctx.r(ctx.insn.operands[2]));
+  ctx.println("\tconst uint64_t addeo_s = static_cast<uint64_t>(addeo_a) + addeo_b + {}.ca;",
+              ctx.xer());
+  ctx.println("\t{}.u64 = {}.u64 + {}.u64 + {}.ca;", ctx.r(ctx.insn.operands[0]),
+              ctx.r(ctx.insn.operands[1]), ctx.r(ctx.insn.operands[2]), ctx.xer());
+  ctx.println("\t{}.ca = static_cast<uint32_t>(addeo_s >> 32) & 1;", ctx.xer());
+  ctx.println(
+      "\t{}.ov = ((~(addeo_a ^ addeo_b) & (addeo_a ^ static_cast<uint32_t>(addeo_s))) >> 31) & 1;",
+      ctx.xer());
+  ctx.println("\t{}.so |= {}.ov; }}", ctx.xer(), ctx.xer());
+  emitRecordFormCompare(ctx);
+  return true;
+}
+
 bool build_addi(BuilderContext& ctx) {
   ctx.print("\t{}.s64 = ", ctx.r(ctx.insn.operands[0]));
   if (ctx.insn.operands[1] != 0)
@@ -214,6 +232,18 @@ bool build_mulhdu(BuilderContext& ctx) {
 
 bool build_neg(BuilderContext& ctx) {
   // Use unsigned negation to avoid signed overflow UB when negating INT64_MIN
+  ctx.println("\t{}.s64 = static_cast<int64_t>(-{}.u64);", ctx.r(ctx.insn.operands[0]),
+              ctx.r(ctx.insn.operands[1]));
+  emitRecordFormCompare(ctx);
+  return true;
+}
+
+bool build_nego(BuilderContext& ctx) {
+  // neg plus XER[OV]/[SO]: overflow iff rA is INT32_MIN (its negation is not
+  // representable in 32 bits). Set the flags before writing rD in case rD
+  // aliases rA.
+  ctx.println("\t{}.ov = ({}.u32 == 0x80000000u);", ctx.xer(), ctx.r(ctx.insn.operands[1]));
+  ctx.println("\t{}.so |= {}.ov;", ctx.xer(), ctx.xer());
   ctx.println("\t{}.s64 = static_cast<int64_t>(-{}.u64);", ctx.r(ctx.insn.operands[0]),
               ctx.r(ctx.insn.operands[1]));
   emitRecordFormCompare(ctx);

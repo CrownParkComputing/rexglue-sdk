@@ -33,6 +33,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       //=====================================================================
       {PPC_INST_ADD, build_add},
       {PPC_INST_ADDE, build_adde},
+      {PPC_INST_ADDEO, build_addeo},
       {PPC_INST_ADDI, build_addi},
       {PPC_INST_ADDIC, build_addic},
       {PPC_INST_ADDIS, build_addis},
@@ -49,6 +50,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_MULLI, build_mulli},
       {PPC_INST_MULLW, build_mullw},
       {PPC_INST_NEG, build_neg},
+      {PPC_INST_NEGO, build_nego},
       {PPC_INST_SUBF, build_subf},
       {PPC_INST_SUBFC, build_subfc},
       {PPC_INST_SUBFE, build_subfe},
@@ -83,6 +85,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_EXTSW, build_extsw},
       {PPC_INST_CLRLWI, build_clrlwi},
       {PPC_INST_RLDCL, build_rldcl},
+      {PPC_INST_ROTLD, build_rotld},
       {PPC_INST_RLDCR, build_rldcr},
       {PPC_INST_RLDIC, build_rldic},
       {PPC_INST_RLDICL, build_rldicl},

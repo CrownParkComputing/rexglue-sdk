@@ -45,6 +45,7 @@ bool build_cmpwi(BuilderContext& ctx);
 bool build_add(BuilderContext& ctx);
 bool build_addc(BuilderContext& ctx);
 bool build_adde(BuilderContext& ctx);
+bool build_addeo(BuilderContext& ctx);
 bool build_addi(BuilderContext& ctx);
 bool build_addic(BuilderContext& ctx);
 bool build_addis(BuilderContext& ctx);
@@ -68,6 +69,7 @@ bool build_mullw(BuilderContext& ctx);
 
 // Negation
 bool build_neg(BuilderContext& ctx);
+bool build_nego(BuilderContext& ctx);
 
 // Subtraction
 bool build_subf(BuilderContext& ctx);
@@ -127,6 +129,7 @@ bool build_extsw(BuilderContext& ctx);
 bool build_clrlwi(BuilderContext& ctx);
 
 // Rotate left double word
+bool build_rotld(BuilderContext& ctx);
 bool build_rldcl(BuilderContext& ctx);
 bool build_rldcr(BuilderContext& ctx);
 bool build_rldic(BuilderContext& ctx);

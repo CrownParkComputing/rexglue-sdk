@@ -14,7 +14,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/info.h>
@@ -32,6 +34,11 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xtypes.h>
 #include <rex/ui/flags.h>
+
+REXCVAR_DEFINE_UINT32(frame_limit, 0, "GPU",
+                      "Cap guest presents (VdSwap) per second (0 = uncapped). For titles whose "
+                      "present loop free-runs instead of waiting on vblank. Paces the calling "
+                      "guest thread, so the title's sim cadence stays even too.");
 
 namespace {
 // Display gamma type: 0 - linear, 1 - sRGB (CRT), 2 - BT.709 (HDTV), 3 - power
@@ -517,6 +524,22 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   // Fill the rest of the buffer with NOP packets.
   for (uint32_t i = offset; i < 64; i++) {
     dwords[i] = xenos::MakePacketType2();
+  }
+
+  // Pace the title's present loop at the source. Some titles (PGR3) never wait
+  // on vblank and free-run VdSwap (1600+/s observed). Sleeping HERE — on the
+  // guest thread that presents — keeps the title's sim cadence even; pacing in
+  // the command processor instead kept host presents even but let the guest
+  // run bursty against ring-buffer back-pressure, which reads as judder.
+  if (uint32_t limit = REXCVAR_GET(frame_limit); limit != 0) {
+    using clock = std::chrono::steady_clock;
+    static thread_local clock::time_point next_swap_deadline{};
+    auto now = clock::now();
+    if (next_swap_deadline > now) {
+      std::this_thread::sleep_until(next_swap_deadline);
+      now = next_swap_deadline;
+    }
+    next_swap_deadline = now + std::chrono::nanoseconds(1'000'000'000u / limit);
   }
 }
 

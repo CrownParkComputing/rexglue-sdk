@@ -796,6 +796,17 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_vertex_;
   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_pixel_;
 
+  // Texture/sampler descriptor reuse memo (vulkan_reuse_texture_descriptors):
+  // the previous draw's written binding contents per stage ([0] vertex,
+  // [1] pixel). Transient texture descriptor sets live until their frame
+  // completes, so a set written earlier in the current frame stays valid;
+  // the memos are dropped when a new frame opens.
+  bool texture_descriptor_memo_valid_[2] = {};
+  VkDescriptorSetLayout texture_descriptor_memo_layout_[2] = {};
+  uint32_t texture_descriptor_memo_texture_count_[2] = {};
+  uint32_t texture_descriptor_memo_sampler_count_[2] = {};
+  std::vector<VkDescriptorImageInfo> texture_descriptor_memo_infos_[2];
+
   // Cache render pass currently started in the command buffer with the
   // framebuffer. For dynamic rendering, current_render_pass_ is VK_NULL_HANDLE
   // but in_render_pass_ is true.

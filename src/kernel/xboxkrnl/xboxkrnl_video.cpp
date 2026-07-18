@@ -528,18 +528,29 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
 
   // Pace the title's present loop at the source. Some titles (PGR3) never wait
   // on vblank and free-run VdSwap (1600+/s observed). Sleeping HERE — on the
-  // guest thread that presents — keeps the title's sim cadence even; pacing in
-  // the command processor instead kept host presents even but let the guest
-  // run bursty against ring-buffer back-pressure, which reads as judder.
+  // guest thread that presents — keeps the title's sim cadence even.
+  //
+  // The gate is the guest VBLANK TICK, not a wall-clock deadline: a wall-clock
+  // sleep is a second, unsynchronized pacing clock that beats against the
+  // vblank timing the title observes through interrupts and against the host
+  // present cadence — measured on PGR3 as "fast but not smooth" judder with
+  // both the CPU and GPU mostly idle. Locking each swap to every Nth vblank
+  // keeps one clock for everything, so each presented frame occupies a whole
+  // number of vblank intervals.
   if (uint32_t limit = REXCVAR_GET(frame_limit); limit != 0) {
-    using clock = std::chrono::steady_clock;
-    static thread_local clock::time_point next_swap_deadline{};
-    auto now = clock::now();
-    if (next_swap_deadline > now) {
-      std::this_thread::sleep_until(next_swap_deadline);
-      now = next_swap_deadline;
+    auto* graphics_system = REX_KERNEL_STATE()->emulator()->graphics_system();
+    if (graphics_system) {
+      system::X_VIDEO_MODE video_mode;
+      VdQueryVideoMode(&video_mode);
+      uint32_t refresh = std::max(1u, uint32_t(float(video_mode.refresh_rate)));
+      uint64_t divisor = std::max<uint64_t>(1, (refresh + limit / 2) / limit);
+      static thread_local uint64_t last_swap_vblank = 0;
+      uint64_t observed =
+          graphics_system->WaitForVblank(last_swap_vblank + divisor);
+      // If this frame overran its slot (or on the first swap), re-phase from
+      // the current tick instead of bursting to catch up.
+      last_swap_vblank = std::max(last_swap_vblank + divisor, observed);
     }
-    next_swap_deadline = now + std::chrono::nanoseconds(1'000'000'000u / limit);
   }
 }
 

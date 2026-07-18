@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <chrono>
 #include <mutex>
 #include <utility>
 
@@ -325,6 +326,20 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
                                          rex::countof(args));
 }
 
+uint64_t GraphicsSystem::WaitForVblank(uint64_t target_count) {
+  uint64_t current = vblank_count_.load(std::memory_order_acquire);
+  if (current >= target_count) {
+    return current;
+  }
+  std::unique_lock<std::mutex> lock(vblank_wait_mutex_);
+  // Safety timeout: never let a guest thread hang if the vsync worker stalls
+  // or shuts down; 100ms is several missed vblanks at any supported rate.
+  vblank_wait_cv_.wait_for(lock, std::chrono::milliseconds(100), [&] {
+    return vblank_count_.load(std::memory_order_acquire) >= target_count;
+  });
+  return vblank_count_.load(std::memory_order_acquire);
+}
+
 void GraphicsSystem::MarkVblank() {
   // TODO: Enable profiling once ported
   // SCOPE_profile_cpu_f("gpu");
@@ -333,6 +348,11 @@ void GraphicsSystem::MarkVblank() {
   if (command_processor_) {
     command_processor_->increment_counter();
   }
+  {
+    std::lock_guard<std::mutex> lock(vblank_wait_mutex_);
+    vblank_count_.fetch_add(1, std::memory_order_release);
+  }
+  vblank_wait_cv_.notify_all();
 
   // TODO(benvanik): we shouldn't need to do the dispatch here, but there's
   //     something wrong and the CP will block waiting for code that

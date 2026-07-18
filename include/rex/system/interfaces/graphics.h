@@ -71,6 +71,16 @@ class IGraphicsSystem {
     (void)block_size_log2;
   }
 
+  // Guest vblank tick counter and a blocking wait on it, used by VdSwap
+  // frame pacing so presents lock to the same clock the title's vblank
+  // interrupts come from. Defaults for systems without a vsync worker:
+  // counter stays 0 and the wait returns immediately (no pacing).
+  virtual uint64_t vblank_count() const { return 0; }
+  virtual uint64_t WaitForVblank(uint64_t target_count) {
+    (void)target_count;
+    return 0;
+  }
+
   // Persistent shader/pipeline storage under the cache root. Default: none.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking) {

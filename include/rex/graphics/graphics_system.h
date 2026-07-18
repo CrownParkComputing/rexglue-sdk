@@ -14,6 +14,7 @@
 #include "rex/system/function_dispatcher.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -91,6 +92,17 @@ class GraphicsSystem : public system::IGraphicsSystem {
   void Pause();
   void Resume();
 
+  // Guest vblank tick counter, incremented by the vsync worker's MarkVblank.
+  // This is the same clock the guest's vblank interrupts come from, so pacing
+  // presents against it stays in phase with everything the title observes.
+  uint64_t vblank_count() const override {
+    return vblank_count_.load(std::memory_order_acquire);
+  }
+  // Blocks until the vblank counter reaches target_count (with a safety
+  // timeout so a stalled vsync worker can never hang a guest thread).
+  // Returns the counter value observed on wake.
+  uint64_t WaitForVblank(uint64_t target_count) override;
+
   bool Save(::rex::stream::ByteStream* stream);
   bool Restore(::rex::stream::ByteStream* stream);
 
@@ -121,6 +133,10 @@ class GraphicsSystem : public system::IGraphicsSystem {
 
   uint32_t interrupt_callback_ = 0;
   uint32_t interrupt_callback_data_ = 0;
+
+  std::atomic<uint64_t> vblank_count_{0};
+  std::mutex vblank_wait_mutex_;
+  std::condition_variable vblank_wait_cv_;
 
   std::atomic<bool> vsync_worker_running_;
   system::object_ref<system::XHostThread> vsync_worker_thread_;

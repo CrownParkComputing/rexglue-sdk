@@ -30,10 +30,12 @@
 
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/pipeline/shader/shader.h>
+#include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
 
 #if REX_HAS_VULKAN
 #include <rex/ui/vulkan/device.h>
+#include "native/texture_cache.h"
 #endif
 
 namespace rex::graphics {
@@ -142,12 +144,41 @@ class NativeCommandProcessor : public CommandProcessor {
                         VkBuffer& buffer_out, VkDeviceSize& offset_out);
   void BeginFrameIfNeeded();
 
+  // Register-derived graphics pipeline state (Phase 3: real blend / depth / cull
+  // instead of the Phase 2 hardcoded blend-off / depth-off / cull-none).
+  struct GuestPipelineState {
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // Color blend (render target 0).
+    bool blend_enable = false;
+    VkBlendFactor src_color_factor = VK_BLEND_FACTOR_ONE;
+    VkBlendFactor dst_color_factor = VK_BLEND_FACTOR_ZERO;
+    VkBlendOp color_op = VK_BLEND_OP_ADD;
+    VkBlendFactor src_alpha_factor = VK_BLEND_FACTOR_ONE;
+    VkBlendFactor dst_alpha_factor = VK_BLEND_FACTOR_ZERO;
+    VkBlendOp alpha_op = VK_BLEND_OP_ADD;
+    VkColorComponentFlags color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    // Depth.
+    bool depth_test_enable = false;
+    bool depth_write_enable = false;
+    VkCompareOp depth_compare_op = VK_COMPARE_OP_ALWAYS;
+    // Rasterizer.
+    VkCullModeFlags cull_mode = VK_CULL_MODE_NONE;
+    VkFrontFace front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    uint64_t Hash() const;
+  };
+
   // Returns the cached VkShaderModule for a translation, creating it on first
   // use. Returns VK_NULL_HANDLE on failure.
   VkShaderModule GetShaderModule(const Shader::Translation* translation);
   // Returns (creating if needed) a graphics pipeline for the given state.
   VkPipeline GetPipeline(VkShaderModule vertex_module, VkShaderModule pixel_module,
-                         VkPrimitiveTopology topology, VkPipelineLayout layout);
+                         VkPipelineLayout layout, const GuestPipelineState& state);
+  // Fills a GuestPipelineState from the current register file + primitive type.
+  GuestPipelineState BuildPipelineState(VkPrimitiveTopology topology, bool primitive_polygonal,
+                                        const reg::RB_DEPTHCONTROL& depth_control,
+                                        uint32_t pixel_writes_color_targets) const;
 
   // Texture-path helpers. Textured guest draws are rendered with a dummy white
   // texture bound to every image/sampler binding the shader declares, so the
@@ -163,6 +194,10 @@ class NativeCommandProcessor : public CommandProcessor {
                                           uint32_t pixel_sampler_count);
   // Allocates and fills a per-draw texture descriptor set with dummy textures.
   VkDescriptorSet AllocateDummyTextureSet(const SpirvShader* shader, VkDescriptorSetLayout layout);
+  // Allocates and fills a per-draw texture descriptor set with REAL guest
+  // textures + samplers from the texture cache (Phase 3). Falls back to the dummy
+  // white texture / default sampler for any binding with no valid texture.
+  VkDescriptorSet AllocateTextureSet(SpirvShader* shader, VkDescriptorSetLayout layout);
 
   // Guest-shader descriptor layout (matches SpirvShaderTranslator):
   //   set 0 = shared memory storage buffer(s); set 1 = 5 constant UBOs;
@@ -197,7 +232,19 @@ class NativeCommandProcessor : public CommandProcessor {
   static constexpr uint32_t kMaxDrawsPerFrame = 8192;
 
   std::unique_ptr<NativeSharedMemory> shared_memory_;
+  std::unique_ptr<NativeTextureCache> texture_cache_;
   std::unique_ptr<SpirvShaderTranslator> shader_translator_;
+
+  // ----- Phase 3 depth buffer (guest-output sized, transient, cleared each
+  // frame). Added so 3D scenes occlude correctly (no EDRAM emulation). -----
+  static constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+  bool EnsureDepthResources(uint32_t width, uint32_t height);
+  void DestroyDepthResources();
+  VkImage depth_image_ = VK_NULL_HANDLE;
+  VkImageView depth_view_ = VK_NULL_HANDLE;
+  VkDeviceMemory depth_memory_ = VK_NULL_HANDLE;
+  uint32_t depth_width_ = 0;
+  uint32_t depth_height_ = 0;
 
   HostRingBuffer uniform_ring_;
   HostRingBuffer index_ring_;

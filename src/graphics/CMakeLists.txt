@@ -163,6 +163,7 @@ if(REXGLUE_USE_VULKAN)
         native/graphics_system.cpp
         native/command_processor.cpp
         native/native_shared_memory.cpp
+        native/texture_cache.cpp
 
         # Shared, game-agnostic PM4 + Xenos base (identical to the rexgpu-xenos
         # backend-agnostic core; only the backend files differ).

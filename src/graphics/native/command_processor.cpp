@@ -113,6 +113,41 @@ uint32_t ConvertIndex32(const uint8_t* p, xenos::Endian e) {
       return v;
   }
 }
+
+// Xenos BlendFactor (raw 5-bit value) -> VkBlendFactor. Matches the emulation
+// backend's kBlendFactorMap (undefined values 2/3 -> ZERO).
+VkBlendFactor MapBlendFactor(xenos::BlendFactor factor) {
+  switch (uint32_t(factor)) {
+    case 0:  return VK_BLEND_FACTOR_ZERO;
+    case 1:  return VK_BLEND_FACTOR_ONE;
+    case 4:  return VK_BLEND_FACTOR_SRC_COLOR;
+    case 5:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 6:  return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 7:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 8:  return VK_BLEND_FACTOR_DST_COLOR;
+    case 9:  return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 10: return VK_BLEND_FACTOR_DST_ALPHA;
+    case 11: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 12: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 13: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 14: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 15: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    case 16: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    default: return VK_BLEND_FACTOR_ZERO;
+  }
+}
+
+// Xenos BlendOp (comb_fcn) -> VkBlendOp.
+VkBlendOp MapBlendOp(xenos::BlendOp op) {
+  switch (op) {
+    case xenos::BlendOp::kAdd:         return VK_BLEND_OP_ADD;
+    case xenos::BlendOp::kSubtract:    return VK_BLEND_OP_SUBTRACT;
+    case xenos::BlendOp::kMin:         return VK_BLEND_OP_MIN;
+    case xenos::BlendOp::kMax:         return VK_BLEND_OP_MAX;
+    case xenos::BlendOp::kRevSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+    default:                           return VK_BLEND_OP_ADD;
+  }
+}
 #endif  // REX_HAS_VULKAN
 
 }  // namespace
@@ -220,15 +255,33 @@ bool NativeCommandProcessor::CreateClearResources() {
   color_ref.attachment = 0;
   color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+  // Phase 3: transient depth attachment (cleared each frame to far). Gives the
+  // 3D scene correct occlusion - the native backend has no EDRAM.
+  VkAttachmentDescription depth_attachment = {};
+  depth_attachment.format = kDepthFormat;
+  depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+  VkAttachmentReference depth_ref = {};
+  depth_ref.attachment = 1;
+  depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
   VkSubpassDescription subpass = {};
   subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   subpass.colorAttachmentCount = 1;
   subpass.pColorAttachments = &color_ref;
+  subpass.pDepthStencilAttachment = &depth_ref;
 
+  const VkAttachmentDescription attachments[2] = {attachment, depth_attachment};
   VkRenderPassCreateInfo rp_info = {};
   rp_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  rp_info.attachmentCount = 1;
-  rp_info.pAttachments = &attachment;
+  rp_info.attachmentCount = 2;
+  rp_info.pAttachments = attachments;
   rp_info.subpassCount = 1;
   rp_info.pSubpasses = &subpass;
   if (dfn.vkCreateRenderPass(device, &rp_info, nullptr, &clear_render_pass_) != VK_SUCCESS) {
@@ -250,6 +303,8 @@ void NativeCommandProcessor::DestroyClearResources() {
     dfn.vkDestroyFramebuffer(device, clear_framebuffer_, nullptr);
     clear_framebuffer_ = VK_NULL_HANDLE;
   }
+  // Depth image/view is referenced by the framebuffer above - destroy after it.
+  DestroyDepthResources();
   if (clear_render_pass_ != VK_NULL_HANDLE) {
     dfn.vkDestroyRenderPass(device, clear_render_pass_, nullptr);
     clear_render_pass_ = VK_NULL_HANDLE;
@@ -285,11 +340,16 @@ bool NativeCommandProcessor::EnsureClearFramebuffer(VkImageView image_view, uint
     clear_framebuffer_ = VK_NULL_HANDLE;
   }
 
+  if (!EnsureDepthResources(width, height)) {
+    return false;
+  }
+
+  const VkImageView fb_attachments[2] = {image_view, depth_view_};
   VkFramebufferCreateInfo fb_info = {};
   fb_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
   fb_info.renderPass = clear_render_pass_;
-  fb_info.attachmentCount = 1;
-  fb_info.pAttachments = &image_view;
+  fb_info.attachmentCount = 2;
+  fb_info.pAttachments = fb_attachments;
   fb_info.width = width;
   fb_info.height = height;
   fb_info.layers = 1;
@@ -302,6 +362,85 @@ bool NativeCommandProcessor::EnsureClearFramebuffer(VkImageView image_view, uint
   clear_framebuffer_width_ = width;
   clear_framebuffer_height_ = height;
   return true;
+}
+
+bool NativeCommandProcessor::EnsureDepthResources(uint32_t width, uint32_t height) {
+  if (depth_image_ != VK_NULL_HANDLE && depth_width_ == width && depth_height_ == height) {
+    return true;
+  }
+  DestroyDepthResources();
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  VkImageCreateInfo image_info = {};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = kDepthFormat;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (dfn.vkCreateImage(device, &image_info, nullptr, &depth_image_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: failed to create depth image {}x{}", width, height);
+    return false;
+  }
+  VkMemoryRequirements req;
+  dfn.vkGetImageMemoryRequirements(device, depth_image_, &req);
+  uint32_t type_index;
+  if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                             &type_index) &&
+      !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+    return false;
+  }
+  VkMemoryAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc.allocationSize = req.size;
+  alloc.memoryTypeIndex = type_index;
+  if (dfn.vkAllocateMemory(device, &alloc, nullptr, &depth_memory_) != VK_SUCCESS) {
+    return false;
+  }
+  if (dfn.vkBindImageMemory(device, depth_image_, depth_memory_, 0) != VK_SUCCESS) {
+    return false;
+  }
+  VkImageViewCreateInfo view_info = {};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = depth_image_;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = kDepthFormat;
+  view_info.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &depth_view_) != VK_SUCCESS) {
+    return false;
+  }
+  depth_width_ = width;
+  depth_height_ = height;
+  return true;
+}
+
+void NativeCommandProcessor::DestroyDepthResources() {
+  if (!vulkan_device_) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  if (depth_view_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImageView(device, depth_view_, nullptr);
+    depth_view_ = VK_NULL_HANDLE;
+  }
+  if (depth_image_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImage(device, depth_image_, nullptr);
+    depth_image_ = VK_NULL_HANDLE;
+  }
+  if (depth_memory_ != VK_NULL_HANDLE) {
+    dfn.vkFreeMemory(device, depth_memory_, nullptr);
+    depth_memory_ = VK_NULL_HANDLE;
+  }
+  depth_width_ = 0;
+  depth_height_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +534,17 @@ bool NativeCommandProcessor::CreateDrawResources() {
   if (!shared_memory_->Initialize()) {
     REXLOG_ERROR("rexgpu-native: draw resources - shared memory init failed");
     return false;
+  }
+
+  // Phase 3: real guest texture cache (untiling + format decode via the shared
+  // texture_load_*_cs compute shaders). Non-fatal on failure - the draw path
+  // falls back to the dummy white texture so geometry still renders.
+  texture_cache_ = NativeTextureCache::Create(vulkan_device_, *register_file_, *shared_memory_);
+  if (!texture_cache_) {
+    REXLOG_WARN(
+        "rexgpu-native: draw resources - texture cache init failed; textures will be white");
+  } else {
+    REXLOG_INFO("rexgpu-native: texture cache ready (real guest textures)");
   }
 
   shader_translator_ = std::make_unique<SpirvShaderTranslator>(
@@ -638,6 +788,8 @@ void NativeCommandProcessor::DestroyDrawResources() {
   }
 
   shader_translator_.reset();
+  // Texture cache references the shared memory, so destroy it first.
+  texture_cache_.reset();
   if (shared_memory_) {
     shared_memory_->Shutdown();
     shared_memory_.reset();
@@ -660,6 +812,11 @@ void NativeCommandProcessor::BeginFrameIfNeeded() {
   uniform_ring_.cursor = 0;
   index_ring_.cursor = 0;
   deferred_draws_.clear();
+  // Advance the texture cache to a fresh frame (resets bindings so they are
+  // re-resolved from the current fetch constants this frame).
+  if (texture_cache_) {
+    texture_cache_->BeginNativeFrame();
+  }
   frame_open_ = true;
 }
 
@@ -686,12 +843,12 @@ VkShaderModule NativeCommandProcessor::GetShaderModule(const Shader::Translation
 
 VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
                                                VkShaderModule pixel_module,
-                                               VkPrimitiveTopology topology,
-                                               VkPipelineLayout layout) {
+                                               VkPipelineLayout layout,
+                                               const GuestPipelineState& state) {
   uint64_t key = uint64_t(reinterpret_cast<uintptr_t>(vertex_module));
   key = key * 1099511628211ull ^ uint64_t(reinterpret_cast<uintptr_t>(pixel_module));
-  key = key * 1099511628211ull ^ uint64_t(topology);
   key = key * 1099511628211ull ^ uint64_t(reinterpret_cast<uintptr_t>(layout));
+  key = key * 1099511628211ull ^ state.Hash();
   auto it = pipelines_.find(key);
   if (it != pipelines_.end()) {
     return it->second;
@@ -717,7 +874,7 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
 
   VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
   input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-  input_assembly.topology = topology;
+  input_assembly.topology = state.topology;
   input_assembly.primitiveRestartEnable = VK_FALSE;
 
   VkPipelineViewportStateCreateInfo viewport_state = {};
@@ -734,8 +891,9 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   VkPipelineRasterizationStateCreateInfo raster = {};
   raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
   raster.polygonMode = wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-  raster.cullMode = VK_CULL_MODE_NONE;
-  raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  // Wireframe diagnostic must see all triangles, so it disables culling.
+  raster.cullMode = wireframe ? VK_CULL_MODE_NONE : state.cull_mode;
+  raster.frontFace = state.front_face;
   raster.lineWidth = 1.0f;
 
   VkPipelineMultisampleStateCreateInfo multisample = {};
@@ -744,14 +902,23 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
 
   VkPipelineDepthStencilStateCreateInfo depth_stencil = {};
   depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-  depth_stencil.depthTestEnable = VK_FALSE;
-  depth_stencil.depthWriteEnable = VK_FALSE;
+  depth_stencil.depthTestEnable = state.depth_test_enable ? VK_TRUE : VK_FALSE;
+  depth_stencil.depthWriteEnable = state.depth_write_enable ? VK_TRUE : VK_FALSE;
+  depth_stencil.depthCompareOp = state.depth_compare_op;
+  depth_stencil.depthBoundsTestEnable = VK_FALSE;
   depth_stencil.stencilTestEnable = VK_FALSE;
+  depth_stencil.minDepthBounds = 0.0f;
+  depth_stencil.maxDepthBounds = 1.0f;
 
   VkPipelineColorBlendAttachmentState blend_attachment = {};
-  blend_attachment.blendEnable = VK_FALSE;
-  blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  blend_attachment.blendEnable = state.blend_enable ? VK_TRUE : VK_FALSE;
+  blend_attachment.srcColorBlendFactor = state.src_color_factor;
+  blend_attachment.dstColorBlendFactor = state.dst_color_factor;
+  blend_attachment.colorBlendOp = state.color_op;
+  blend_attachment.srcAlphaBlendFactor = state.src_alpha_factor;
+  blend_attachment.dstAlphaBlendFactor = state.dst_alpha_factor;
+  blend_attachment.alphaBlendOp = state.alpha_op;
+  blend_attachment.colorWriteMask = state.color_write_mask;
   VkPipelineColorBlendStateCreateInfo color_blend = {};
   color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
   color_blend.attachmentCount = 1;
@@ -786,6 +953,88 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   }
   pipelines_.emplace(key, pipeline);
   return pipeline;
+}
+
+uint64_t NativeCommandProcessor::GuestPipelineState::Hash() const {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  mix(uint64_t(topology));
+  mix((uint64_t(blend_enable ? 1 : 0)) | (uint64_t(src_color_factor) << 1) |
+      (uint64_t(dst_color_factor) << 9) | (uint64_t(color_op) << 17) |
+      (uint64_t(src_alpha_factor) << 24) | (uint64_t(dst_alpha_factor) << 32) |
+      (uint64_t(alpha_op) << 40) | (uint64_t(color_write_mask) << 48));
+  mix((uint64_t(depth_test_enable ? 1 : 0)) | (uint64_t(depth_write_enable ? 1 : 0) << 1) |
+      (uint64_t(depth_compare_op) << 2) | (uint64_t(cull_mode) << 8) |
+      (uint64_t(front_face) << 16));
+  return h;
+}
+
+NativeCommandProcessor::GuestPipelineState NativeCommandProcessor::BuildPipelineState(
+    VkPrimitiveTopology topology, bool primitive_polygonal,
+    const reg::RB_DEPTHCONTROL& depth_control, uint32_t pixel_writes_color_targets) const {
+  const RegisterFile& regs = *register_file_;
+  GuestPipelineState state;
+  state.topology = topology;
+
+  // --- Depth (from the already-normalized RB_DEPTHCONTROL). ---
+  xenos::CompareFunction depth_compare;
+  bool depth_write;
+  if (depth_control.z_enable) {
+    depth_compare = depth_control.zfunc;
+    depth_write = depth_control.z_write_enable != 0;
+  } else {
+    depth_compare = xenos::CompareFunction::kAlways;
+    depth_write = false;
+  }
+  state.depth_write_enable = depth_write;
+  state.depth_compare_op = VkCompareOp(uint32_t(VK_COMPARE_OP_NEVER) + uint32_t(depth_compare));
+  state.depth_test_enable = depth_write || depth_compare != xenos::CompareFunction::kAlways;
+
+  // --- Cull / front face (only meaningful for polygonal primitives). ---
+  if (primitive_polygonal) {
+    const auto mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+    VkCullModeFlags cull = VK_CULL_MODE_NONE;
+    if (mode_cntl.cull_front) {
+      cull |= VK_CULL_MODE_FRONT_BIT;
+    }
+    if (mode_cntl.cull_back) {
+      cull |= VK_CULL_MODE_BACK_BIT;
+    }
+    state.cull_mode = cull;
+    state.front_face = mode_cntl.face ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  }
+
+  // --- Blend + color write mask (render target 0). ---
+  const uint32_t normalized_color_mask =
+      draw_util::GetNormalizedColorMask(regs, pixel_writes_color_targets);
+  const uint32_t rt0_write_mask = normalized_color_mask & 0b1111;
+  state.color_write_mask = VkColorComponentFlags(rt0_write_mask);
+  if (rt0_write_mask) {
+    const auto blend_control =
+        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[0]);
+    const VkBlendFactor src_c = MapBlendFactor(blend_control.color_srcblend);
+    const VkBlendFactor dst_c = MapBlendFactor(blend_control.color_destblend);
+    const VkBlendOp op_c = MapBlendOp(blend_control.color_comb_fcn);
+    const VkBlendFactor src_a = MapBlendFactor(blend_control.alpha_srcblend);
+    const VkBlendFactor dst_a = MapBlendFactor(blend_control.alpha_destblend);
+    const VkBlendOp op_a = MapBlendOp(blend_control.alpha_comb_fcn);
+    const bool identity = src_c == VK_BLEND_FACTOR_ONE && dst_c == VK_BLEND_FACTOR_ZERO &&
+                          op_c == VK_BLEND_OP_ADD && src_a == VK_BLEND_FACTOR_ONE &&
+                          dst_a == VK_BLEND_FACTOR_ZERO && op_a == VK_BLEND_OP_ADD;
+    if (!identity) {
+      state.blend_enable = true;
+      state.src_color_factor = src_c;
+      state.dst_color_factor = dst_c;
+      state.color_op = op_c;
+      state.src_alpha_factor = src_a;
+      state.dst_alpha_factor = dst_a;
+      state.alpha_op = op_a;
+    }
+  }
+  return state;
 }
 
 bool NativeCommandProcessor::CreateDummyTextures() {
@@ -1056,6 +1305,76 @@ VkDescriptorSet NativeCommandProcessor::AllocateDummyTextureSet(const SpirvShade
   return set;
 }
 
+VkDescriptorSet NativeCommandProcessor::AllocateTextureSet(SpirvShader* shader,
+                                                           VkDescriptorSetLayout layout) {
+  const std::vector<SpirvShader::TextureBinding>& textures =
+      shader->GetTextureBindingsAfterTranslation();
+  const std::vector<SpirvShader::SamplerBinding>& samplers =
+      shader->GetSamplerBindingsAfterTranslation();
+  const uint32_t texture_count = uint32_t(textures.size());
+  const uint32_t sampler_count = uint32_t(samplers.size());
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  VkDescriptorSetAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  alloc.descriptorPool = texture_descriptor_pool_;
+  alloc.descriptorSetCount = 1;
+  alloc.pSetLayouts = &layout;
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  if (dfn.vkAllocateDescriptorSets(vulkan_device_->device(), &alloc, &set) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+
+  // image_infos / sampler_infos are sized up-front so the &element pointers
+  // stored in the writes remain valid until vkUpdateDescriptorSets.
+  std::vector<VkDescriptorImageInfo> image_infos(texture_count);
+  std::vector<VkDescriptorImageInfo> sampler_infos(sampler_count);
+  std::vector<VkWriteDescriptorSet> writes;
+  writes.reserve(texture_count + sampler_count);
+  for (uint32_t i = 0; i < texture_count; ++i) {
+    const SpirvShader::TextureBinding& tb = textures[i];
+    const auto dimension = static_cast<xenos::FetchOpDimension>(tb.dimension);
+    VkImageView view =
+        texture_cache_->GetActiveBindingOrNullImageView(tb.fetch_constant, dimension,
+                                                        bool(tb.is_signed));
+    if (view == VK_NULL_HANDLE) {
+      // No cache view (e.g. cache disabled) - fall back to the dummy white one.
+      view = DummyViewForDimension(dimension);
+    }
+    image_infos[i].imageView = view;
+    image_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w = {};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set;
+    w.dstBinding = i;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    w.pImageInfo = &image_infos[i];
+    writes.push_back(w);
+  }
+  for (uint32_t j = 0; j < sampler_count; ++j) {
+    VkSampler sampler =
+        texture_cache_->UseSampler(texture_cache_->GetSamplerParameters(samplers[j]));
+    if (sampler == VK_NULL_HANDLE) {
+      sampler = dummy_sampler_;
+    }
+    sampler_infos[j].sampler = sampler;
+    VkWriteDescriptorSet w = {};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set;
+    w.dstBinding = texture_count + j;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    w.pImageInfo = &sampler_infos[j];
+    writes.push_back(w);
+  }
+  if (!writes.empty()) {
+    dfn.vkUpdateDescriptorSets(vulkan_device_->device(), uint32_t(writes.size()), writes.data(), 0,
+                               nullptr);
+  }
+  return set;
+}
+
 #endif  // REX_HAS_VULKAN
 
 Shader* NativeCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
@@ -1215,7 +1534,11 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (pipeline_layout == VK_NULL_HANDLE) {
     return skip("pipeline_layout");
   }
-  VkPipeline pipeline = GetPipeline(vs_module, ps_module, topology, pipeline_layout);
+  // Phase 3: real register-derived blend / depth / cull instead of the Phase 2
+  // hardcoded blend-off / depth-off / cull-none.
+  const GuestPipelineState pipeline_state = BuildPipelineState(
+      topology, primitive_polygonal, normalized_depth_control, pixel_shader->writes_color_targets());
+  VkPipeline pipeline = GetPipeline(vs_module, ps_module, pipeline_layout, pipeline_state);
   if (pipeline == VK_NULL_HANDLE) {
     return skip("pipeline");
   }
@@ -1223,6 +1546,15 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   BeginFrameIfNeeded();
   if (deferred_draws_.size() >= kMaxDrawsPerFrame) {
     return skip("draw_budget");
+  }
+
+  // Phase 3: request + untile the real guest textures this draw's shaders use.
+  // Loads are immediate (submit-and-wait) so the textures are resident before
+  // the deferred draw replays at swap time.
+  if (texture_cache_) {
+    const uint32_t used_texture_mask = vertex_shader->GetUsedTextureMaskAfterTranslation() |
+                                       pixel_shader->GetUsedTextureMaskAfterTranslation();
+    texture_cache_->RequestTextures(used_texture_mask);
   }
 
   // --- Viewport / NDC. ---
@@ -1418,13 +1750,19 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     indexed = true;
   }
 
-  // --- Allocate per-draw texture descriptor sets (dummy white textures). ---
-  VkDescriptorSet vertex_texture_set =
-      (vtex + vsamp) ? AllocateDummyTextureSet(vertex_shader, GetTextureSetLayout(vtex, vsamp))
-                     : empty_texture_set_;
-  VkDescriptorSet pixel_texture_set =
-      (ptex + psamp) ? AllocateDummyTextureSet(pixel_shader, GetTextureSetLayout(ptex, psamp))
-                     : empty_texture_set_;
+  // --- Allocate per-draw texture descriptor sets. Phase 3 binds the REAL guest
+  // textures + samplers from the cache; falls back to dummy white if the cache
+  // failed to initialize. ---
+  auto allocate_texture_set = [&](SpirvShader* shader, uint32_t tex, uint32_t samp) -> VkDescriptorSet {
+    if (!(tex + samp)) {
+      return empty_texture_set_;
+    }
+    VkDescriptorSetLayout tex_layout = GetTextureSetLayout(tex, samp);
+    return texture_cache_ ? AllocateTextureSet(shader, tex_layout)
+                          : AllocateDummyTextureSet(shader, tex_layout);
+  };
+  VkDescriptorSet vertex_texture_set = allocate_texture_set(vertex_shader, vtex, vsamp);
+  VkDescriptorSet pixel_texture_set = allocate_texture_set(pixel_shader, ptex, psamp);
   if (vertex_texture_set == VK_NULL_HANDLE || pixel_texture_set == VK_NULL_HANDLE) {
     return skip("texture_descriptor");
   }
@@ -1588,19 +1926,23 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
             &acquire_barrier);
 
-        VkClearValue clear_value = {};
-        clear_value.color.float32[0] = clear_rgba[0];
-        clear_value.color.float32[1] = clear_rgba[1];
-        clear_value.color.float32[2] = clear_rgba[2];
-        clear_value.color.float32[3] = clear_rgba[3];
+        VkClearValue clear_values[2] = {};
+        clear_values[0].color.float32[0] = clear_rgba[0];
+        clear_values[0].color.float32[1] = clear_rgba[1];
+        clear_values[0].color.float32[2] = clear_rgba[2];
+        clear_values[0].color.float32[3] = clear_rgba[3];
+        // Depth cleared to 1.0 (far) each frame - the native backend keeps no
+        // persistent depth across frames (no EDRAM).
+        clear_values[1].depthStencil.depth = 1.0f;
+        clear_values[1].depthStencil.stencil = 0;
 
         VkRenderPassBeginInfo rp_begin = {};
         rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rp_begin.renderPass = clear_render_pass_;
         rp_begin.framebuffer = clear_framebuffer_;
         rp_begin.renderArea.extent = {width, height};
-        rp_begin.clearValueCount = 1;
-        rp_begin.pClearValues = &clear_value;
+        rp_begin.clearValueCount = 2;
+        rp_begin.pClearValues = clear_values;
         dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
         // Replay the frame's deferred guest draws into the guest output image.

@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 
 #include <rex/bit.h>
 #include <rex/cvar.h>
@@ -73,6 +75,12 @@ bool MapPrimitiveTopology(xenos::PrimitiveType prim_type, VkPrimitiveTopology& o
       return true;
     case xenos::PrimitiveType::kTriangleFan:
       out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+      return true;
+    case xenos::PrimitiveType::kRectangleList:
+      // Approximation: render each 3-vertex rectangle as a single triangle
+      // (half the quad). Proper rectangle expansion (the 4th implied vertex) is
+      // a Phase 3 concern; the triangle still shows the 2D sprite/quad geometry.
+      out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       return true;
     default:
       return false;
@@ -435,19 +443,16 @@ bool NativeCommandProcessor::CreateDrawResources() {
     return false;
   }
 
-  // Pipeline layout: set 0 + set 1 (textures sets 2/3 omitted - textured draws
-  // are skipped in Phase 2).
-  VkDescriptorSetLayout set_layouts[2] = {descriptor_set_layout_shared_memory_,
-                                          descriptor_set_layout_constants_};
-  VkPipelineLayoutCreateInfo pipeline_layout_info = {};
-  pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  pipeline_layout_info.setLayoutCount = 2;
-  pipeline_layout_info.pSetLayouts = set_layouts;
-  if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &guest_pipeline_layout_) !=
-      VK_SUCCESS) {
-    REXLOG_ERROR("rexgpu-native: draw resources - pipeline layout failed");
+  // Empty texture set layout (for stages that use no textures - sets 2/3 still
+  // exist in the pipeline layout for set-compatibility).
+  VkDescriptorSetLayoutCreateInfo empty_layout_info = {};
+  empty_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  if (dfn.vkCreateDescriptorSetLayout(device, &empty_layout_info, nullptr,
+                                      &texture_set_layout_empty_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: draw resources - empty texture set layout failed");
     return false;
   }
+  texture_set_layouts_.emplace(0u, texture_set_layout_empty_);
 
   // Static shared-memory descriptor set (never changes; points at the buffer).
   VkDescriptorPoolSize shared_pool_size = {};
@@ -455,7 +460,7 @@ bool NativeCommandProcessor::CreateDrawResources() {
   shared_pool_size.descriptorCount = shared_memory_binding_count_;
   VkDescriptorPoolCreateInfo shared_pool_info = {};
   shared_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  shared_pool_info.maxSets = 1;
+  shared_pool_info.maxSets = 2;  // shared-memory set + persistent empty texture set
   shared_pool_info.poolSizeCount = 1;
   shared_pool_info.pPoolSizes = &shared_pool_size;
   if (dfn.vkCreateDescriptorPool(device, &shared_pool_info, nullptr,
@@ -490,6 +495,23 @@ bool NativeCommandProcessor::CreateDrawResources() {
   shared_write.pBufferInfo = shared_buffer_infos.data();
   dfn.vkUpdateDescriptorSets(device, 1, &shared_write, 0, nullptr);
 
+  // Persistent empty texture descriptor set (bound for stages with no textures).
+  VkDescriptorSetAllocateInfo empty_alloc = {};
+  empty_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  empty_alloc.descriptorPool = shared_memory_descriptor_pool_;
+  empty_alloc.descriptorSetCount = 1;
+  empty_alloc.pSetLayouts = &texture_set_layout_empty_;
+  if (dfn.vkAllocateDescriptorSets(device, &empty_alloc, &empty_texture_set_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: draw resources - empty texture set alloc failed");
+    return false;
+  }
+
+  // Dummy white textures + default sampler for the texture path.
+  if (!CreateDummyTextures()) {
+    REXLOG_ERROR("rexgpu-native: draw resources - dummy textures failed");
+    return false;
+  }
+
   // Per-frame constant descriptor set pool.
   VkDescriptorPoolSize constant_pool_size = {};
   constant_pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -503,6 +525,24 @@ bool NativeCommandProcessor::CreateDrawResources() {
   if (dfn.vkCreateDescriptorPool(device, &constant_pool_info, nullptr,
                                  &constants_descriptor_pool_) != VK_SUCCESS) {
     REXLOG_ERROR("rexgpu-native: draw resources - constants pool failed");
+    return false;
+  }
+
+  // Per-frame texture descriptor set pool (dummy image + sampler bindings).
+  // Two sets per draw (vertex + pixel), generous per-set binding budget.
+  VkDescriptorPoolSize texture_pool_sizes[2] = {};
+  texture_pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  texture_pool_sizes[0].descriptorCount = kMaxDrawsPerFrame * 8;
+  texture_pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+  texture_pool_sizes[1].descriptorCount = kMaxDrawsPerFrame * 8;
+  VkDescriptorPoolCreateInfo texture_pool_info = {};
+  texture_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  texture_pool_info.maxSets = kMaxDrawsPerFrame * 2;
+  texture_pool_info.poolSizeCount = 2;
+  texture_pool_info.pPoolSizes = texture_pool_sizes;
+  if (dfn.vkCreateDescriptorPool(device, &texture_pool_info, nullptr, &texture_descriptor_pool_) !=
+      VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: draw resources - texture pool failed");
     return false;
   }
 
@@ -542,6 +582,42 @@ void NativeCommandProcessor::DestroyDrawResources() {
   DestroyHostRingBuffer(uniform_ring_);
   DestroyHostRingBuffer(index_ring_);
 
+  for (auto& kv : pipeline_layouts_) {
+    dfn.vkDestroyPipelineLayout(device, kv.second, nullptr);
+  }
+  pipeline_layouts_.clear();
+  for (auto& kv : texture_set_layouts_) {
+    dfn.vkDestroyDescriptorSetLayout(device, kv.second, nullptr);
+  }
+  texture_set_layouts_.clear();
+  texture_set_layout_empty_ = VK_NULL_HANDLE;  // owned by the map above
+
+  // Dummy textures.
+  VkImage dummy_images[3] = {dummy_image_2d_array_, dummy_image_3d_, dummy_image_cube_};
+  VkImageView dummy_views[3] = {dummy_view_2d_array_, dummy_view_3d_, dummy_view_cube_};
+  for (int i = 0; i < 3; ++i) {
+    if (dummy_views[i] != VK_NULL_HANDLE) {
+      dfn.vkDestroyImageView(device, dummy_views[i], nullptr);
+    }
+    if (dummy_images[i] != VK_NULL_HANDLE) {
+      dfn.vkDestroyImage(device, dummy_images[i], nullptr);
+    }
+    if (dummy_memory_[i] != VK_NULL_HANDLE) {
+      dfn.vkFreeMemory(device, dummy_memory_[i], nullptr);
+      dummy_memory_[i] = VK_NULL_HANDLE;
+    }
+  }
+  dummy_image_2d_array_ = dummy_image_3d_ = dummy_image_cube_ = VK_NULL_HANDLE;
+  dummy_view_2d_array_ = dummy_view_3d_ = dummy_view_cube_ = VK_NULL_HANDLE;
+  if (dummy_sampler_ != VK_NULL_HANDLE) {
+    dfn.vkDestroySampler(device, dummy_sampler_, nullptr);
+    dummy_sampler_ = VK_NULL_HANDLE;
+  }
+
+  if (texture_descriptor_pool_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyDescriptorPool(device, texture_descriptor_pool_, nullptr);
+    texture_descriptor_pool_ = VK_NULL_HANDLE;
+  }
   if (constants_descriptor_pool_ != VK_NULL_HANDLE) {
     dfn.vkDestroyDescriptorPool(device, constants_descriptor_pool_, nullptr);
     constants_descriptor_pool_ = VK_NULL_HANDLE;
@@ -550,10 +626,7 @@ void NativeCommandProcessor::DestroyDrawResources() {
     dfn.vkDestroyDescriptorPool(device, shared_memory_descriptor_pool_, nullptr);
     shared_memory_descriptor_pool_ = VK_NULL_HANDLE;
     shared_memory_descriptor_set_ = VK_NULL_HANDLE;
-  }
-  if (guest_pipeline_layout_ != VK_NULL_HANDLE) {
-    dfn.vkDestroyPipelineLayout(device, guest_pipeline_layout_, nullptr);
-    guest_pipeline_layout_ = VK_NULL_HANDLE;
+    empty_texture_set_ = VK_NULL_HANDLE;
   }
   if (descriptor_set_layout_constants_ != VK_NULL_HANDLE) {
     dfn.vkDestroyDescriptorSetLayout(device, descriptor_set_layout_constants_, nullptr);
@@ -583,6 +656,7 @@ void NativeCommandProcessor::BeginFrameIfNeeded() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
   dfn.vkResetDescriptorPool(device, constants_descriptor_pool_, 0);
+  dfn.vkResetDescriptorPool(device, texture_descriptor_pool_, 0);
   uniform_ring_.cursor = 0;
   index_ring_.cursor = 0;
   deferred_draws_.clear();
@@ -612,10 +686,12 @@ VkShaderModule NativeCommandProcessor::GetShaderModule(const Shader::Translation
 
 VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
                                                VkShaderModule pixel_module,
-                                               VkPrimitiveTopology topology) {
+                                               VkPrimitiveTopology topology,
+                                               VkPipelineLayout layout) {
   uint64_t key = uint64_t(reinterpret_cast<uintptr_t>(vertex_module));
   key = key * 1099511628211ull ^ uint64_t(reinterpret_cast<uintptr_t>(pixel_module));
   key = key * 1099511628211ull ^ uint64_t(topology);
+  key = key * 1099511628211ull ^ uint64_t(reinterpret_cast<uintptr_t>(layout));
   auto it = pipelines_.find(key);
   if (it != pipelines_.end()) {
     return it->second;
@@ -649,9 +725,15 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   viewport_state.viewportCount = 1;
   viewport_state.scissorCount = 1;
 
+  // [DIAG] REX_NATIVE_WIREFRAME=1 renders geometry as a wireframe so the mesh
+  // structure is visible even with placeholder (untextured/white) shading -
+  // useful for verifying that real guest geometry is being drawn.
+  static const bool wireframe =
+      getenv("REX_NATIVE_WIREFRAME") && atoi(getenv("REX_NATIVE_WIREFRAME")) != 0 &&
+      vulkan_device_->properties().fillModeNonSolid;
   VkPipelineRasterizationStateCreateInfo raster = {};
   raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-  raster.polygonMode = VK_POLYGON_MODE_FILL;
+  raster.polygonMode = wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
   raster.cullMode = VK_CULL_MODE_NONE;
   raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   raster.lineWidth = 1.0f;
@@ -693,7 +775,7 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   pipeline_info.pDepthStencilState = &depth_stencil;
   pipeline_info.pColorBlendState = &color_blend;
   pipeline_info.pDynamicState = &dynamic;
-  pipeline_info.layout = guest_pipeline_layout_;
+  pipeline_info.layout = layout;
   pipeline_info.renderPass = clear_render_pass_;
   pipeline_info.subpass = 0;
 
@@ -704,6 +786,274 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   }
   pipelines_.emplace(key, pipeline);
   return pipeline;
+}
+
+bool NativeCommandProcessor::CreateDummyTextures() {
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  struct Def {
+    VkImage* image;
+    VkImageView* view;
+    VkImageType type;
+    VkImageViewType view_type;
+    uint32_t layers;
+    VkImageCreateFlags flags;
+  };
+  const Def defs[3] = {
+      {&dummy_image_2d_array_, &dummy_view_2d_array_, VK_IMAGE_TYPE_2D,
+       VK_IMAGE_VIEW_TYPE_2D_ARRAY, 1, 0},
+      {&dummy_image_3d_, &dummy_view_3d_, VK_IMAGE_TYPE_3D, VK_IMAGE_VIEW_TYPE_3D, 1, 0},
+      {&dummy_image_cube_, &dummy_view_cube_, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, 6,
+       VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)},
+  };
+
+  for (int i = 0; i < 3; ++i) {
+    VkImageCreateInfo image_info = {};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.flags = defs[i].flags;
+    image_info.imageType = defs[i].type;
+    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent = {1, 1, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = defs[i].layers;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (dfn.vkCreateImage(device, &image_info, nullptr, defs[i].image) != VK_SUCCESS) {
+      return false;
+    }
+    VkMemoryRequirements req;
+    dfn.vkGetImageMemoryRequirements(device, *defs[i].image, &req);
+    uint32_t type_index;
+    if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                               &type_index) &&
+        !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+      return false;
+    }
+    VkMemoryAllocateInfo alloc = {};
+    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = type_index;
+    if (dfn.vkAllocateMemory(device, &alloc, nullptr, &dummy_memory_[i]) != VK_SUCCESS) {
+      return false;
+    }
+    if (dfn.vkBindImageMemory(device, *defs[i].image, dummy_memory_[i], 0) != VK_SUCCESS) {
+      return false;
+    }
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = *defs[i].image;
+    view_info.viewType = defs[i].view_type;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, defs[i].layers};
+    if (dfn.vkCreateImageView(device, &view_info, nullptr, defs[i].view) != VK_SUCCESS) {
+      return false;
+    }
+  }
+
+  VkSamplerCreateInfo sampler_info = {};
+  sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  sampler_info.magFilter = VK_FILTER_LINEAR;
+  sampler_info.minFilter = VK_FILTER_LINEAR;
+  sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+  sampler_info.maxLod = VK_LOD_CLAMP_NONE;
+  if (dfn.vkCreateSampler(device, &sampler_info, nullptr, &dummy_sampler_) != VK_SUCCESS) {
+    return false;
+  }
+
+  // Clear the dummy images to white and move them to SHADER_READ_ONLY_OPTIMAL.
+  dfn.vkResetCommandPool(device, command_pool_, 0);
+  VkCommandBufferBeginInfo begin_info = {};
+  begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (dfn.vkBeginCommandBuffer(command_buffer_, &begin_info) != VK_SUCCESS) {
+    return false;
+  }
+  const VkClearColorValue white = {{1.0f, 1.0f, 1.0f, 1.0f}};
+  for (int i = 0; i < 3; ++i) {
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, defs[i].layers};
+    VkImageMemoryBarrier to_dst = {};
+    to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_dst.srcAccessMask = 0;
+    to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_dst.image = *defs[i].image;
+    to_dst.subresourceRange = range;
+    dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+    dfn.vkCmdClearColorImage(command_buffer_, *defs[i].image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
+    VkImageMemoryBarrier to_read = to_dst;
+    to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &to_read);
+  }
+  if (dfn.vkEndCommandBuffer(command_buffer_) != VK_SUCCESS) {
+    return false;
+  }
+  dfn.vkResetFences(device, 1, &clear_fence_);
+  VkSubmitInfo submit = {};
+  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &command_buffer_;
+  {
+    const ui::vulkan::VulkanDevice::Queue::Acquisition acq =
+        vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
+    if (dfn.vkQueueSubmit(acq.queue(), 1, &submit, clear_fence_) != VK_SUCCESS) {
+      return false;
+    }
+  }
+  dfn.vkWaitForFences(device, 1, &clear_fence_, VK_TRUE, UINT64_MAX);
+  return true;
+}
+
+VkImageView NativeCommandProcessor::DummyViewForDimension(xenos::FetchOpDimension dimension) const {
+  switch (dimension) {
+    case xenos::FetchOpDimension::k3DOrStacked:
+      return dummy_view_3d_;
+    case xenos::FetchOpDimension::kCube:
+      return dummy_view_cube_;
+    default:
+      return dummy_view_2d_array_;
+  }
+}
+
+VkDescriptorSetLayout NativeCommandProcessor::GetTextureSetLayout(uint32_t texture_count,
+                                                                 uint32_t sampler_count) {
+  const uint32_t key = (texture_count << 16) | (sampler_count & 0xFFFF);
+  auto it = texture_set_layouts_.find(key);
+  if (it != texture_set_layouts_.end()) {
+    return it->second;
+  }
+  const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  std::vector<VkDescriptorSetLayoutBinding> bindings;
+  bindings.reserve(texture_count + sampler_count);
+  for (uint32_t i = 0; i < texture_count; ++i) {
+    VkDescriptorSetLayoutBinding b = {};
+    b.binding = i;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    b.descriptorCount = 1;
+    b.stageFlags = stages;
+    bindings.push_back(b);
+  }
+  for (uint32_t j = 0; j < sampler_count; ++j) {
+    VkDescriptorSetLayoutBinding b = {};
+    b.binding = texture_count + j;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    b.descriptorCount = 1;
+    b.stageFlags = stages;
+    bindings.push_back(b);
+  }
+  VkDescriptorSetLayoutCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  info.bindingCount = uint32_t(bindings.size());
+  info.pBindings = bindings.data();
+  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+  if (vulkan_device_->functions().vkCreateDescriptorSetLayout(vulkan_device_->device(), &info,
+                                                              nullptr, &layout) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+  texture_set_layouts_.emplace(key, layout);
+  return layout;
+}
+
+VkPipelineLayout NativeCommandProcessor::GetGuestPipelineLayout(uint32_t vertex_texture_count,
+                                                               uint32_t vertex_sampler_count,
+                                                               uint32_t pixel_texture_count,
+                                                               uint32_t pixel_sampler_count) {
+  const uint64_t key = (uint64_t(vertex_texture_count) << 48) |
+                       (uint64_t(vertex_sampler_count) << 32) |
+                       (uint64_t(pixel_texture_count) << 16) | uint64_t(pixel_sampler_count);
+  auto it = pipeline_layouts_.find(key);
+  if (it != pipeline_layouts_.end()) {
+    return it->second;
+  }
+  VkDescriptorSetLayout vertex_tex = GetTextureSetLayout(vertex_texture_count, vertex_sampler_count);
+  VkDescriptorSetLayout pixel_tex = GetTextureSetLayout(pixel_texture_count, pixel_sampler_count);
+  if (vertex_tex == VK_NULL_HANDLE || pixel_tex == VK_NULL_HANDLE) {
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorSetLayout sets[4] = {descriptor_set_layout_shared_memory_,
+                                   descriptor_set_layout_constants_, vertex_tex, pixel_tex};
+  VkPipelineLayoutCreateInfo info = {};
+  info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  info.setLayoutCount = 4;
+  info.pSetLayouts = sets;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  if (vulkan_device_->functions().vkCreatePipelineLayout(vulkan_device_->device(), &info, nullptr,
+                                                         &layout) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+  pipeline_layouts_.emplace(key, layout);
+  return layout;
+}
+
+VkDescriptorSet NativeCommandProcessor::AllocateDummyTextureSet(const SpirvShader* shader,
+                                                               VkDescriptorSetLayout layout) {
+  const std::vector<SpirvShader::TextureBinding>& textures =
+      shader->GetTextureBindingsAfterTranslation();
+  const std::vector<SpirvShader::SamplerBinding>& samplers =
+      shader->GetSamplerBindingsAfterTranslation();
+  const uint32_t texture_count = uint32_t(textures.size());
+  const uint32_t sampler_count = uint32_t(samplers.size());
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  VkDescriptorSetAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  alloc.descriptorPool = texture_descriptor_pool_;
+  alloc.descriptorSetCount = 1;
+  alloc.pSetLayouts = &layout;
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  if (dfn.vkAllocateDescriptorSets(vulkan_device_->device(), &alloc, &set) != VK_SUCCESS) {
+    return VK_NULL_HANDLE;
+  }
+
+  std::vector<VkDescriptorImageInfo> image_infos(texture_count);
+  std::vector<VkDescriptorImageInfo> sampler_infos(sampler_count);
+  std::vector<VkWriteDescriptorSet> writes;
+  writes.reserve(texture_count + sampler_count);
+  for (uint32_t i = 0; i < texture_count; ++i) {
+    image_infos[i].imageView = DummyViewForDimension(
+        static_cast<xenos::FetchOpDimension>(textures[i].dimension));
+    image_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w = {};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set;
+    w.dstBinding = i;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    w.pImageInfo = &image_infos[i];
+    writes.push_back(w);
+  }
+  for (uint32_t j = 0; j < sampler_count; ++j) {
+    sampler_infos[j].sampler = dummy_sampler_;
+    VkWriteDescriptorSet w = {};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = set;
+    w.dstBinding = texture_count + j;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    w.pImageInfo = &sampler_infos[j];
+    writes.push_back(w);
+  }
+  if (!writes.empty()) {
+    dfn.vkUpdateDescriptorSets(vulkan_device_->device(), uint32_t(writes.size()), writes.data(), 0,
+                               nullptr);
+  }
+  return set;
 }
 
 #endif  // REX_HAS_VULKAN
@@ -749,12 +1099,16 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   auto skip = [&](const char* reason) {
     ++skipped_draw_total_;
-    static uint32_t skip_log_budget = 64;
-    if (skip_log_budget) {
-      --skip_log_budget;
-      REXLOG_TRACE("rexgpu-native: skip draw #{} ({}) prim={}", draw_count_, reason,
-                   uint32_t(prim_type));
+    // Aggregate: log the first time each distinct reason is seen, plus a running
+    // count every 1000 occurrences, so the dominant skip cause is visible at the
+    // default `info` log level without flooding.
+    static std::unordered_map<std::string, uint64_t> reason_counts;
+    uint64_t& n = reason_counts[reason];
+    if (n == 0 || (n % 2000) == 0) {
+      REXLOG_INFO("rexgpu-native: skip draw #{} reason={} count={} prim={}", draw_count_, reason,
+                  n + 1, uint32_t(prim_type));
     }
+    ++n;
     return true;  // Draw is consumed; just not rendered natively yet.
   };
 
@@ -781,11 +1135,8 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   vertex_shader->AnalyzeUcode(ucode_buffer);
   pixel_shader->AnalyzeUcode(ucode_buffer);
 
-  if (!vertex_shader->texture_bindings().empty() || !pixel_shader->texture_bindings().empty()) {
-    return skip("textured");  // Phase 3.
-  }
   if (vertex_shader->memexport_eM_written() || pixel_shader->memexport_eM_written()) {
-    return skip("memexport");
+    return skip("memexport");  // Phase 3 (needs shared-memory writes).
   }
 
   const bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
@@ -852,7 +1203,19 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (vs_module == VK_NULL_HANDLE || ps_module == VK_NULL_HANDLE) {
     return skip("shader_module");
   }
-  VkPipeline pipeline = GetPipeline(vs_module, ps_module, topology);
+
+  // Texture/sampler binding counts are known after translation. Textured draws
+  // are rendered with a dummy white texture bound to every binding (Phase 2.5),
+  // so the geometry appears instead of being skipped.
+  const uint32_t vtex = uint32_t(vertex_shader->GetTextureBindingsAfterTranslation().size());
+  const uint32_t vsamp = uint32_t(vertex_shader->GetSamplerBindingsAfterTranslation().size());
+  const uint32_t ptex = uint32_t(pixel_shader->GetTextureBindingsAfterTranslation().size());
+  const uint32_t psamp = uint32_t(pixel_shader->GetSamplerBindingsAfterTranslation().size());
+  VkPipelineLayout pipeline_layout = GetGuestPipelineLayout(vtex, vsamp, ptex, psamp);
+  if (pipeline_layout == VK_NULL_HANDLE) {
+    return skip("pipeline_layout");
+  }
+  VkPipeline pipeline = GetPipeline(vs_module, ps_module, topology, pipeline_layout);
   if (pipeline == VK_NULL_HANDLE) {
     return skip("pipeline");
   }
@@ -1055,10 +1418,24 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     indexed = true;
   }
 
+  // --- Allocate per-draw texture descriptor sets (dummy white textures). ---
+  VkDescriptorSet vertex_texture_set =
+      (vtex + vsamp) ? AllocateDummyTextureSet(vertex_shader, GetTextureSetLayout(vtex, vsamp))
+                     : empty_texture_set_;
+  VkDescriptorSet pixel_texture_set =
+      (ptex + psamp) ? AllocateDummyTextureSet(pixel_shader, GetTextureSetLayout(ptex, psamp))
+                     : empty_texture_set_;
+  if (vertex_texture_set == VK_NULL_HANDLE || pixel_texture_set == VK_NULL_HANDLE) {
+    return skip("texture_descriptor");
+  }
+
   // --- Capture the deferred draw. ---
   DeferredDraw draw = {};
   draw.pipeline = pipeline;
+  draw.pipeline_layout = pipeline_layout;
   draw.constants_set = constants_set;
+  draw.vertex_texture_set = vertex_texture_set;
+  draw.pixel_texture_set = pixel_texture_set;
   draw.viewport.x = float(viewport_info.xy_offset[0]);
   draw.viewport.y = float(viewport_info.xy_offset[1]);
   draw.viewport.width = float(std::max(viewport_info.xy_extent[0], UINT32_C(1)));
@@ -1229,9 +1606,10 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         // Replay the frame's deferred guest draws into the guest output image.
         for (const DeferredDraw& draw : deferred_draws_) {
           dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-          VkDescriptorSet sets[2] = {shared_memory_descriptor_set_, draw.constants_set};
+          VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
+                                     draw.vertex_texture_set, draw.pixel_texture_set};
           dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                      guest_pipeline_layout_, 0, 2, sets, 0, nullptr);
+                                      draw.pipeline_layout, 0, 4, sets, 0, nullptr);
           VkViewport viewport = draw.viewport;
           dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
           // Clamp scissor to the framebuffer.
@@ -1311,10 +1689,25 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           getenv("REX_DUMP_FRAME_START") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_START"))) : 0u;
       static const uint32_t dump_max =
           getenv("REX_DUMP_FRAME_MAX") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_MAX"))) : 12u;
+      // Optional: only dump frames that recorded at least this many guest draws
+      // (so a busy geometry frame is captured instead of an idle clear frame).
+      static const uint32_t dump_min_draws =
+          getenv("REX_DUMP_FRAME_MINDRAWS") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_MINDRAWS"))) : 0u;
       static uint32_t dumped = 0;
+      static uint32_t qualifying = 0;
       const uint32_t frame_counter = uint32_t(swap_count_);
-      if (dumped < dump_max && dump_every && frame_counter >= dump_start &&
-          (frame_counter % dump_every) == 0) {
+      bool want_dump;
+      if (dump_min_draws) {
+        // Dump every dump_every-th frame whose draw count meets the threshold.
+        want_dump = draw_replay_count >= dump_min_draws &&
+                    (dump_every ? (qualifying % dump_every) == 0 : true);
+        if (draw_replay_count >= dump_min_draws) {
+          ++qualifying;
+        }
+      } else {
+        want_dump = dump_every && frame_counter >= dump_start && (frame_counter % dump_every) == 0;
+      }
+      if (dumped < dump_max && want_dump) {
         ui::RawImage raw_image;
         if (presenter->CaptureGuestOutput(raw_image)) {
           char path[512];

@@ -38,6 +38,7 @@
 
 namespace rex::graphics {
 class SpirvShaderTranslator;
+class SpirvShader;
 }  // namespace rex::graphics
 
 namespace rex::graphics::native {
@@ -119,7 +120,10 @@ class NativeCommandProcessor : public CommandProcessor {
   // One deferred draw captured during IssueDraw, replayed at IssueSwap.
   struct DeferredDraw {
     VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkDescriptorSet constants_set = VK_NULL_HANDLE;
+    VkDescriptorSet vertex_texture_set = VK_NULL_HANDLE;
+    VkDescriptorSet pixel_texture_set = VK_NULL_HANDLE;
     VkViewport viewport = {};
     VkRect2D scissor = {};
     bool indexed = false;
@@ -143,21 +147,54 @@ class NativeCommandProcessor : public CommandProcessor {
   VkShaderModule GetShaderModule(const Shader::Translation* translation);
   // Returns (creating if needed) a graphics pipeline for the given state.
   VkPipeline GetPipeline(VkShaderModule vertex_module, VkShaderModule pixel_module,
-                         VkPrimitiveTopology topology);
+                         VkPrimitiveTopology topology, VkPipelineLayout layout);
+
+  // Texture-path helpers. Textured guest draws are rendered with a dummy white
+  // texture bound to every image/sampler binding the shader declares, so the
+  // geometry shape appears (flat/vertex-coloured) instead of being skipped.
+  bool CreateDummyTextures();
+  VkImageView DummyViewForDimension(xenos::FetchOpDimension dimension) const;
+  // Texture descriptor set layout for a given image + sampler binding count.
+  VkDescriptorSetLayout GetTextureSetLayout(uint32_t texture_count, uint32_t sampler_count);
+  // Guest pipeline layout for the four per-stage texture/sampler counts.
+  VkPipelineLayout GetGuestPipelineLayout(uint32_t vertex_texture_count,
+                                          uint32_t vertex_sampler_count,
+                                          uint32_t pixel_texture_count,
+                                          uint32_t pixel_sampler_count);
+  // Allocates and fills a per-draw texture descriptor set with dummy textures.
+  VkDescriptorSet AllocateDummyTextureSet(const SpirvShader* shader, VkDescriptorSetLayout layout);
 
   // Guest-shader descriptor layout (matches SpirvShaderTranslator):
-  //   set 0 = shared memory storage buffer(s); set 1 = 5 constant UBOs.
+  //   set 0 = shared memory storage buffer(s); set 1 = 5 constant UBOs;
+  //   set 2 = vertex textures; set 3 = pixel textures.
   VkDescriptorSetLayout descriptor_set_layout_shared_memory_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout descriptor_set_layout_constants_ = VK_NULL_HANDLE;
-  VkPipelineLayout guest_pipeline_layout_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout texture_set_layout_empty_ = VK_NULL_HANDLE;
 
   VkDescriptorPool shared_memory_descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_memory_descriptor_set_ = VK_NULL_HANDLE;
   uint32_t shared_memory_binding_count_ = 1;
 
-  // Per-frame constant descriptor sets, reset each frame.
+  // Dummy white textures (one per Xenos image dimension) + a default sampler.
+  VkImage dummy_image_2d_array_ = VK_NULL_HANDLE;   // covers 1D/2D (Dim2D arrayed)
+  VkImageView dummy_view_2d_array_ = VK_NULL_HANDLE;
+  VkImage dummy_image_3d_ = VK_NULL_HANDLE;
+  VkImageView dummy_view_3d_ = VK_NULL_HANDLE;
+  VkImage dummy_image_cube_ = VK_NULL_HANDLE;
+  VkImageView dummy_view_cube_ = VK_NULL_HANDLE;
+  VkDeviceMemory dummy_memory_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkSampler dummy_sampler_ = VK_NULL_HANDLE;
+  VkDescriptorSet empty_texture_set_ = VK_NULL_HANDLE;
+
+  // Cached texture set layouts (key: texture_count<<16 | sampler_count) and
+  // guest pipeline layouts (key: packed four per-stage counts).
+  std::unordered_map<uint32_t, VkDescriptorSetLayout> texture_set_layouts_;
+  std::unordered_map<uint64_t, VkPipelineLayout> pipeline_layouts_;
+
+  // Per-frame constant + texture descriptor sets, reset each frame.
   VkDescriptorPool constants_descriptor_pool_ = VK_NULL_HANDLE;
-  static constexpr uint32_t kMaxDrawsPerFrame = 4096;
+  VkDescriptorPool texture_descriptor_pool_ = VK_NULL_HANDLE;
+  static constexpr uint32_t kMaxDrawsPerFrame = 8192;
 
   std::unique_ptr<NativeSharedMemory> shared_memory_;
   std::unique_ptr<SpirvShaderTranslator> shader_translator_;

@@ -142,3 +142,76 @@ if(REXGLUE_USE_D3D12)
         dxguid
     )
 endif()
+
+#==============================================================================
+# rexgpu-native: game-agnostic NATIVE GPU renderer plugin
+#
+# Selected at runtime with --gpu_plugin native (loads librexgpu-native.so).
+# Reuses the SAME backend-agnostic PM4 command-processor + Xenos base that
+# rexgpu-xenos uses, and replaces only the backend draw/resolve/present seams
+# with native GPU command translation (no EDRAM/tiling/resolve emulation).
+#
+# SCAFFOLD: the backend seams currently log the command stream. This target is
+# fully independent of rexgpu-xenos - it does not modify or link it.
+#
+# Vulkan-only for now (the scaffold reuses the Vulkan provider for windowing).
+#==============================================================================
+if(REXGLUE_USE_VULKAN)
+    set(REXGPU_NATIVE_SOURCES
+        # Native renderer plugin entry + backend
+        native/plugin_main.cpp
+        native/graphics_system.cpp
+        native/command_processor.cpp
+
+        # Shared, game-agnostic PM4 + Xenos base (identical to the rexgpu-xenos
+        # backend-agnostic core; only the backend files differ).
+        flags.cpp
+        register_file.cpp
+        registers.cpp
+        pipeline/shader/shader.cpp
+        format/ucode.cpp
+        sampler_info.cpp
+        graphics_system.cpp
+        command_processor.cpp
+        trace_writer.cpp
+        util/draw_extent_estimator.cpp
+        util/draw.cpp
+        packet_disassembler.cpp
+        primitive_processor.cpp
+        pipeline/render_target/cache.cpp
+        shared_memory.cpp
+        pipeline/texture/cache.cpp
+        pipeline/shader/interpreter.cpp
+        pipeline/shader/translator.cpp
+        pipeline/shader/translator_disasm.cpp
+    )
+
+    add_library(rexgpu-native SHARED ${REXGPU_NATIVE_SOURCES})
+    add_library(rex::gpu-native ALIAS rexgpu-native)
+
+    set_target_properties(rexgpu-native PROPERTIES
+        EXPORT_NAME gpu-native
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+
+    # ${CMAKE_CURRENT_SOURCE_DIR} (src/graphics) lets native/*.cpp resolve their
+    # "native/..." internal includes; renderdoc mirrors the xenos target.
+    target_include_directories(rexgpu-native PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${REXGLUE_ROOT}/thirdparty/renderdoc
+        ${REXGLUE_ROOT}
+    )
+
+    target_compile_options(rexgpu-native PRIVATE -Wno-unused-variable)
+
+    # Everything PRIVATE: the plugin has no consumers. rexruntime already
+    # contains the rexcore/rexui objects (including the Vulkan provider).
+    target_link_libraries(rexgpu-native PRIVATE
+        rexruntime
+        xxHash::xxhash
+        snappy
+        volk::volk
+        GPUOpen::VulkanMemoryAllocator
+    )
+endif()

@@ -36,6 +36,10 @@
 #include <rex/graphics/pipeline/shader/shader.h>
 #include <rex/graphics/xenos.h>
 
+#if REX_HAS_VULKAN
+#include <rex/ui/vulkan/device.h>
+#endif
+
 namespace rex::graphics::native {
 
 class NativeGraphicsSystem;
@@ -75,6 +79,38 @@ class NativeCommandProcessor : public CommandProcessor {
   uint64_t draw_count_ = 0;
   uint64_t copy_count_ = 0;
   uint64_t swap_count_ = 0;
+
+#if REX_HAS_VULKAN
+  // Phase 1: the minimum host device state needed to CLEAR one image and hand
+  // it to the presenter. The VkDevice, queue and command pool are borrowed from
+  // the Vulkan provider the base graphics system already stood up, so no device
+  // creation is duplicated here. The guest output image the presenter gives the
+  // refresher is VK_FORMAT_A2B10G10R10_UNORM_PACK32 with COLOR_ATTACHMENT (but
+  // NOT TRANSFER_DST) usage, so the clear is a render pass with LOAD_OP_CLEAR
+  // rather than vkCmdClearColorImage.
+  bool CreateClearResources();
+  void DestroyClearResources();
+  // (Re)builds clear_framebuffer_ for the guest output image the presenter is
+  // handing us this frame (its view/version rotates through the mailbox).
+  bool EnsureClearFramebuffer(VkImageView image_view, uint64_t image_version, uint32_t width,
+                              uint32_t height);
+
+  const ui::vulkan::VulkanDevice* vulkan_device_ = nullptr;
+  VkRenderPass clear_render_pass_ = VK_NULL_HANDLE;
+  VkCommandPool command_pool_ = VK_NULL_HANDLE;
+  VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+  VkFence clear_fence_ = VK_NULL_HANDLE;
+
+  VkFramebuffer clear_framebuffer_ = VK_NULL_HANDLE;
+  VkImageView clear_framebuffer_view_ = VK_NULL_HANDLE;
+  uint64_t clear_framebuffer_version_ = UINT64_MAX;
+  uint32_t clear_framebuffer_width_ = 0;
+  uint32_t clear_framebuffer_height_ = 0;
+
+  // Only log the decoded guest clear colour when it changes, so the swap path
+  // stays quiet at frame rate.
+  uint32_t last_logged_clear_raw_ = 0xFFFFFFFFu;
+#endif  // REX_HAS_VULKAN
 };
 
 }  // namespace rex::graphics::native

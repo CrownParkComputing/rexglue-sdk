@@ -33,6 +33,23 @@ Latest SDK builds and releases are published on [GitHub Releases](https://github
 
 For quick start guide, full CLI reference, and config file options, see the [wiki](https://github.com/rexglue/rexglue-sdk/wiki).
 
+## Building from source (Linux)
+
+Requirements: Clang, CMake ≥ 3.21, Ninja, Vulkan headers/loader.
+
+```sh
+git clone --recurse-submodules https://github.com/CrownParkComputing/rexglue-sdk.git
+cd rexglue-sdk
+cmake --preset linux-amd64                     # Ninja Multi-Config, Clang
+cmake --build --preset linux-amd64-release
+```
+
+Build artifacts (the `rexglue` CLI, `librexruntime.so`, and the Vulkan GPU
+plugin `librexgpu-xenos.so`) land in `out/linux-amd64/Release/`. Note that at
+runtime the GPU plugin is loaded from the executable's folder or
+`LD_LIBRARY_PATH`, so keep `out/linux-amd64/Release` on the library path when
+running ported titles from elsewhere.
+
 # **Disclaimer**
 ReXGlue is not affiliated with nor endorsed by Microsoft or Xbox. It is an independent project created for educational and development purposes. All trademarks and copyrights belong to their respective owners. 
 

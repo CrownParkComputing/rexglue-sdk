@@ -162,6 +162,7 @@ if(REXGLUE_USE_VULKAN)
         native/plugin_main.cpp
         native/graphics_system.cpp
         native/command_processor.cpp
+        native/native_shared_memory.cpp
 
         # Shared, game-agnostic PM4 + Xenos base (identical to the rexgpu-xenos
         # backend-agnostic core; only the backend files differ).
@@ -184,6 +185,17 @@ if(REXGLUE_USE_VULKAN)
         pipeline/shader/interpreter.cpp
         pipeline/shader/translator.cpp
         pipeline/shader/translator_disasm.cpp
+
+        # SPIR-V shader translation (Xenos microcode -> SPIR-V). Reused verbatim
+        # from the shared translator - the native backend translates guest
+        # shaders itself instead of emulating the Xenos ALU.
+        pipeline/shader/spirv_builder.cpp
+        pipeline/shader/spirv.cpp
+        pipeline/shader/spirv_translator.cpp
+        pipeline/shader/spirv_translator_alu.cpp
+        pipeline/shader/spirv_translator_fetch.cpp
+        pipeline/shader/spirv_translator_memexport.cpp
+        pipeline/shader/spirv_translator_rb.cpp
     )
 
     add_library(rexgpu-native SHARED ${REXGPU_NATIVE_SOURCES})
@@ -213,5 +225,11 @@ if(REXGLUE_USE_VULKAN)
         snappy
         volk::volk
         GPUOpen::VulkanMemoryAllocator
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
     )
 endif()

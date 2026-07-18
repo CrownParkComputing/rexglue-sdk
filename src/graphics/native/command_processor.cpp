@@ -78,8 +78,14 @@ bool MapPrimitiveTopology(xenos::PrimitiveType prim_type, VkPrimitiveTopology& o
       return true;
     case xenos::PrimitiveType::kRectangleList:
       // Approximation: render each 3-vertex rectangle as a single triangle
-      // (half the quad). Proper rectangle expansion (the 4th implied vertex) is
-      // a Phase 3 concern; the triangle still shows the 2D sprite/quad geometry.
+      // (half the quad). The common full-screen post-process rect is a single
+      // oversized triangle, so this is exact for that case; small sprite rects
+      // lose their implied 4th vertex (a geometry-shader concern).
+      out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+      return true;
+    case xenos::PrimitiveType::kQuadList:
+      // 4 vertices per quad, expanded into two triangles per quad via a
+      // generated index buffer in IssueDraw.
       out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       return true;
     default:
@@ -1721,11 +1727,72 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   }
 
   // --- Index buffer conversion (guest big-endian -> host little-endian). ---
+  // Quad lists (4 verts/quad) are expanded into a triangle list here, since the
+  // native draw path has no geometry-shader stage. Each quad's two triangles are
+  // emitted in the same 0,1,3 / 3,1,2 decomposition the Vulkan backend's quad
+  // geometry shader uses (GL_QUAD_STRIP order 0,1,3,2), so winding matches and
+  // face culling stays consistent with the emulated backend.
+  const bool expand_quads = (prim_type == xenos::PrimitiveType::kQuadList);
+  static const uint32_t kQuadTri[6] = {0, 1, 3, 3, 1, 2};
+
   bool indexed = false;
   VkBuffer index_buffer = VK_NULL_HANDLE;
   VkDeviceSize index_offset = 0;
   VkIndexType index_type = VK_INDEX_TYPE_UINT16;
-  if (index_buffer_info != nullptr && index_count) {
+  uint32_t draw_index_count = index_count;
+
+  if (expand_quads) {
+    const uint32_t quad_count = index_count / 4;
+    if (!quad_count) {
+      return skip("quad_count_zero");
+    }
+    const uint32_t tri_index_count = quad_count * 6;
+    // Determine the source index reader (indexed guest buffer) or an auto-index
+    // sequence (0..index_count-1) for non-indexed quad draws.
+    const bool src_indexed = (index_buffer_info != nullptr);
+    const bool src_is32 = src_indexed && index_buffer_info->format == xenos::IndexFormat::kInt32;
+    const uint8_t* src =
+        src_indexed ? memory_->TranslatePhysical(index_buffer_info->guest_base) : nullptr;
+    const xenos::Endian endianness =
+        src_indexed ? index_buffer_info->endianness : xenos::Endian::kNone;
+    auto read_index = [&](uint32_t vert) -> uint32_t {
+      if (!src_indexed) {
+        return vert;  // auto-indexed: vertex index is its position
+      }
+      return src_is32 ? ConvertIndex32(src + size_t(vert) * 4, endianness)
+                      : ConvertIndex16(src + size_t(vert) * 2, endianness);
+    };
+    // Output width: 32-bit if the source is 32-bit or the max referenced vertex
+    // index exceeds 16 bits (auto-indexed large draws), else 16-bit.
+    const bool out32 = src_is32 || index_count > 0x10000u;
+    const size_t elem = out32 ? sizeof(uint32_t) : sizeof(uint16_t);
+    uint8_t* dst =
+        RingAllocate(index_ring_, size_t(tri_index_count) * elem, elem, index_buffer, index_offset);
+    if (!dst) {
+      return skip("index_overflow");
+    }
+    if (out32) {
+      auto* out = reinterpret_cast<uint32_t*>(dst);
+      for (uint32_t q = 0; q < quad_count; ++q) {
+        const uint32_t base = q * 4;
+        for (uint32_t p = 0; p < 6; ++p) {
+          *out++ = read_index(base + kQuadTri[p]);
+        }
+      }
+      index_type = VK_INDEX_TYPE_UINT32;
+    } else {
+      auto* out = reinterpret_cast<uint16_t*>(dst);
+      for (uint32_t q = 0; q < quad_count; ++q) {
+        const uint32_t base = q * 4;
+        for (uint32_t p = 0; p < 6; ++p) {
+          *out++ = uint16_t(read_index(base + kQuadTri[p]));
+        }
+      }
+      index_type = VK_INDEX_TYPE_UINT16;
+    }
+    indexed = true;
+    draw_index_count = tri_index_count;
+  } else if (index_buffer_info != nullptr && index_count) {
     const bool is32 = index_buffer_info->format == xenos::IndexFormat::kInt32;
     const size_t elem = is32 ? sizeof(uint32_t) : sizeof(uint16_t);
     const size_t dst_size = size_t(index_count) * elem;
@@ -1787,7 +1854,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   draw.index_buffer = index_buffer;
   draw.index_offset = index_offset;
   draw.index_type = index_type;
-  draw.draw_count = index_count;
+  draw.draw_count = draw_index_count;
   deferred_draws_.push_back(draw);
   ++deferred_draw_total_;
 

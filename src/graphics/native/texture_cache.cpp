@@ -16,6 +16,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -676,6 +677,21 @@ void NativeTextureCache::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask)
     }
     NativeTexture* texture = static_cast<NativeTexture*>(binding->texture);
     if (!texture->loaded()) {
+      // A texture that fails to load leaves this slot on the opaque-black null
+      // image, which silently blacks out everything sampling it. Enumerate the
+      // failures once each so the unsupported formats are visible in one run.
+      static std::unordered_set<uint32_t> reported;
+      const uint32_t sig = (uint32_t(binding->key.format) << 8) ^
+                           (uint32_t(binding->key.dimension) << 4) ^
+                           uint32_t(binding->key.packed_mips);
+      if (reported.insert(sig).second) {
+        REXLOG_WARN(
+            "rexgpu-native: texture NOT LOADED fmt={} ({}) dim={} {}x{} mips={} packed={} slot={}",
+            uint32_t(binding->key.format), FormatInfo::Get(binding->key.format)->name,
+            uint32_t(binding->key.dimension), binding->key.GetWidth(), binding->key.GetHeight(),
+            uint32_t(binding->key.mip_max_level), uint32_t(binding->key.packed_mips),
+            binding_index);
+      }
       continue;
     }
     texture->MarkAsUsed();

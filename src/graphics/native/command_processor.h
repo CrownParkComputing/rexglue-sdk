@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/graphics/command_processor.h>
@@ -53,6 +54,15 @@ class NativeCommandProcessor : public CommandProcessor {
   NativeCommandProcessor(NativeGraphicsSystem* graphics_system,
                          system::KernelState* kernel_state);
   ~NativeCommandProcessor() override;
+
+  // Texture fetch constants are the guest's texture bindings. The texture cache
+  // keeps a sticky "in sync" mask per fetch slot and only re-resolves a slot
+  // when told the constant changed - so these MUST be forwarded, or the first
+  // texture bound to a slot in a frame is reused by every later draw in that
+  // frame (an entire title ends up sampling one atlas). The ring path funnels
+  // into WriteRegistersFromMem, so overriding these two covers all writes.
+  void WriteRegister(uint32_t index, uint32_t value) override;
+  void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override;
 
   // Trace / save-state seams (no-ops until the native backend owns memory).
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
@@ -133,6 +143,18 @@ class NativeCommandProcessor : public CommandProcessor {
     VkDeviceSize index_offset = 0;
     VkIndexType index_type = VK_INDEX_TYPE_UINT16;
     uint32_t draw_count = 0;
+    // RT0's EDRAM base (RB_COLOR_INFO.color_base, in tiles) at defer time -
+    // identifies which guest render target this draw wrote, so resolves can
+    // select exactly the draws that contributed to their EDRAM region.
+    uint32_t color_edram_base = 0;
+    // No fragment stage: this draw contributes depth only. Its color_edram_base
+    // is whatever RB_COLOR_INFO happened to hold and is therefore meaningless,
+    // so base filtering must not be applied to it (see RecordDeferredDrawsForBase).
+    bool depth_only = false;
+    // RB_DEPTH_INFO.depth_base at defer time. Not used for selection yet -
+    // recorded so that grouping depth-only draws by their own EDRAM base stays a
+    // small change if admitting them to any containing phase proves too loose.
+    uint32_t depth_edram_base = 0;
   };
 
   bool CreateDrawResources();
@@ -245,6 +267,127 @@ class NativeCommandProcessor : public CommandProcessor {
   VkDeviceMemory depth_memory_ = VK_NULL_HANDLE;
   uint32_t depth_width_ = 0;
   uint32_t depth_height_ = 0;
+
+  // ----- Phase 2 (native): EDRAM resolve -> sampled texture -----
+  // The native backend has no EDRAM; deferred draws replay into the swap image
+  // at IssueSwap. A guest frame is a sequence of render-target "phases", each
+  // ended by a resolve (IssueCopy) that names its destination address: offscreen
+  // passes (imposter atlases, reflections, bloom) resolve to textures that later
+  // draws sample, and the visible scene resolves to the frontbuffer address that
+  // IssueSwap then displays.
+  //
+  // IssueCopy is CPU-only: it records the phase boundary, creates the phase's
+  // "resolved" image/view, and aliases the view at the destination address so
+  // later same-frame draws bind it in their descriptor sets. All GPU work stays
+  // in IssueSwap's single submit: offscreen phases render into resolve_rt_ and
+  // are copied into their resolved images first, then only the draws belonging
+  // to frontbuffer phases (plus any trailing unresolved draws) replay into the
+  // swap image. A frame with no resolves at all keeps the original replay-all
+  // path (Geometry Wars class), as does a frame whose resolves never match the
+  // frontbuffer address.
+  struct ResolvedTarget {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    uint32_t width = 0;
+    uint32_t height = 0;
+  };
+  // Resolved targets PERSIST ACROSS FRAMES, keyed by destination address.
+  // Render-to-texture is frequently cross-frame: a title resolves a target in
+  // one frame and samples it in a later one (OutRun's menu does exactly this).
+  // Since the native backend never writes resolve results back into guest
+  // memory, freeing these per frame left such a sample reading memory that was
+  // never written - i.e. black. Reuse the image when the same address is
+  // re-resolved at the same size; only reallocate when the size changes.
+  size_t AcquireResolvedTarget(uint32_t dest_key, uint32_t width, uint32_t height);
+  // One render-target phase: a resolve of EDRAM base src_base to dest_key.
+  //
+  // A resolve copies EDRAM out without clearing it, so consecutive resolves of
+  // the same base are progressive - a post-process chain resolves base B after
+  // 119 draws, then again after 1 more draw, and the second resolve still
+  // contains all 120. The phase therefore owns every draw that targeted
+  // src_base in [first_draw, end_draw), where first_draw is where that base was
+  // last cleared, NOT simply the draws since the previous resolve.
+  //
+  // resolved_index is the phase's image in resolved_target_storage_, or
+  // SIZE_MAX if the capture was skipped (cap hit / allocation failure).
+  struct RenderPhase {
+    uint32_t src_base = 0;
+    uint32_t first_draw = 0;
+    uint32_t end_draw = 0;
+    uint32_t dest_key = 0;
+    uint32_t rect_w = 0;
+    uint32_t rect_h = 0;
+    size_t resolved_index = SIZE_MAX;
+  };
+  bool EnsureResolveRenderTarget(uint32_t width, uint32_t height);
+  void DestroyResolveRenderTarget();
+  bool EnsureResolveStaging(VkDeviceSize size);
+  void ResetResolvedTargets();
+  // Records deferred_draws_[first, first+count) into the currently-bound
+  // command buffer / render pass (offscreen resolve RT).
+  void RecordDeferredDrawRange(VkCommandBuffer cb, uint32_t first, uint32_t count, uint32_t width,
+                               uint32_t height);
+  // As above over [first, end), but only the draws that targeted EDRAM base
+  // `base` - the draws a resolve of that base actually captures. Returns the
+  // number of draws recorded.
+  uint32_t RecordDeferredDrawsForBase(VkCommandBuffer cb, uint32_t first, uint32_t end,
+                                      uint32_t base, uint32_t width, uint32_t height);
+  // Returns the resolved image view aliased at a guest byte address, or null.
+  VkImageView ResolvedViewForAddress(uint32_t guest_byte_address) const;
+  // Debug: writes each of this frame's resolved render targets to a PPM, so the
+  // contents of every offscreen phase can be inspected directly. Enabled with
+  // REX_DUMP_RT=<prefix>, at the swap given by REX_DUMP_RT_SWAP.
+  void DumpResolvedTargets();
+
+  VkImage resolve_rt_color_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_rt_color_memory_ = VK_NULL_HANDLE;
+  VkImageView resolve_rt_color_view_ = VK_NULL_HANDLE;
+  VkImage resolve_rt_depth_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_rt_depth_memory_ = VK_NULL_HANDLE;
+  VkImageView resolve_rt_depth_view_ = VK_NULL_HANDLE;
+  VkFramebuffer resolve_rt_framebuffer_ = VK_NULL_HANDLE;
+  uint32_t resolve_rt_width_ = 0;
+  uint32_t resolve_rt_height_ = 0;
+  VkBuffer resolve_staging_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory resolve_staging_memory_ = VK_NULL_HANDLE;
+  VkDeviceSize resolve_staging_size_ = 0;
+  // Per-frame resolved images (freed at BeginFrameIfNeeded) and their address
+  // aliases (key: guest byte address masked to the physical page range).
+  std::vector<ResolvedTarget> resolved_target_storage_;
+  std::unordered_map<uint32_t, VkImageView> resolved_target_views_;
+  // dest_key -> index into resolved_target_storage_, so a re-resolve of the
+  // same address reuses its image instead of leaking a new one every frame.
+  std::unordered_map<uint32_t, size_t> resolved_target_index_;
+  // Resolved rect size per alias key, to compare against the size the guest's
+  // fetch constant claims the texture at that address is.
+  std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> resolved_target_dims_;
+  // The frame's completed render-target phases, in guest submission order.
+  std::vector<RenderPhase> phases_;
+  // Per-EDRAM-base draw index at which that base was last cleared this frame -
+  // the start of the draw range a resolve of that base captures.
+  std::unordered_map<uint32_t, uint32_t> base_clear_point_;
+  // Per-EDRAM-base draw index of the previous resolve of that base. EDRAM is a
+  // scratchpad: one base is reused for several unrelated targets in a frame
+  // (e.g. four imposter atlases at base 832), so a resolve owns only the draws
+  // since that base was last resolved - otherwise every atlas accumulates the
+  // ones before it. Progressive post-process chains still work because each
+  // pass is a fullscreen quad sampling the previous pass's resolved image.
+  std::unordered_map<uint32_t, uint32_t> base_last_resolve_;
+  // Destinations already resolved during THIS frame. A second resolve to the
+  // same address must get its own image rather than reusing (and destroying)
+  // one that earlier draws in this frame already reference.
+  std::unordered_set<uint32_t> acquired_dest_keys_this_frame_;
+  // Slots displaced by such a second resolve. They stay alive until the next
+  // frame boundary, by which point this frame's submit has been fenced.
+  std::vector<size_t> retired_resolved_slots_;
+  // Index into deferred_draws_ where the current render-target phase began.
+  uint32_t phase_first_draw_ = 0;
+  uint64_t resolve_count_ = 0;
+  uint32_t resolves_this_frame_ = 0;
+  // Bounds resolved-image creation per frame (each is a full VkImage); resolves
+  // past this are still consumed as phase markers.
+  static constexpr uint32_t kMaxResolveCapturesPerFrame = 48;
 
   HostRingBuffer uniform_ring_;
   HostRingBuffer index_ring_;

@@ -8,6 +8,9 @@
 
 #include "native/command_processor.h"
 
+#include "native/index_expand.h"
+#include "native/phase_model.h"
+
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -34,8 +37,12 @@
 #if REX_HAS_VULKAN
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
+#include <rex/ui/vulkan/util.h>
 #endif
 
+REXCVAR_DEFINE_BOOL(native_marker, true, "GPU/Native",
+                    "Draw a green tab in the top-left corner of every frame produced by the native "
+                    "GPU backend, so it is obvious at a glance which renderer is running.");
 REXCVAR_DEFINE_BOOL(native_log_draws, false, "GPU/Native",
                     "Log every draw/copy the native renderer receives from the PM4 stream");
 
@@ -78,9 +85,11 @@ bool MapPrimitiveTopology(xenos::PrimitiveType prim_type, VkPrimitiveTopology& o
       return true;
     case xenos::PrimitiveType::kRectangleList:
       // Approximation: render each 3-vertex rectangle as a single triangle
-      // (half the quad). The common full-screen post-process rect is a single
-      // oversized triangle, so this is exact for that case; small sprite rects
-      // lose their implied 4th vertex (a geometry-shader concern).
+      // (half the quad). Exact for the oversized-triangle fullscreen pass
+      // (Geometry Wars), but a genuine rectangle loses the half beyond the
+      // diagonal - visible in Hydro Thunder, whose composite blits are real
+      // rectangles. Proper fix: kRectangleListAsTriangleStrip with a
+      // triangle-strip topology and primitive restart.
       out = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       return true;
     case xenos::PrimitiveType::kQuadList:
@@ -93,32 +102,9 @@ bool MapPrimitiveTopology(xenos::PrimitiveType prim_type, VkPrimitiveTopology& o
   }
 }
 
-inline bool IndexEndianSwaps(xenos::Endian e) {
-  return e == xenos::Endian::k8in16 || e == xenos::Endian::k8in32 || e == xenos::Endian::k16in32;
-}
-
-uint16_t ConvertIndex16(const uint8_t* p, xenos::Endian e) {
-  uint16_t v = uint16_t(p[0]) | (uint16_t(p[1]) << 8);
-  if (IndexEndianSwaps(e)) {
-    v = uint16_t((v >> 8) | (v << 8));
-  }
-  return v;
-}
-
-uint32_t ConvertIndex32(const uint8_t* p, xenos::Endian e) {
-  uint32_t v = uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) |
-               (uint32_t(p[3]) << 24);
-  switch (e) {
-    case xenos::Endian::k8in16:
-      return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
-    case xenos::Endian::k8in32:
-      return __builtin_bswap32(v);
-    case xenos::Endian::k16in32:
-      return (v >> 16) | (v << 16);
-    default:
-      return v;
-  }
-}
+// IndexEndianSwaps / ConvertIndex16 / ConvertIndex32 and the quad / rectangle
+// expansion live in index_expand.h so they can be unit tested on the host
+// without a GPU - see tests/unit/graphics/index_expand_test.cpp.
 
 // Xenos BlendFactor (raw 5-bit value) -> VkBlendFactor. Matches the emulation
 // backend's kBlendFactorMap (undefined values 2/3 -> ZERO).
@@ -722,6 +708,20 @@ void NativeCommandProcessor::DestroyDrawResources() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
 
+  // Resolve resources (framebuffer references clear_render_pass_, still valid
+  // here since DestroyClearResources runs after DestroyDrawResources).
+  ResetResolvedTargets();
+  DestroyResolveRenderTarget();
+  if (resolve_staging_buffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyBuffer(device, resolve_staging_buffer_, nullptr);
+    resolve_staging_buffer_ = VK_NULL_HANDLE;
+  }
+  if (resolve_staging_memory_ != VK_NULL_HANDLE) {
+    dfn.vkFreeMemory(device, resolve_staging_memory_, nullptr);
+    resolve_staging_memory_ = VK_NULL_HANDLE;
+  }
+  resolve_staging_size_ = 0;
+
   for (auto& kv : pipelines_) {
     if (kv.second != VK_NULL_HANDLE) {
       dfn.vkDestroyPipeline(device, kv.second, nullptr);
@@ -818,6 +818,35 @@ void NativeCommandProcessor::BeginFrameIfNeeded() {
   uniform_ring_.cursor = 0;
   index_ring_.cursor = 0;
   deferred_draws_.clear();
+  // Resolved render-target images and their address aliases are NOT cleared
+  // here - both persist across frames, because render-to-texture is often
+  // cross-frame (resolved in one frame, sampled in a later one; OutRun's menu
+  // does this). Clearing the aliases per frame left such a sample with no view,
+  // falling back to guest memory the native backend never wrote - i.e. black.
+  // Each resolve overwrites its own entry, so content stays current.
+  phases_.clear();
+  base_clear_point_.clear();
+  base_last_resolve_.clear();
+  acquired_dest_keys_this_frame_.clear();
+  // Reclaim slots displaced by a same-frame duplicate resolve. The submit that
+  // used them completed before this point, so they are safe to destroy now.
+  if (!retired_resolved_slots_.empty()) {
+    const ui::vulkan::VulkanDevice::Functions& rdfn = vulkan_device_->functions();
+    const VkDevice rdevice = vulkan_device_->device();
+    for (size_t slot : retired_resolved_slots_) {
+      if (slot >= resolved_target_storage_.size()) {
+        continue;
+      }
+      ResolvedTarget& rt = resolved_target_storage_[slot];
+      if (rt.view != VK_NULL_HANDLE) rdfn.vkDestroyImageView(rdevice, rt.view, nullptr);
+      if (rt.image != VK_NULL_HANDLE) rdfn.vkDestroyImage(rdevice, rt.image, nullptr);
+      if (rt.memory != VK_NULL_HANDLE) rdfn.vkFreeMemory(rdevice, rt.memory, nullptr);
+      rt = ResolvedTarget{};
+    }
+    retired_resolved_slots_.clear();
+  }
+  phase_first_draw_ = 0;
+  resolves_this_frame_ = 0;
   // Advance the texture cache to a fresh frame (resets bindings so they are
   // re-resolved from the current fetch constants this frame).
   if (texture_cache_) {
@@ -863,15 +892,22 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
 
+  // A depth-only draw (depth pre-pass, shadow map, or a color pass the guest
+  // masked out entirely) is rasterized with NO fragment stage - it contributes
+  // depth and nothing else. Same shape the oracle builds by decrementing its
+  // stage count when the fragment module is null (vulkan/pipeline_cache.cpp:3154).
+  const bool has_fragment = pixel_module != VK_NULL_HANDLE;
   VkPipelineShaderStageCreateInfo stages[2] = {};
   stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
   stages[0].module = vertex_module;
   stages[0].pName = "main";
-  stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  stages[1].module = pixel_module;
-  stages[1].pName = "main";
+  if (has_fragment) {
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = pixel_module;
+    stages[1].pName = "main";
+  }
 
   // Empty vertex input - the translated shaders fetch vertices from shared
   // memory in-shader (vfetch), so there are no classic vertex bindings.
@@ -927,6 +963,10 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   blend_attachment.colorWriteMask = state.color_write_mask;
   VkPipelineColorBlendStateCreateInfo color_blend = {};
   color_blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  // Stays 1 even with no fragment stage: unlike the oracle, whose render-pass
+  // key can omit color attachments for a depth-only pass, clear_render_pass_
+  // ALWAYS has one - so the attachment must be described, just with a zeroed
+  // colorWriteMask (which BuildPipelineState already produced).
   color_blend.attachmentCount = 1;
   color_blend.pAttachments = &blend_attachment;
 
@@ -938,7 +978,7 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
 
   VkGraphicsPipelineCreateInfo pipeline_info = {};
   pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  pipeline_info.stageCount = 2;
+  pipeline_info.stageCount = has_fragment ? 2 : 1;
   pipeline_info.pStages = stages;
   pipeline_info.pVertexInputState = &vertex_input;
   pipeline_info.pInputAssemblyState = &input_assembly;
@@ -1340,9 +1380,54 @@ VkDescriptorSet NativeCommandProcessor::AllocateTextureSet(SpirvShader* shader,
   for (uint32_t i = 0; i < texture_count; ++i) {
     const SpirvShader::TextureBinding& tb = textures[i];
     const auto dimension = static_cast<xenos::FetchOpDimension>(tb.dimension);
-    VkImageView view =
-        texture_cache_->GetActiveBindingOrNullImageView(tb.fetch_constant, dimension,
-                                                        bool(tb.is_signed));
+    VkImageView view = VK_NULL_HANDLE;
+    // Prefer a resolved render-target alias (render-to-texture: reflections,
+    // HUD/mirror RTs, bloom). Only 2D bindings match the resolved image, which
+    // is a plain 2D color image.
+    if (!resolved_target_views_.empty() &&
+        (dimension == xenos::FetchOpDimension::k1D || dimension == xenos::FetchOpDimension::k2D)) {
+      const xenos::xe_gpu_texture_fetch_t fetch =
+          register_file_->GetTextureFetch(tb.fetch_constant);
+      view = ResolvedViewForAddress(fetch.base_address << 12);
+    }
+    // TEMP-DIAG: bounded log of every texture binding after swap 3000 - what
+    // addresses draws sample, whether an alias matched, and the live map size.
+    {
+      // Gated on ONE swap (REX_ALIAS_SWAP) so a single run yields the complete
+      // picture for one frame instead of a flood: every sampled address, and
+      // the resolve destinations live at that moment.
+      static const uint64_t alias_swap =
+          getenv("REX_ALIAS_SWAP") ? uint64_t(atoll(getenv("REX_ALIAS_SWAP"))) : UINT64_MAX;
+      static uint64_t alias_log_count = 0;
+      if (swap_count_ == alias_swap && alias_log_count < 4000) {
+        ++alias_log_count;
+        if (alias_log_count == 1) {
+          std::string keys;
+          for (const auto& kv : resolved_target_views_) {
+            keys += fmt::format("0x{:08X} ", kv.first);
+          }
+          REXLOG_INFO("rexgpu-native: ALIASMAP [{}]", keys);
+        }
+        const xenos::xe_gpu_texture_fetch_t fetch =
+            register_file_->GetTextureFetch(tb.fetch_constant);
+        const uint32_t key = (uint32_t(fetch.base_address) << 12) & 0x1FFFF000u;
+        const auto dim_it = resolved_target_dims_.find(key);
+        REXLOG_INFO(
+            "rexgpu-native: ALIAS{} base=0x{:08X} key=0x{:08X} draw#{} rt_base={} dim={} "
+            "guest_tex={}x{} resolved={}x{} pitch={} map={}",
+            view != VK_NULL_HANDLE ? "hit" : "MISS", uint32_t(fetch.base_address) << 12, key,
+            draw_count_, uint32_t(register_file_->Get<reg::RB_COLOR_INFO>().color_base),
+            uint32_t(dimension), uint32_t(fetch.size_2d.width) + 1,
+            uint32_t(fetch.size_2d.height) + 1,
+            dim_it != resolved_target_dims_.end() ? dim_it->second.first : 0,
+            dim_it != resolved_target_dims_.end() ? dim_it->second.second : 0,
+            uint32_t(fetch.pitch) << 5, resolved_target_views_.size());
+      }
+    }
+    if (view == VK_NULL_HANDLE) {
+      view = texture_cache_->GetActiveBindingOrNullImageView(tb.fetch_constant, dimension,
+                                                             bool(tb.is_signed));
+    }
     if (view == VK_NULL_HANDLE) {
       // No cache view (e.g. cache disabled) - fall back to the dummy white one.
       view = DummyViewForDimension(dimension);
@@ -1429,7 +1514,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     // default `info` log level without flooding.
     static std::unordered_map<std::string, uint64_t> reason_counts;
     uint64_t& n = reason_counts[reason];
-    if (n == 0 || (n % 2000) == 0) {
+    if (REXCVAR_GET(native_log_draws) && (n == 0 || (n % 2000) == 0)) {
       REXLOG_INFO("rexgpu-native: skip draw #{} reason={} count={} prim={}", draw_count_, reason,
                   n + 1, uint32_t(prim_type));
     }
@@ -1441,9 +1526,6 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (edram_mode == xenos::EdramMode::kCopy) {
     return IssueCopy();
   }
-  if (edram_mode != xenos::EdramMode::kColorDepth) {
-    return skip("edram_mode");
-  }
 
   VkPrimitiveTopology topology;
   if (!MapPrimitiveTopology(prim_type, topology)) {
@@ -1451,41 +1533,105 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   }
 
   auto* vertex_shader = static_cast<SpirvShader*>(active_vertex_shader());
-  auto* pixel_shader = static_cast<SpirvShader*>(active_pixel_shader());
-  if (!vertex_shader || !pixel_shader) {
-    return skip("missing_shader");
+  if (!vertex_shader) {
+    return skip("missing_vertex_shader");
   }
 
   rex::string::StringBuffer ucode_buffer;
   vertex_shader->AnalyzeUcode(ucode_buffer);
-  pixel_shader->AnalyzeUcode(ucode_buffer);
 
-  if (vertex_shader->memexport_eM_written() || pixel_shader->memexport_eM_written()) {
-    return skip("memexport");  // Phase 3 (needs shared-memory writes).
+  // Vertex memexport can't be executed natively yet (Phase 3 - needs
+  // shared-memory writes). Dropping those draws HERE, above the rasterization
+  // test, is what lets that test stand in for the oracle's combined
+  // "!is_rasterization_done && !memexport_used_vertex" discard
+  // (vulkan/command_processor.cpp:3792) - a kNoOperation draw that only exists
+  // for its memexport side effect has nothing left to do once memexport is out.
+  if (vertex_shader->memexport_eM_written()) {
+    return skip("memexport_vertex");
   }
 
   const bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
   if (!draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal)) {
     return skip("no_rasterization");
   }
-  if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
-    return skip("pixel_shader_not_needed");
+
+  // A draw with no color output is still RASTERIZED - it populates depth for a
+  // later color pass. IsPixelShaderNeededWithRasterization means "the FRAGMENT
+  // STAGE may be dropped", NOT "drop the draw", and kDepthOnly is the guest
+  // asking for exactly that. Reading either as "skip" left every depth pre-pass
+  // out of the depth buffer, so 3D geometry failed its depth test against a
+  // buffer still cleared to 1.0 and the world rendered black - while z-testless
+  // HUD/2D drew fine. Mirrors vulkan/command_processor.cpp:3779-3791.
+  auto* pixel_shader = static_cast<SpirvShader*>(active_pixel_shader());
+  if (edram_mode == xenos::EdramMode::kColorDepth) {
+    if (pixel_shader) {
+      pixel_shader->AnalyzeUcode(ucode_buffer);
+      if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
+        pixel_shader = nullptr;
+      } else if (pixel_shader->memexport_eM_written()) {
+        // Checked only AFTER the nulling: a shader that was dropped can't
+        // memexport, and testing first would drop draws the oracle renders.
+        return skip("memexport_pixel");
+      }
+    }
+  } else {
+    pixel_shader = nullptr;
   }
+  // No fragment stage: this draw contributes depth (and nothing else).
+  const bool depth_only = pixel_shader == nullptr;
 
   const reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
 
   uint32_t ps_param_gen_pos = UINT32_MAX;
+  // Nothing consumes the interpolators without a fragment stage, so the vertex
+  // shader is translated to write none (oracle: vulkan/command_processor.cpp:3813).
   const uint32_t interpolator_mask =
-      vertex_shader->writes_interpolators() &
-      pixel_shader->GetInterpolatorInputMask(regs.Get<reg::SQ_PROGRAM_CNTL>(),
-                                             regs.Get<reg::SQ_CONTEXT_MISC>(), ps_param_gen_pos);
+      pixel_shader ? (vertex_shader->writes_interpolators() &
+                      pixel_shader->GetInterpolatorInputMask(regs.Get<reg::SQ_PROGRAM_CNTL>(),
+                                                             regs.Get<reg::SQ_CONTEXT_MISC>(),
+                                                             ps_param_gen_pos))
+                   : 0;
 
   // --- Shader modifications (host-render-target path; no tessellation, UCP or
   // memexport in this milestone). ---
   const auto sq_program_cntl = regs.Get<reg::SQ_PROGRAM_CNTL>();
+  // Rectangle lists give 3 corners and leave the 4th implied. Without expansion
+  // only the first triangle is drawn, which is exact for the oversized-triangle
+  // fullscreen trick but loses everything past the diagonal on a genuine
+  // rectangle - the diagonal seam through Hydro Thunder's composite blits.
+  //
+  // Still off, but the reason is now pinned down rather than guessed.
+  //
+  // The index side is NOT the problem. The encoding (primitive << 2 | corner,
+  // strip 0,1,2,3 emitted as list 0,1,2 / 2,1,3) is covered by unit tests in
+  // tests/unit/graphics/index_expand_test.cpp, and measurement shows every
+  // rectangle draw Hydro Thunder issues is auto-indexed (RECTDRAW: count=3
+  // indexed=false) - so the "expansion never reads the guest index buffer"
+  // theory does not explain the regression either.
+  //
+  // Turning it on (2026-07-19) puts a huge white triangle across Hydro
+  // Thunder's frame and mangles the HUD, which is corner 3 - the IMPLIED fourth
+  // corner - coming out as garbage. That reconstruction happens in the vertex
+  // shader under HostVertexShaderType::kRectangleListAsTriangleStrip (see the
+  // vmod below), so the remaining work is on the shader side, not here.
+  const bool expand_rects = false;
+  // TEMP-DIAG: characterise every rectangle-list draw - are they auto-indexed
+  // or DMA-indexed? Decides whether the reverted expansion's missing guest
+  // index-buffer read explains the Geometry Wars regression.
+  if (prim_type == xenos::PrimitiveType::kRectangleList) {
+    static uint64_t rect_log = 0;
+    if (REXCVAR_GET(native_log_draws) && rect_log < 48) {
+      ++rect_log;
+      REXLOG_INFO("rexgpu-native: RECTDRAW #{} count={} indexed={} fmt={} endian={} swap={}",
+                  draw_count_, index_count, index_buffer_info != nullptr,
+                  index_buffer_info ? uint32_t(index_buffer_info->format) : 99u,
+                  index_buffer_info ? uint32_t(index_buffer_info->endianness) : 99u, swap_count_);
+    }
+  }
   SpirvShaderTranslator::Modification vmod(shader_translator_->GetDefaultVertexShaderModification(
       vertex_shader->GetDynamicAddressableRegisterCount(sq_program_cntl.vs_num_reg),
-      Shader::HostVertexShaderType::kVertex));
+      expand_rects ? Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
+                   : Shader::HostVertexShaderType::kVertex));
   vmod.vertex.interpolator_mask = interpolator_mask;
   vmod.vertex.output_point_parameters =
       uint32_t((vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b001) &&
@@ -1494,39 +1640,49 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   vmod.vertex.user_clip_plane_cull = 0;
   vmod.vertex.vertex_kill_and = 0;
 
-  SpirvShaderTranslator::Modification pmod(shader_translator_->GetDefaultPixelShaderModification(
-      pixel_shader->GetDynamicAddressableRegisterCount(sq_program_cntl.ps_num_reg)));
-  pmod.pixel.interpolator_mask = interpolator_mask;
-  pmod.pixel.interpolators_centroid = 0;
-  if (ps_param_gen_pos < xenos::kMaxInterpolators) {
-    pmod.pixel.param_gen_enable = 1;
-    pmod.pixel.param_gen_interpolator = ps_param_gen_pos;
-    pmod.pixel.param_gen_point =
-        uint32_t(prim_type == xenos::PrimitiveType::kPointList);
-  }
-  pmod.pixel.depth_stencil_mode = SpirvShaderTranslator::Modification::DepthStencilMode::kNoModifiers;
-
-  // --- Translate. ---
+  // --- Translate. A depth-only draw has no pixel shader to translate. ---
   Shader::Translation* vtrans = vertex_shader->GetOrCreateTranslation(vmod.value);
-  Shader::Translation* ptrans = pixel_shader->GetOrCreateTranslation(pmod.value);
   if (!vtrans->is_translated()) {
     if (!shader_translator_->TranslateAnalyzedShader(*vtrans)) {
       return skip("vs_translate_failed");
     }
   }
-  if (!ptrans->is_translated()) {
-    if (!shader_translator_->TranslateAnalyzedShader(*ptrans)) {
-      return skip("ps_translate_failed");
-    }
-  }
-  if (!vtrans->is_valid() || !ptrans->is_valid()) {
+  if (!vtrans->is_valid()) {
     return skip("translation_invalid");
   }
-
   VkShaderModule vs_module = GetShaderModule(vtrans);
-  VkShaderModule ps_module = GetShaderModule(ptrans);
-  if (vs_module == VK_NULL_HANDLE || ps_module == VK_NULL_HANDLE) {
+  if (vs_module == VK_NULL_HANDLE) {
     return skip("shader_module");
+  }
+
+  VkShaderModule ps_module = VK_NULL_HANDLE;
+  if (pixel_shader) {
+    SpirvShaderTranslator::Modification pmod(shader_translator_->GetDefaultPixelShaderModification(
+        pixel_shader->GetDynamicAddressableRegisterCount(sq_program_cntl.ps_num_reg)));
+    pmod.pixel.interpolator_mask = interpolator_mask;
+    pmod.pixel.interpolators_centroid = 0;
+    if (ps_param_gen_pos < xenos::kMaxInterpolators) {
+      pmod.pixel.param_gen_enable = 1;
+      pmod.pixel.param_gen_interpolator = ps_param_gen_pos;
+      pmod.pixel.param_gen_point =
+          uint32_t(prim_type == xenos::PrimitiveType::kPointList);
+    }
+    pmod.pixel.depth_stencil_mode =
+        SpirvShaderTranslator::Modification::DepthStencilMode::kNoModifiers;
+
+    Shader::Translation* ptrans = pixel_shader->GetOrCreateTranslation(pmod.value);
+    if (!ptrans->is_translated()) {
+      if (!shader_translator_->TranslateAnalyzedShader(*ptrans)) {
+        return skip("ps_translate_failed");
+      }
+    }
+    if (!ptrans->is_valid()) {
+      return skip("translation_invalid");
+    }
+    ps_module = GetShaderModule(ptrans);
+    if (ps_module == VK_NULL_HANDLE) {
+      return skip("shader_module");
+    }
   }
 
   // Texture/sampler binding counts are known after translation. Textured draws
@@ -1534,16 +1690,31 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // so the geometry appears instead of being skipped.
   const uint32_t vtex = uint32_t(vertex_shader->GetTextureBindingsAfterTranslation().size());
   const uint32_t vsamp = uint32_t(vertex_shader->GetSamplerBindingsAfterTranslation().size());
-  const uint32_t ptex = uint32_t(pixel_shader->GetTextureBindingsAfterTranslation().size());
-  const uint32_t psamp = uint32_t(pixel_shader->GetSamplerBindingsAfterTranslation().size());
+  // A depth-only draw samples nothing in the fragment stage; 0/0 resolves to a
+  // valid layout and the shared empty_texture_set_.
+  const uint32_t ptex =
+      pixel_shader ? uint32_t(pixel_shader->GetTextureBindingsAfterTranslation().size()) : 0;
+  const uint32_t psamp =
+      pixel_shader ? uint32_t(pixel_shader->GetSamplerBindingsAfterTranslation().size()) : 0;
   VkPipelineLayout pipeline_layout = GetGuestPipelineLayout(vtex, vsamp, ptex, psamp);
   if (pipeline_layout == VK_NULL_HANDLE) {
     return skip("pipeline_layout");
   }
   // Phase 3: real register-derived blend / depth / cull instead of the Phase 2
   // hardcoded blend-off / depth-off / cull-none.
-  const GuestPipelineState pipeline_state = BuildPipelineState(
-      topology, primitive_polygonal, normalized_depth_control, pixel_shader->writes_color_targets());
+  // pixel_writes_color_targets = 0 makes GetNormalizedColorMask return 0, which
+  // in turn leaves color_write_mask 0 and blending off - exactly what a
+  // stage-less depth-only pipeline needs, with no special-casing here.
+  const GuestPipelineState pipeline_state =
+      BuildPipelineState(topology, primitive_polygonal, normalized_depth_control,
+                         pixel_shader ? pixel_shader->writes_color_targets() : 0);
+  // A stage-less pipeline with a live write mask would write undefined color
+  // into the target. GuestPipelineState needs no "depth only" field - ps_module
+  // is already mixed into the pipeline cache key and color_write_mask is already
+  // in Hash() - so this is the guardrail that replaces one.
+  if (depth_only && pipeline_state.color_write_mask != 0) {
+    return skip("depth_only_color_mask");
+  }
   VkPipeline pipeline = GetPipeline(vs_module, ps_module, pipeline_layout, pipeline_state);
   if (pipeline == VK_NULL_HANDLE) {
     return skip("pipeline");
@@ -1558,8 +1729,9 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // Loads are immediate (submit-and-wait) so the textures are resident before
   // the deferred draw replays at swap time.
   if (texture_cache_) {
-    const uint32_t used_texture_mask = vertex_shader->GetUsedTextureMaskAfterTranslation() |
-                                       pixel_shader->GetUsedTextureMaskAfterTranslation();
+    const uint32_t used_texture_mask =
+        vertex_shader->GetUsedTextureMaskAfterTranslation() |
+        (pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
     texture_cache_->RequestTextures(used_texture_mask);
   }
 
@@ -1569,7 +1741,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                  vulkan_device_->properties().maxViewportDimensions[0],
                                  vulkan_device_->properties().maxViewportDimensions[1], true,
                                  normalized_depth_control, false, false,
-                                 pixel_shader->writes_depth(), viewport_info);
+                                 pixel_shader && pixel_shader->writes_depth(), viewport_info);
 
   // --- System constants. ---
   SpirvShaderTranslator::SystemConstants system_constants;
@@ -1648,10 +1820,14 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     ubo_infos[SpirvShaderTranslator::kConstantBufferFloatVertex].range = float_size;
   }
 
-  // Pixel float constants (base 256).
-  const Shader::ConstantRegisterMap& pmap = pixel_shader->constant_register_map();
+  // Pixel float constants (base 256). A depth-only draw has no pixel shader and
+  // so no constant map - but the slot is still MANDATORY: the descriptor write
+  // below fills all kConstantBufferCount bindings unconditionally, and leaving
+  // this one's buffer VK_NULL_HANDLE is an invalid write. Bind a zeroed vec4.
+  const Shader::ConstantRegisterMap* pmap =
+      pixel_shader ? &pixel_shader->constant_register_map() : nullptr;
   {
-    size_t float_size = sizeof(float) * 4 * std::max(pmap.float_count, UINT32_C(1));
+    size_t float_size = sizeof(float) * 4 * std::max(pmap ? pmap->float_count : 0u, UINT32_C(1));
     VkBuffer buffer;
     VkDeviceSize offset;
     uint8_t* mapping = RingAllocate(uniform_ring_, float_size, ubo_align, buffer, offset);
@@ -1659,15 +1835,19 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       return skip("ubo_overflow_pfloat");
     }
     uint8_t* write = mapping;
-    for (uint32_t i = 0; i < 4; ++i) {
-      uint64_t bits = pmap.float_bitmap[i];
-      uint32_t index;
-      while (rex::bit_scan_forward(bits, &index)) {
-        bits &= ~(1ull << index);
-        std::memcpy(write, &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (index << 2)],
-                    sizeof(float) * 4);
-        write += sizeof(float) * 4;
+    if (pmap) {
+      for (uint32_t i = 0; i < 4; ++i) {
+        uint64_t bits = pmap->float_bitmap[i];
+        uint32_t index;
+        while (rex::bit_scan_forward(bits, &index)) {
+          bits &= ~(1ull << index);
+          std::memcpy(write, &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (index << 2)],
+                      sizeof(float) * 4);
+          write += sizeof(float) * 4;
+        }
       }
+    } else {
+      std::memset(write, 0, float_size);
     }
     ubo_infos[SpirvShaderTranslator::kConstantBufferFloatPixel].buffer = buffer;
     ubo_infos[SpirvShaderTranslator::kConstantBufferFloatPixel].offset = offset;
@@ -1741,30 +1921,44 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   VkIndexType index_type = VK_INDEX_TYPE_UINT16;
   uint32_t draw_index_count = index_count;
 
-  if (expand_quads) {
-    const uint32_t quad_count = index_count / 4;
-    if (!quad_count) {
+  if (expand_rects) {
+    // Two triangles per rectangle. The index VALUE is what the shader decodes,
+    // not a vertex offset: guest primitive index in the upper bits, host vertex
+    // within the rectangle (0-3) in the low 2 bits - the same encoding the
+    // shared primitive processor's builtin two-triangle-strip buffer uses. The
+    // strip (0,1,2,3) is emitted as a list (0,1,2, 2,1,3) so no primitive
+    // restart state is needed and the winding is unchanged.
+    const uint32_t rect_index_count = RectangleListExpandedCount(index_count);
+    if (!rect_index_count) {
+      return skip("rect_count_zero");
+    }
+    uint8_t* dst = RingAllocate(index_ring_, size_t(rect_index_count) * sizeof(uint32_t),
+                                sizeof(uint32_t), index_buffer, index_offset);
+    if (!dst) {
+      return skip("index_overflow");
+    }
+    GuestIndexSource rect_src;
+    if (index_buffer_info != nullptr) {
+      rect_src.data = memory_->TranslatePhysical(index_buffer_info->guest_base);
+      rect_src.is_32bit = index_buffer_info->format == xenos::IndexFormat::kInt32;
+      rect_src.endianness = index_buffer_info->endianness;
+    }
+    ExpandRectangleList(index_count, rect_src, reinterpret_cast<uint32_t*>(dst));
+    index_type = VK_INDEX_TYPE_UINT32;
+    indexed = true;
+    draw_index_count = rect_index_count;
+  } else if (expand_quads) {
+    const uint32_t tri_index_count = QuadListExpandedCount(index_count);
+    if (!tri_index_count) {
       return skip("quad_count_zero");
     }
-    const uint32_t tri_index_count = quad_count * 6;
-    // Determine the source index reader (indexed guest buffer) or an auto-index
-    // sequence (0..index_count-1) for non-indexed quad draws.
-    const bool src_indexed = (index_buffer_info != nullptr);
-    const bool src_is32 = src_indexed && index_buffer_info->format == xenos::IndexFormat::kInt32;
-    const uint8_t* src =
-        src_indexed ? memory_->TranslatePhysical(index_buffer_info->guest_base) : nullptr;
-    const xenos::Endian endianness =
-        src_indexed ? index_buffer_info->endianness : xenos::Endian::kNone;
-    auto read_index = [&](uint32_t vert) -> uint32_t {
-      if (!src_indexed) {
-        return vert;  // auto-indexed: vertex index is its position
-      }
-      return src_is32 ? ConvertIndex32(src + size_t(vert) * 4, endianness)
-                      : ConvertIndex16(src + size_t(vert) * 2, endianness);
-    };
-    // Output width: 32-bit if the source is 32-bit or the max referenced vertex
-    // index exceeds 16 bits (auto-indexed large draws), else 16-bit.
-    const bool out32 = src_is32 || index_count > 0x10000u;
+    GuestIndexSource quad_src;
+    if (index_buffer_info != nullptr) {
+      quad_src.data = memory_->TranslatePhysical(index_buffer_info->guest_base);
+      quad_src.is_32bit = index_buffer_info->format == xenos::IndexFormat::kInt32;
+      quad_src.endianness = index_buffer_info->endianness;
+    }
+    const bool out32 = QuadListNeeds32Bit(index_count, quad_src);
     const size_t elem = out32 ? sizeof(uint32_t) : sizeof(uint16_t);
     uint8_t* dst =
         RingAllocate(index_ring_, size_t(tri_index_count) * elem, elem, index_buffer, index_offset);
@@ -1772,22 +1966,10 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       return skip("index_overflow");
     }
     if (out32) {
-      auto* out = reinterpret_cast<uint32_t*>(dst);
-      for (uint32_t q = 0; q < quad_count; ++q) {
-        const uint32_t base = q * 4;
-        for (uint32_t p = 0; p < 6; ++p) {
-          *out++ = read_index(base + kQuadTri[p]);
-        }
-      }
+      ExpandQuadList(index_count, quad_src, reinterpret_cast<uint32_t*>(dst));
       index_type = VK_INDEX_TYPE_UINT32;
     } else {
-      auto* out = reinterpret_cast<uint16_t*>(dst);
-      for (uint32_t q = 0; q < quad_count; ++q) {
-        const uint32_t base = q * 4;
-        for (uint32_t p = 0; p < 6; ++p) {
-          *out++ = uint16_t(read_index(base + kQuadTri[p]));
-        }
-      }
+      ExpandQuadList(index_count, quad_src, reinterpret_cast<uint16_t*>(dst));
       index_type = VK_INDEX_TYPE_UINT16;
     }
     indexed = true;
@@ -1855,6 +2037,28 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   draw.index_offset = index_offset;
   draw.index_type = index_type;
   draw.draw_count = draw_index_count;
+  draw.color_edram_base = regs.Get<reg::RB_COLOR_INFO>().color_base;
+  draw.depth_only = depth_only;
+  {
+    const auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+    draw.depth_edram_base =
+        rb_depth_info.depth_base | (uint32_t(rb_depth_info.depth_base_bit_11) << 11);
+  }
+  // TEMP-DIAG: the frontbuffer-phase draws (base 0) are where the composite goes
+  // wrong - log their geometry and viewport.
+  if (draw.color_edram_base == 0 && swap_count_ > 3000) {
+    static uint64_t fb_draw_log = 0;
+    if (REXCVAR_GET(native_log_draws) && fb_draw_log < 64) {
+      ++fb_draw_log;
+      REXLOG_INFO(
+          "rexgpu-native: FBDRAW #{} prim={} count={} vp=({},{} {}x{}) ndc_scale=({},{},{}) "
+          "ndc_off=({},{},{}) vtex={} ptex={}",
+          draw_count_, uint32_t(prim_type), draw.draw_count, draw.viewport.x, draw.viewport.y,
+          draw.viewport.width, draw.viewport.height, viewport_info.ndc_scale[0],
+          viewport_info.ndc_scale[1], viewport_info.ndc_scale[2], viewport_info.ndc_offset[0],
+          viewport_info.ndc_offset[1], viewport_info.ndc_offset[2], vtex, ptex);
+    }
+  }
   deferred_draws_.push_back(draw);
   ++deferred_draw_total_;
 
@@ -1873,11 +2077,609 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 #endif  // REX_HAS_VULKAN
 }
 
+#if REX_HAS_VULKAN
+bool NativeCommandProcessor::EnsureResolveRenderTarget(uint32_t width, uint32_t height) {
+  width = std::max(width, 1u);
+  height = std::max(height, 1u);
+  if (resolve_rt_color_ != VK_NULL_HANDLE && resolve_rt_width_ >= width &&
+      resolve_rt_height_ >= height) {
+    return true;
+  }
+  // Grow to cover the requested size (never shrink) so one RT serves every phase.
+  width = std::max(width, resolve_rt_width_);
+  height = std::max(height, resolve_rt_height_);
+  DestroyResolveRenderTarget();
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  auto make_image = [&](VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                        VkImage& image_out, VkDeviceMemory& memory_out,
+                        VkImageView& view_out) -> bool {
+    VkImageCreateInfo image_info = {};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = {width, height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (dfn.vkCreateImage(device, &image_info, nullptr, &image_out) != VK_SUCCESS) {
+      return false;
+    }
+    VkMemoryRequirements req;
+    dfn.vkGetImageMemoryRequirements(device, image_out, &req);
+    uint32_t type_index;
+    if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                               &type_index) &&
+        !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+      return false;
+    }
+    VkMemoryAllocateInfo alloc = {};
+    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = type_index;
+    if (dfn.vkAllocateMemory(device, &alloc, nullptr, &memory_out) != VK_SUCCESS ||
+        dfn.vkBindImageMemory(device, image_out, memory_out, 0) != VK_SUCCESS) {
+      return false;
+    }
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image_out;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+    return dfn.vkCreateImageView(device, &view_info, nullptr, &view_out) == VK_SUCCESS;
+  };
+
+  if (!make_image(ui::vulkan::VulkanPresenter::kGuestOutputFormat,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT, resolve_rt_color_, resolve_rt_color_memory_,
+                  resolve_rt_color_view_)) {
+    REXLOG_ERROR("rexgpu-native: resolve RT color alloc failed {}x{}", width, height);
+    DestroyResolveRenderTarget();
+    return false;
+  }
+  if (!make_image(kDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                  VK_IMAGE_ASPECT_DEPTH_BIT, resolve_rt_depth_, resolve_rt_depth_memory_,
+                  resolve_rt_depth_view_)) {
+    REXLOG_ERROR("rexgpu-native: resolve RT depth alloc failed {}x{}", width, height);
+    DestroyResolveRenderTarget();
+    return false;
+  }
+  const VkImageView attachments[2] = {resolve_rt_color_view_, resolve_rt_depth_view_};
+  VkFramebufferCreateInfo fb_info = {};
+  fb_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  fb_info.renderPass = clear_render_pass_;
+  fb_info.attachmentCount = 2;
+  fb_info.pAttachments = attachments;
+  fb_info.width = width;
+  fb_info.height = height;
+  fb_info.layers = 1;
+  if (dfn.vkCreateFramebuffer(device, &fb_info, nullptr, &resolve_rt_framebuffer_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: resolve RT framebuffer failed");
+    DestroyResolveRenderTarget();
+    return false;
+  }
+  resolve_rt_width_ = width;
+  resolve_rt_height_ = height;
+  return true;
+}
+
+void NativeCommandProcessor::DestroyResolveRenderTarget() {
+  if (!vulkan_device_) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  if (resolve_rt_framebuffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyFramebuffer(device, resolve_rt_framebuffer_, nullptr);
+    resolve_rt_framebuffer_ = VK_NULL_HANDLE;
+  }
+  VkImageView views[2] = {resolve_rt_color_view_, resolve_rt_depth_view_};
+  VkImage images[2] = {resolve_rt_color_, resolve_rt_depth_};
+  VkDeviceMemory mems[2] = {resolve_rt_color_memory_, resolve_rt_depth_memory_};
+  for (int i = 0; i < 2; ++i) {
+    if (views[i] != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, views[i], nullptr);
+    if (images[i] != VK_NULL_HANDLE) dfn.vkDestroyImage(device, images[i], nullptr);
+    if (mems[i] != VK_NULL_HANDLE) dfn.vkFreeMemory(device, mems[i], nullptr);
+  }
+  resolve_rt_color_view_ = resolve_rt_depth_view_ = VK_NULL_HANDLE;
+  resolve_rt_color_ = resolve_rt_depth_ = VK_NULL_HANDLE;
+  resolve_rt_color_memory_ = resolve_rt_depth_memory_ = VK_NULL_HANDLE;
+  resolve_rt_width_ = resolve_rt_height_ = 0;
+}
+
+bool NativeCommandProcessor::EnsureResolveStaging(VkDeviceSize size) {
+  if (resolve_staging_buffer_ != VK_NULL_HANDLE && resolve_staging_size_ >= size) {
+    return true;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  if (resolve_staging_buffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyBuffer(device, resolve_staging_buffer_, nullptr);
+    resolve_staging_buffer_ = VK_NULL_HANDLE;
+  }
+  if (resolve_staging_memory_ != VK_NULL_HANDLE) {
+    dfn.vkFreeMemory(device, resolve_staging_memory_, nullptr);
+    resolve_staging_memory_ = VK_NULL_HANDLE;
+  }
+  VkBufferCreateInfo buffer_info = {};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = size;
+  buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &resolve_staging_buffer_) != VK_SUCCESS) {
+    return false;
+  }
+  VkMemoryRequirements req;
+  dfn.vkGetBufferMemoryRequirements(device, resolve_staging_buffer_, &req);
+  uint32_t type_index;
+  if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                             &type_index) &&
+      !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+    return false;
+  }
+  VkMemoryAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc.allocationSize = req.size;
+  alloc.memoryTypeIndex = type_index;
+  if (dfn.vkAllocateMemory(device, &alloc, nullptr, &resolve_staging_memory_) != VK_SUCCESS) {
+    return false;
+  }
+  if (dfn.vkBindBufferMemory(device, resolve_staging_buffer_, resolve_staging_memory_, 0) !=
+      VK_SUCCESS) {
+    return false;
+  }
+  resolve_staging_size_ = size;
+  return true;
+}
+
+void NativeCommandProcessor::ResetResolvedTargets() {
+  if (resolved_target_storage_.empty() && resolved_target_views_.empty()) {
+    resolved_target_views_.clear();
+    resolved_target_dims_.clear();
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  for (ResolvedTarget& rt : resolved_target_storage_) {
+    if (rt.view != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, rt.view, nullptr);
+    if (rt.image != VK_NULL_HANDLE) dfn.vkDestroyImage(device, rt.image, nullptr);
+    if (rt.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, rt.memory, nullptr);
+  }
+  resolved_target_storage_.clear();
+  resolved_target_views_.clear();
+  resolved_target_dims_.clear();
+}
+
+void NativeCommandProcessor::DumpResolvedTargets() {
+  static const char* dump_prefix = getenv("REX_DUMP_RT");
+  if (!dump_prefix || phases_.empty() || !vulkan_device_) {
+    return;
+  }
+  static const uint64_t dump_swap =
+      getenv("REX_DUMP_RT_SWAP") ? uint64_t(atoll(getenv("REX_DUMP_RT_SWAP"))) : 0;
+  if (swap_count_ != dump_swap) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  for (size_t pi = 0; pi < phases_.size(); ++pi) {
+    const RenderPhase& p = phases_[pi];
+    if (p.resolved_index == SIZE_MAX) {
+      continue;
+    }
+    const ResolvedTarget& rt = resolved_target_storage_[p.resolved_index];
+    const VkDeviceSize size = VkDeviceSize(p.rect_w) * p.rect_h * 4;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize memory_size = 0;
+    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device_, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            ui::vulkan::util::MemoryPurpose::kReadback, buffer, memory, nullptr, &memory_size)) {
+      continue;
+    }
+
+    dfn.vkResetCommandPool(device, command_pool_, 0);
+    VkCommandBufferBeginInfo begin = {};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    dfn.vkBeginCommandBuffer(command_buffer_, &begin);
+    VkImageMemoryBarrier to_src = {};
+    to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_src.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_src.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.image = rt.image;
+    to_src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_src);
+    VkBufferImageCopy region = {};
+    region.bufferRowLength = p.rect_w;
+    region.bufferImageHeight = p.rect_h;
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {p.rect_w, p.rect_h, 1};
+    dfn.vkCmdCopyImageToBuffer(command_buffer_, rt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               buffer, 1, &region);
+    VkImageMemoryBarrier back = to_src;
+    back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    back.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    back.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &back);
+    dfn.vkEndCommandBuffer(command_buffer_);
+    dfn.vkResetFences(device, 1, &clear_fence_);
+    VkSubmitInfo submit = {};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_buffer_;
+    {
+      const ui::vulkan::VulkanDevice::Queue::Acquisition acq =
+          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
+      if (dfn.vkQueueSubmit(acq.queue(), 1, &submit, clear_fence_) != VK_SUCCESS) {
+        dfn.vkDestroyBuffer(device, buffer, nullptr);
+        dfn.vkFreeMemory(device, memory, nullptr);
+        continue;
+      }
+    }
+    dfn.vkWaitForFences(device, 1, &clear_fence_, VK_TRUE, UINT64_MAX);
+
+    void* mapped = nullptr;
+    if (dfn.vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS) {
+      ui::vulkan::util::FlushMappedMemoryRange(vulkan_device_, memory, 0, 0, memory_size);
+      char path[512];
+      snprintf(path, sizeof(path), "%s_p%02zu_%08X_base%u_%ux%u.ppm", dump_prefix, pi, p.dest_key,
+               p.src_base, p.rect_w, p.rect_h);
+      FILE* f = fopen(path, "wb");
+      if (f) {
+        fprintf(f, "P6\n%u %u\n255\n", p.rect_w, p.rect_h);
+        const uint32_t* src = static_cast<const uint32_t*>(mapped);
+        for (uint32_t i = 0; i < p.rect_w * p.rect_h; ++i) {
+          // kGuestOutputFormat is A2B10G10R10_UNORM_PACK32: R low, then G, B.
+          const uint32_t v = src[i];
+          const uint8_t rgb[3] = {uint8_t((v & 0x3FF) >> 2), uint8_t(((v >> 10) & 0x3FF) >> 2),
+                                  uint8_t(((v >> 20) & 0x3FF) >> 2)};
+          fwrite(rgb, 1, 3, f);
+        }
+        fclose(f);
+        REXLOG_WARN("rexgpu-native: [DUMP-RT] {}", path);
+      }
+      dfn.vkUnmapMemory(device, memory);
+    }
+    dfn.vkDestroyBuffer(device, buffer, nullptr);
+    dfn.vkFreeMemory(device, memory, nullptr);
+  }
+}
+
+size_t NativeCommandProcessor::AcquireResolvedTarget(uint32_t dest_key, uint32_t width,
+                                                     uint32_t height) {
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  // A SECOND resolve to the same destination within one frame must NOT reuse
+  // the slot. Hydro Thunder does this - a 512x576 phase at base 936 and a
+  // 1024x576 phase at base 468 both resolve to 0x1690F000 in the same frame.
+  // Reusing would (a) let the later phase overwrite content the earlier one
+  // still owes to draws that sampled it, and (b) on a size change destroy an
+  // image view that draws earlier in THIS frame already baked into their
+  // descriptor sets - a use-after-free, since only the PREVIOUS frame's submit
+  // has been fenced at this point. Give the new phase its own slot instead and
+  // retire the old one until the next frame's fence has passed.
+  // Covered by FindOverwrittenPhases in phase_model.h.
+  const bool second_resolve_this_frame = acquired_dest_keys_this_frame_.count(dest_key) != 0;
+  acquired_dest_keys_this_frame_.insert(dest_key);
+
+  auto it = resolved_target_index_.find(dest_key);
+  if (it != resolved_target_index_.end() && !second_resolve_this_frame) {
+    ResolvedTarget& existing = resolved_target_storage_[it->second];
+    if (existing.width == width && existing.height == height) {
+      return it->second;  // Reuse - contents are overwritten by this frame's copy.
+    }
+    // Size changed across frames: destroy and rebuild in place. Safe because
+    // the previous frame's submit was fenced and waited before this point.
+    if (existing.view != VK_NULL_HANDLE) dfn.vkDestroyImageView(device, existing.view, nullptr);
+    if (existing.image != VK_NULL_HANDLE) dfn.vkDestroyImage(device, existing.image, nullptr);
+    if (existing.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, existing.memory, nullptr);
+    existing = ResolvedTarget{};
+  } else if (it != resolved_target_index_.end()) {
+    retired_resolved_slots_.push_back(it->second);
+  }
+
+  ResolvedTarget rt;
+  rt.width = width;
+  rt.height = height;
+  const VkFormat resolved_format = ui::vulkan::VulkanPresenter::kGuestOutputFormat;
+  VkImageCreateInfo image_info = {};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = resolved_format;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (dfn.vkCreateImage(device, &image_info, nullptr, &rt.image) != VK_SUCCESS) {
+    return SIZE_MAX;
+  }
+  VkMemoryRequirements req;
+  dfn.vkGetImageMemoryRequirements(device, rt.image, &req);
+  uint32_t type_index;
+  if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                             &type_index) &&
+      !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+    dfn.vkDestroyImage(device, rt.image, nullptr);
+    return SIZE_MAX;
+  }
+  VkMemoryAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc.allocationSize = req.size;
+  alloc.memoryTypeIndex = type_index;
+  if (dfn.vkAllocateMemory(device, &alloc, nullptr, &rt.memory) != VK_SUCCESS ||
+      dfn.vkBindImageMemory(device, rt.image, rt.memory, 0) != VK_SUCCESS) {
+    if (rt.memory != VK_NULL_HANDLE) dfn.vkFreeMemory(device, rt.memory, nullptr);
+    dfn.vkDestroyImage(device, rt.image, nullptr);
+    return SIZE_MAX;
+  }
+  VkImageViewCreateInfo view_info = {};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = rt.image;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = resolved_format;
+  view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &rt.view) != VK_SUCCESS) {
+    dfn.vkFreeMemory(device, rt.memory, nullptr);
+    dfn.vkDestroyImage(device, rt.image, nullptr);
+    return SIZE_MAX;
+  }
+
+  size_t index;
+  if (it != resolved_target_index_.end() && !second_resolve_this_frame) {
+    index = it->second;
+    resolved_target_storage_[index] = rt;
+  } else {
+    // Fresh slot. For a second same-frame resolve this also repoints the alias
+    // at the newest image, which is what later draws should sample.
+    index = resolved_target_storage_.size();
+    resolved_target_storage_.push_back(rt);
+    resolved_target_index_[dest_key] = index;
+  }
+  return index;
+}
+
+VkImageView NativeCommandProcessor::ResolvedViewForAddress(uint32_t guest_byte_address) const {
+  if (resolved_target_views_.empty()) {
+    return VK_NULL_HANDLE;
+  }
+  auto it = resolved_target_views_.find(guest_byte_address & 0x1FFFF000u);
+  return it != resolved_target_views_.end() ? it->second : VK_NULL_HANDLE;
+}
+
+uint32_t NativeCommandProcessor::RecordDeferredDrawsForBase(VkCommandBuffer cb, uint32_t first,
+                                                            uint32_t end, uint32_t base,
+                                                            uint32_t width, uint32_t height) {
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  uint32_t recorded = 0;
+  end = std::min(end, uint32_t(deferred_draws_.size()));
+  for (uint32_t i = first; i < end; ++i) {
+    const DeferredDraw& draw = deferred_draws_[i];
+    // Depth-only draws bypass the base filter: they carry no meaningful color
+    // base, and the native backend has one depth buffer per render pass rather
+    // than one per EDRAM base - so within a pass, "depth is shared scratch" is
+    // the honest model. A depth pre-pass therefore belongs to whichever phase
+    // range contains it. Ordering is preserved because this is a monotonic scan.
+    if (!draw.depth_only && draw.color_edram_base != base) {
+      continue;
+    }
+    ++recorded;
+    dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+    VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
+                               draw.vertex_texture_set, draw.pixel_texture_set};
+    dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 0, 4,
+                                sets, 0, nullptr);
+    VkViewport viewport = draw.viewport;
+    dfn.vkCmdSetViewport(cb, 0, 1, &viewport);
+    VkRect2D scissor = draw.scissor;
+    if (uint32_t(scissor.offset.x) >= width || uint32_t(scissor.offset.y) >= height) {
+      scissor.offset = {0, 0};
+      scissor.extent = {width, height};
+    } else {
+      scissor.extent.width = std::min(scissor.extent.width, width - uint32_t(scissor.offset.x));
+      scissor.extent.height = std::min(scissor.extent.height, height - uint32_t(scissor.offset.y));
+    }
+    dfn.vkCmdSetScissor(cb, 0, 1, &scissor);
+    if (draw.indexed) {
+      dfn.vkCmdBindIndexBuffer(cb, draw.index_buffer, draw.index_offset, draw.index_type);
+      dfn.vkCmdDrawIndexed(cb, draw.draw_count, 1, 0, 0, 0);
+    } else {
+      dfn.vkCmdDraw(cb, draw.draw_count, 1, 0, 0);
+    }
+  }
+  return recorded;
+}
+
+void NativeCommandProcessor::RecordDeferredDrawRange(VkCommandBuffer cb, uint32_t first,
+                                                     uint32_t count, uint32_t width,
+                                                     uint32_t height) {
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const uint32_t end = std::min(first + count, uint32_t(deferred_draws_.size()));
+  for (uint32_t i = first; i < end; ++i) {
+    const DeferredDraw& draw = deferred_draws_[i];
+    dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+    VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
+                               draw.vertex_texture_set, draw.pixel_texture_set};
+    dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 0, 4,
+                                sets, 0, nullptr);
+    VkViewport viewport = draw.viewport;
+    dfn.vkCmdSetViewport(cb, 0, 1, &viewport);
+    VkRect2D scissor = draw.scissor;
+    if (uint32_t(scissor.offset.x) >= width || uint32_t(scissor.offset.y) >= height) {
+      scissor.offset = {0, 0};
+      scissor.extent = {width, height};
+    } else {
+      scissor.extent.width = std::min(scissor.extent.width, width - uint32_t(scissor.offset.x));
+      scissor.extent.height = std::min(scissor.extent.height, height - uint32_t(scissor.offset.y));
+    }
+    dfn.vkCmdSetScissor(cb, 0, 1, &scissor);
+    if (draw.indexed) {
+      dfn.vkCmdBindIndexBuffer(cb, draw.index_buffer, draw.index_offset, draw.index_type);
+      dfn.vkCmdDrawIndexed(cb, draw.draw_count, 1, 0, 0, 0);
+    } else {
+      dfn.vkCmdDraw(cb, draw.draw_count, 1, 0, 0);
+    }
+  }
+}
+#endif  // REX_HAS_VULKAN
+
 bool NativeCommandProcessor::IssueCopy() {
   ++copy_count_;
-  if (REXCVAR_GET(native_log_draws)) {
-    REXLOG_INFO("rexgpu-native: IssueCopy #{} (EDRAM resolve - not yet native)", copy_count_);
+#if REX_HAS_VULKAN
+  // Mark the end of the current render-target phase regardless of whether we
+  // capture it, so a later phase renders only its own draws.
+  const uint32_t phase_first = phase_first_draw_;
+  const uint32_t phase_count = uint32_t(deferred_draws_.size()) - phase_first;
+  phase_first_draw_ = uint32_t(deferred_draws_.size());
+
+  // TEMP-DIAG: report why early copies do not become resolve captures.
+  const bool diag = REXCVAR_GET(native_log_draws);
+  if (!draw_resources_ok_ || !frame_open_ || !phase_count) {
+    if (diag) {
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip res_ok={} frame_open={} phase_count={}",
+                  copy_count_, draw_resources_ok_, frame_open_, phase_count);
+    }
+    return true;
   }
+  draw_util::ResolveInfo resolve_info;
+  if (!draw_util::GetResolveInfo(*register_file_, *memory_, trace_writer_, 1, 1, false, false,
+                                 resolve_info)) {
+    if (diag) {
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip GetResolveInfo failed", copy_count_);
+    }
+    return true;
+  }
+  if (resolve_info.IsCopyingDepth()) {
+    if (diag) {
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip depth resolve", copy_count_);
+    }
+    return true;  // Depth resolves are not sampled as color; skip for now.
+  }
+  const uint32_t rect_w = resolve_info.coordinate_info.width_div_8 * 8;
+  const uint32_t rect_h = resolve_info.height_div_8 * 8;
+  if (!rect_w || !rect_h || !resolve_info.copy_dest_extent_length) {
+    if (diag) {
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip empty rect {}x{} extent={}", copy_count_,
+                  rect_w, rect_h, resolve_info.copy_dest_extent_length);
+    }
+    return true;  // Empty / broken resolve rect - silent no-op.
+  }
+  const uint32_t dest_base = resolve_info.copy_dest_base;
+  const uint32_t dest_key = dest_base & 0x1FFFF000u;
+
+  // From here on the phase is recorded even if its image capture is skipped -
+  // the swap needs the draw-range/destination mapping either way.
+  //
+  // The phase captures every draw that targeted this EDRAM base since the base
+  // was last cleared - not just the draws since the previous resolve, because
+  // resolving does not clear EDRAM (see RenderPhase).
+  const uint32_t src_base = resolve_info.color_edram_info.base_tiles;
+  const auto clear_it = base_clear_point_.find(src_base);
+  const auto last_it = base_last_resolve_.find(src_base);
+  RenderPhase phase;
+  phase.src_base = src_base;
+  phase.first_draw = std::max(clear_it != base_clear_point_.end() ? clear_it->second : 0u,
+                              last_it != base_last_resolve_.end() ? last_it->second : 0u);
+  phase.end_draw = uint32_t(deferred_draws_.size());
+  phase.dest_key = dest_key;
+  phase.rect_w = rect_w;
+  phase.rect_h = rect_h;
+  base_last_resolve_[src_base] = phase.end_draw;
+  // A resolve that also clears starts a fresh accumulation for this base.
+  if (resolve_info.IsClearingColor()) {
+    base_clear_point_[src_base] = phase.end_draw;
+  }
+
+  if (resolves_this_frame_ >= kMaxResolveCapturesPerFrame) {
+    phases_.push_back(phase);
+    if (diag) {
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} phase-only (resolve cap {})", copy_count_,
+                  resolves_this_frame_);
+    }
+    return true;  // Bound the per-frame image-allocation cost.
+  }
+
+  // The offscreen RT must cover the resolve rect and every phase draw's viewport.
+  uint32_t need_w = rect_w;
+  uint32_t need_h = rect_h;
+  const uint32_t phase_end = uint32_t(deferred_draws_.size());
+  for (uint32_t i = phase_first; i < phase_end; ++i) {
+    const DeferredDraw& d = deferred_draws_[i];
+    need_w = std::max(need_w, uint32_t(d.viewport.x + d.viewport.width));
+    need_h = std::max(need_h, uint32_t(d.viewport.y + d.viewport.height));
+  }
+  if (!EnsureResolveRenderTarget(need_w, need_h) ||
+      !EnsureResolveStaging(VkDeviceSize(rect_w) * rect_h * 4)) {
+    phases_.push_back(phase);
+    return true;
+  }
+
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+
+  // Acquire (reuse or create) the persistent resolved image for this address.
+  const size_t resolved_index = AcquireResolvedTarget(dest_key, rect_w, rect_h);
+  if (resolved_index == SIZE_MAX) {
+    phases_.push_back(phase);
+    return true;
+  }
+
+  // CPU-only: alias the (not yet rendered) resolved image at its destination
+  // address so later draws bind it in their descriptor sets. The GPU work -
+  // rendering the phase into resolve_rt_ and copying the rect into the resolved
+  // image - happens in IssueSwap's single submit.
+  resolved_target_views_[dest_key] = resolved_target_storage_[resolved_index].view;
+  resolved_target_dims_[dest_key] = {rect_w, rect_h};
+  phase.resolved_index = resolved_index;
+  phases_.push_back(phase);
+  ++resolve_count_;
+  ++resolves_this_frame_;
+  if (REXCVAR_GET(native_log_draws)) {
+    // TEMP-DIAG: EDRAM geometry + the RT bases of the phase's draws, to ground
+    // the draw-range <-> resolve mapping in real data.
+    char bases[96];
+    size_t bp = 0;
+    uint32_t last_base = UINT32_MAX;
+    for (uint32_t i = phase_first; i < uint32_t(deferred_draws_.size()) && bp < sizeof(bases) - 12;
+         ++i) {
+      const uint32_t b = deferred_draws_[i].color_edram_base;
+      if (b != last_base) {
+        bp += snprintf(bases + bp, sizeof(bases) - bp, "%s%u", bp ? "," : "", b);
+        last_base = b;
+      }
+    }
+    bases[bp] = 0;
+    REXLOG_INFO(
+        "rexgpu-native: IssueCopy #{} resolve {}x{} phase_draws={} -> 0x{:08X} src_tiles={} "
+        "eoff={},{} clearC={} clearD={} draw_bases=[{}]",
+        copy_count_, rect_w, rect_h, phase_count, dest_base,
+        uint32_t(resolve_info.color_edram_info.base_tiles),
+        uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) * 8,
+        uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) * 8,
+        resolve_info.IsClearingColor(), resolve_info.IsClearingDepth(), bases);
+  }
+#endif  // REX_HAS_VULKAN
   return true;
 }
 
@@ -1922,16 +2724,54 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                          : std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f};
   }
 
+  // Phase-aware display: draws belonging to phases that resolved to the
+  // frontbuffer address (plus any trailing unresolved draws) replay into the
+  // swap image; other phases render offscreen only. A frame with no
+  // frontbuffer-matching resolve keeps the replay-all baseline.
+  const uint32_t fb_key = ResolvedTargetKey(frontbuffer_ptr);
+  // Selection lives in phase_model.h so the rules are unit tested rather than
+  // re-derived here; see tests/unit/graphics/phase_model_test.cpp.
+  std::vector<PhaseSpan> phase_spans;
+  phase_spans.reserve(phases_.size());
+  for (const RenderPhase& p : phases_) {
+    phase_spans.push_back({p.src_base, p.first_draw, p.end_draw, p.dest_key});
+  }
+  const std::vector<DisplayRange> display_ranges = SelectDisplayRanges(
+      phase_spans, fb_key, uint32_t(deferred_draws_.size()), phase_first_draw_);
+
   const size_t draw_replay_count = deferred_draws_.size();
-  if (clear_raw != last_logged_clear_raw_ || draw_replay_count) {
+  if (REXCVAR_GET(native_log_draws) && clear_raw != last_logged_clear_raw_) {
     last_logged_clear_raw_ = clear_raw;
-    REXLOG_INFO("rexgpu-native: IssueSwap #{} {}x{} draws={} clear=0x{:08X}", swap_count_, width,
-                height, draw_replay_count, clear_raw);
+    if (phases_.empty()) {
+      REXLOG_INFO("rexgpu-native: IssueSwap #{} {}x{} draws={} clear=0x{:08X}", swap_count_, width,
+                  height, draw_replay_count, clear_raw);
+    } else {
+      uint32_t display_total = 0;
+      for (const auto& range : display_ranges) {
+        for (uint32_t i = range.first_draw; i < range.end_draw && i < deferred_draws_.size();
+             ++i) {
+          if (DrawInRange(deferred_draws_[i].color_edram_base, deferred_draws_[i].depth_only,
+                          range.src_base)) {
+            ++display_total;
+          }
+        }
+      }
+      const uint32_t trailing = uint32_t(deferred_draws_.size()) - phase_first_draw_;
+      REXLOG_INFO(
+          "rexgpu-native: IssueSwap #{} {}x{} draws={} clear=0x{:08X} phases={} fb_key=0x{:08X} "
+          "fb_match={} display={} trail={}",
+          swap_count_, width, height, draw_replay_count, clear_raw, phases_.size(), fb_key,
+          // fb_match: false means selection fell back to replaying the whole
+          // frame because no phase resolved to the frontbuffer.
+          !(display_ranges.size() == 1 && display_ranges[0].src_base == kAnyBase &&
+            display_ranges[0].first_draw == 0),
+          display_total, trailing);
+    }
   }
 
   const bool presented = presenter->RefreshGuestOutput(
       width, height, width, height,
-      [this, width, height, clear_rgba](
+      [this, width, height, clear_rgba, &display_ranges](
           ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& vk_ctx =
             static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
@@ -1974,6 +2814,121 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                  0, 1, &host_barrier, 0, nullptr, 0, nullptr);
 
+        // Render each captured phase into the offscreen resolve RT and copy its
+        // resolve rect into the phase's per-frame resolved image, so the display
+        // draws below (and later offscreen phases) sample this frame's content
+        // through the address aliases registered at IssueCopy time.
+        for (const RenderPhase& p : phases_) {
+          if (p.resolved_index == SIZE_MAX || p.end_draw <= p.first_draw) {
+            continue;
+          }
+          const ResolvedTarget& resolved = resolved_target_storage_[p.resolved_index];
+
+          VkImageSubresourceRange color_range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+          VkImageMemoryBarrier rt_to_color = {};
+          rt_to_color.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+          rt_to_color.srcAccessMask = 0;
+          rt_to_color.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          rt_to_color.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+          rt_to_color.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          rt_to_color.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          rt_to_color.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          rt_to_color.image = resolve_rt_color_;
+          rt_to_color.subresourceRange = color_range;
+          dfn.vkCmdPipelineBarrier(
+              command_buffer_,
+              VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
+              &rt_to_color);
+
+          VkClearValue rt_clears[2] = {};
+          rt_clears[1].depthStencil.depth = 1.0f;
+          VkRenderPassBeginInfo rt_rp_begin = {};
+          rt_rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+          rt_rp_begin.renderPass = clear_render_pass_;
+          rt_rp_begin.framebuffer = resolve_rt_framebuffer_;
+          rt_rp_begin.renderArea.extent = {resolve_rt_width_, resolve_rt_height_};
+          rt_rp_begin.clearValueCount = 2;
+          rt_rp_begin.pClearValues = rt_clears;
+          dfn.vkCmdBeginRenderPass(command_buffer_, &rt_rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+          const uint32_t recorded = RecordDeferredDrawsForBase(
+              command_buffer_, p.first_draw, p.end_draw, p.src_base, resolve_rt_width_,
+              resolve_rt_height_);
+          // TEMP-DIAG: what each resolved image is actually built from.
+          static uint64_t phase_log = 0;
+          if (REXCVAR_GET(native_log_draws) && phase_log < 512) {
+            ++phase_log;
+            REXLOG_INFO(
+                "rexgpu-native: PHASE dest=0x{:08X} base={} range=[{},{}) recorded={} rect={}x{}",
+                p.dest_key, p.src_base, p.first_draw, p.end_draw, recorded, p.rect_w, p.rect_h);
+          }
+          dfn.vkCmdEndRenderPass(command_buffer_);
+
+          VkImageMemoryBarrier to_src = rt_to_color;
+          to_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          to_src.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+          to_src.image = resolve_rt_color_;
+          VkImageMemoryBarrier to_dst = to_src;
+          to_dst.srcAccessMask = 0;
+          to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+          to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          to_dst.image = resolved.image;
+          VkImageMemoryBarrier pre_blit[2] = {to_src, to_dst};
+          dfn.vkCmdPipelineBarrier(command_buffer_,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
+                                   pre_blit);
+
+          // The staging buffer is reused serially across phases; fence off the
+          // previous phase's buffer->image read before overwriting it.
+          VkBufferMemoryBarrier staging_reuse = {};
+          staging_reuse.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+          staging_reuse.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+          staging_reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          staging_reuse.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          staging_reuse.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          staging_reuse.buffer = resolve_staging_buffer_;
+          staging_reuse.offset = 0;
+          staging_reuse.size = VK_WHOLE_SIZE;
+          dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &staging_reuse,
+                                   0, nullptr);
+
+          VkBufferImageCopy region = {};
+          region.bufferOffset = 0;
+          region.bufferRowLength = p.rect_w;
+          region.bufferImageHeight = p.rect_h;
+          region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+          region.imageOffset = {0, 0, 0};
+          region.imageExtent = {p.rect_w, p.rect_h, 1};
+          dfn.vkCmdCopyImageToBuffer(command_buffer_, resolve_rt_color_,
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resolve_staging_buffer_,
+                                     1, &region);
+          VkBufferMemoryBarrier buf_barrier = staging_reuse;
+          buf_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          buf_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &buf_barrier,
+                                   0, nullptr);
+          dfn.vkCmdCopyBufferToImage(command_buffer_, resolve_staging_buffer_, resolved.image,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+          VkImageMemoryBarrier to_read = to_dst;
+          to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+          to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          to_read.image = resolved.image;
+          dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                       VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                                   0, 0, nullptr, 0, nullptr, 1, &to_read);
+        }
+
         VkImageMemoryBarrier acquire_barrier = {};
         acquire_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         acquire_barrier.srcAccessMask =
@@ -2012,33 +2967,40 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         rp_begin.pClearValues = clear_values;
         dfn.vkCmdBeginRenderPass(command_buffer_, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
 
-        // Replay the frame's deferred guest draws into the guest output image.
-        for (const DeferredDraw& draw : deferred_draws_) {
-          dfn.vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
-          VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
-                                     draw.vertex_texture_set, draw.pixel_texture_set};
-          dfn.vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                      draw.pipeline_layout, 0, 4, sets, 0, nullptr);
-          VkViewport viewport = draw.viewport;
-          dfn.vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
-          // Clamp scissor to the framebuffer.
-          VkRect2D scissor = draw.scissor;
-          if (uint32_t(scissor.offset.x) >= width || uint32_t(scissor.offset.y) >= height) {
-            scissor.offset = {0, 0};
-            scissor.extent = {width, height};
+        // Replay the frame's display draws (frontbuffer phases + trailing, or
+        // everything when no phase matched the frontbuffer) into the guest
+        // output image.
+        for (const auto& range : display_ranges) {
+          if (range.src_base == kAnyBase) {
+            RecordDeferredDrawRange(command_buffer_, range.first_draw,
+                                    range.end_draw - range.first_draw, width, height);
           } else {
-            scissor.extent.width = std::min(scissor.extent.width, width - uint32_t(scissor.offset.x));
-            scissor.extent.height =
-                std::min(scissor.extent.height, height - uint32_t(scissor.offset.y));
+            RecordDeferredDrawsForBase(command_buffer_, range.first_draw, range.end_draw,
+                                       range.src_base, width,
+                                       height);
           }
-          dfn.vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
-          if (draw.indexed) {
-            dfn.vkCmdBindIndexBuffer(command_buffer_, draw.index_buffer, draw.index_offset,
-                                     draw.index_type);
-            dfn.vkCmdDrawIndexed(command_buffer_, draw.draw_count, 1, 0, 0, 0);
-          } else {
-            dfn.vkCmdDraw(command_buffer_, draw.draw_count, 1, 0, 0);
-          }
+        }
+
+        // Renderer identifier: a green tab in the top-left corner marks frames
+        // produced by THIS (native) backend. The xenos backend draws nothing
+        // here, so "green tab = new engine, no tab = old engine" is readable at
+        // a glance in a screenshot or on a live window.
+        if (REXCVAR_GET(native_marker)) {
+          VkClearAttachment marker = {};
+          marker.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+          marker.colorAttachment = 0;
+          marker.clearValue.color.float32[0] = 0.0f;
+          marker.clearValue.color.float32[1] = 1.0f;
+          marker.clearValue.color.float32[2] = 0.2f;
+          marker.clearValue.color.float32[3] = 1.0f;
+          const uint32_t mw = std::min(uint32_t(48), width);
+          const uint32_t mh = std::min(uint32_t(16), height);
+          VkClearRect marker_rect = {};
+          marker_rect.rect.offset = {0, 0};
+          marker_rect.rect.extent = {mw, mh};
+          marker_rect.baseArrayLayer = 0;
+          marker_rect.layerCount = 1;
+          dfn.vkCmdClearAttachments(command_buffer_, 1, &marker, 1, &marker_rect);
         }
 
         dfn.vkCmdEndRenderPass(command_buffer_);
@@ -2073,6 +3035,9 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         dfn.vkWaitForFences(device, 1, &clear_fence_, VK_TRUE, UINT64_MAX);
         return true;
       });
+
+  // Debug readback of every offscreen phase, before the frame's resources go.
+  DumpResolvedTargets();
 
   // The frame's transient resources are now safe to recycle on the next draw.
   deferred_draws_.clear();
@@ -2144,6 +3109,33 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   (void)frontbuffer_width;
   (void)frontbuffer_height;
 #endif  // REX_HAS_VULKAN
+}
+
+void NativeCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  CommandProcessor::WriteRegister(index, value);
+  if (texture_cache_ && index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
+      index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+    texture_cache_->TextureFetchConstantWritten((index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
+  }
+}
+
+void NativeCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                                   uint32_t num_registers) {
+  CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+  if (!texture_cache_ || !num_registers) {
+    return;
+  }
+  const uint32_t end_index = start_index + num_registers - 1;
+  if (end_index < XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 ||
+      start_index > XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+    return;
+  }
+  // Clamp to the fetch-constant window - a batch may straddle its edges.
+  const uint32_t first = std::max(start_index, uint32_t(XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0));
+  const uint32_t last = std::min(end_index, uint32_t(XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5));
+  texture_cache_->TextureFetchConstantsWritten(
+      (first - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6,
+      (last - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0) / 6);
 }
 
 void NativeCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) {

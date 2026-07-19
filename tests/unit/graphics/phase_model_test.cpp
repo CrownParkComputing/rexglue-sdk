@@ -175,3 +175,70 @@ TEST_CASE("an empty phase is not reported as overwritten", "[phase_model]") {
   };
   CHECK(FindOverwrittenPhases(phases).empty());
 }
+
+// ---------------------------------------------------------------------------
+// Shapes measured from real titles
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Choplifter shape: one base resolved offscreen then to the frontbuffer",
+          "[phase_model]") {
+  // Measured at swap 1600: the whole frame is two phases, BOTH at EDRAM base
+  // 720. The world renders and resolves to a texture at 0x13380000; the HUD
+  // then renders at the same base and resolves to the frontbuffer.
+  //
+  // Same base, different destinations - so this is NOT the duplicate-resolve
+  // collision, and ownership must still split the two cleanly: the world phase
+  // owns draws [0,90), the HUD phase only [90,104).
+  const uint32_t fb = 0x1F5F8000u;
+  const uint32_t world_end = 90;
+
+  CHECK(PhaseFirstDraw(false, 0, false, 0) == 0u);            // world: first resolve of base 720
+  CHECK(PhaseFirstDraw(false, 0, true, world_end) == 90u);    // HUD: since that base last resolved
+
+  std::vector<PhaseSpan> phases{
+      {/*src_base=*/720, 0, world_end, 0x13380000u},
+      {/*src_base=*/720, world_end, 104, fb},
+  };
+  CHECK(FindOverwrittenPhases(phases).empty());
+
+  const auto ranges = SelectDisplayRanges(phases, fb, /*deferred_count=*/104,
+                                          /*phase_first_draw=*/104);
+  REQUIRE(ranges.size() == 1);
+  CHECK(ranges[0] == DisplayRange{world_end, 104, 720});
+}
+
+TEST_CASE("Choplifter shape: the world phase must not be starved by base filtering",
+          "[phase_model]") {
+  // The world phase came out EMPTY on the device. Ownership above is correct, so
+  // if the world draws are dropped it is the per-draw filter: any world draw
+  // carrying a colour base other than the phase's own is excluded. This pins the
+  // contract the offscreen replay relies on.
+  const uint32_t world_base = 720;
+  CHECK(DrawInRange(world_base, /*depth_only=*/false, world_base));
+  // A draw that targeted a different colour base genuinely does not belong.
+  CHECK_FALSE(DrawInRange(/*color_base=*/468, false, world_base));
+  // ...but a depth-only draw must never be filtered out by a stale colour base.
+  CHECK(DrawInRange(/*color_base=*/468, /*depth_only=*/true, world_base));
+}
+
+TEST_CASE("OutRun shape: a frame with no resolves still replays its draws",
+          "[phase_model]") {
+  // Measured: OutRun issues ZERO resolves in the window sampled, so phases_ is
+  // empty. Selection must fall back to replaying everything - a frame that
+  // renders nothing here would be a selection bug rather than a draw bug.
+  const auto ranges = SelectDisplayRanges({}, /*fb_key=*/0x1F4FE000u,
+                                          /*deferred_count=*/57, /*phase_first_draw=*/0);
+  REQUIRE(ranges.size() == 1);
+  CHECK(ranges[0] == DisplayRange{0, 57, kAnyBase});
+}
+
+TEST_CASE("a frame with no resolves AND no draws selects an empty range",
+          "[phase_model]") {
+  // OutRun measured mean 0.0003 - essentially only the marker tab. If the
+  // deferred list is empty the selection is vacuous, which distinguishes
+  // "nothing was drawn" from "draws were dropped at selection".
+  const auto ranges = SelectDisplayRanges({}, 0x1F4FE000u, /*deferred_count=*/0,
+                                          /*phase_first_draw=*/0);
+  REQUIRE(ranges.size() == 1);
+  CHECK(ranges[0] == DisplayRange{0, 0, kAnyBase});
+}

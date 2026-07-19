@@ -45,6 +45,14 @@ REXCVAR_DEFINE_UINT32(synth_start_ms, 0, "Input",
                       "Start of synthetic-input window, ms since first poll");
 REXCVAR_DEFINE_UINT32(synth_end_ms, 0, "Input",
                       "End of synthetic-input window, ms since first poll");
+REXCVAR_DEFINE_BOOL(log_input, false, "Input",
+                    "Log the merged gamepad state delivered to the guest (sticks, buttons) - use "
+                    "to check whether a controller's right stick reaches a twin-stick game.");
+REXCVAR_DEFINE_UINT32(synth_rstick, 0, "Input",
+                      "Synthetic right-thumbstick deflection (0 = off, max 32767). Rotates once "
+                      "per synth_rstick_period_ms so twin-stick firing can be driven headlessly.");
+REXCVAR_DEFINE_UINT32(synth_rstick_period_ms, 4000, "Input",
+                      "Period of one full synthetic right-stick rotation, in milliseconds.");
 REXCVAR_DEFINE_UINT32(synth_period_ms, 0, "Input",
                       "If >0, repeat the synthetic-input window every this many ms");
 
@@ -90,6 +98,31 @@ uint16_t SyntheticButtons(uint32_t user_index) {
     ms %= period;
   }
   return (ms >= start && ms < end) ? bit : 0;
+}
+
+// Returns the synthetic right-thumbstick deflection to apply right now, or
+// false if unconfigured. Twin-stick games (Geometry Wars) fire with the right
+// stick, so a button-only synth cannot exercise shooting at all - every
+// headless run scores zero no matter whether the game logic works. The stick
+// rotates once per synth_rstick_period_ms so it sweeps all firing directions.
+bool SyntheticRightStick(uint32_t user_index, int16_t& x_out, int16_t& y_out) {
+  if (user_index != 0) {
+    return false;
+  }
+  const uint32_t magnitude = REXCVAR_GET(synth_rstick);
+  if (!magnitude) {
+    return false;
+  }
+  static const auto t0 = std::chrono::steady_clock::now();
+  const uint64_t ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+          .count());
+  const uint32_t period = std::max(REXCVAR_GET(synth_rstick_period_ms), UINT32_C(1));
+  const double angle = 2.0 * 3.14159265358979323846 * double(ms % period) / double(period);
+  const double amp = double(std::min(magnitude, UINT32_C(32767)));
+  x_out = static_cast<int16_t>(amp * std::cos(angle));
+  y_out = static_cast<int16_t>(amp * std::sin(angle));
+  return true;
 }
 
 }  // namespace
@@ -185,6 +218,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   // Synthetic input injection (test aid): OR a scripted button into the merged
   // state. Reports "connected" even if no real device is, so a headless run can
   // drive input-gated screens.
+  bool synth_applied = false;
   if (uint16_t synth = SyntheticButtons(user_index)) {
     if (first_result) {
       merged = {};
@@ -192,8 +226,46 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     }
     merged.gamepad.buttons =
         static_cast<uint16_t>(static_cast<uint16_t>(merged.gamepad.buttons) | synth);
+    synth_applied = true;
+  }
+  int16_t synth_rx = 0, synth_ry = 0;
+  if (SyntheticRightStick(user_index, synth_rx, synth_ry)) {
+    if (first_result) {
+      merged = {};
+      first_result = false;
+    }
+    merged.gamepad.thumb_rx = synth_rx;
+    merged.gamepad.thumb_ry = synth_ry;
+    synth_applied = true;
+  }
+  if (synth_applied) {
     static uint16_t synth_pkt = 0;
     merged.packet_number = ++synth_pkt;
+  }
+
+  // Diagnostic (--log_input=true): report what the guest actually receives.
+  // Twin-stick aiming problems are invisible from the outside - this shows
+  // whether the right stick reaches the title at all, and from which driver.
+  if (REXCVAR_GET(log_input) && user_index == 0 && !first_result) {
+    static uint64_t last_log_ms = 0;
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    const int16_t rx = static_cast<int16_t>(merged.gamepad.thumb_rx);
+    const int16_t ry = static_cast<int16_t>(merged.gamepad.thumb_ry);
+    static int16_t last_rx = 0, last_ry = 0;
+    const bool moved = std::abs(int(rx) - int(last_rx)) > 2048 ||
+                       std::abs(int(ry) - int(last_ry)) > 2048;
+    if (moved || now_ms - last_log_ms >= 1000) {
+      last_log_ms = now_ms;
+      last_rx = rx;
+      last_ry = ry;
+      REXLOG_INFO("input: buttons=0x{:04X} L=({},{}) R=({},{}) lt={} rt={} drivers={}",
+                  uint16_t(merged.gamepad.buttons), int16_t(merged.gamepad.thumb_lx),
+                  int16_t(merged.gamepad.thumb_ly), rx, ry, merged.gamepad.left_trigger,
+                  merged.gamepad.right_trigger, drivers_.size());
+    }
   }
 
   if (first_result) {

@@ -11,6 +11,7 @@
 #include "native/index_expand.h"
 #include "native/draw_classify.h"
 #include "native/phase_model.h"
+#include "native/shader_constants.h"
 
 #include <array>
 #include <cstdint>
@@ -1640,9 +1641,24 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   vmod.vertex.output_point_parameters =
       uint32_t((vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b001) &&
                prim_type == xenos::PrimitiveType::kPointList);
-  vmod.vertex.user_clip_plane_count = 0;
-  vmod.vertex.user_clip_plane_cull = 0;
-  vmod.vertex.vertex_kill_and = 0;
+  // Register-derived, not hardcoded. Forcing these to 0 is invisible on 2D
+  // passes (which set clip_disable and don't kill vertices) and destroys 3D
+  // ones: guest-clipped geometry rasterizes unclipped, and a kill-vertex
+  // shader falls into the NaN-position.w path whose NaN poisons the rectangle
+  // diagonal search. Derivations are unit tested in shader_constants.h.
+  const auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  const auto& dev_props = vulkan_device_->properties();
+  const UserClipPlaneConfig ucp = ComputeUserClipPlanes(
+      pa_cl_clip_cntl.clip_disable != 0, pa_cl_clip_cntl.ucp_ena,
+      pa_cl_clip_cntl.ucp_cull_only_ena != 0, dev_props.shaderClipDistance != 0,
+      dev_props.shaderCullDistance != 0);
+  vmod.vertex.user_clip_plane_count = ucp.count;
+  vmod.vertex.user_clip_plane_cull = ucp.cull;
+  vmod.vertex.point_ps_ucp_mode = pa_cl_clip_cntl.ps_ucp_mode;
+  vmod.vertex.vertex_kill_and =
+      uint32_t(ComputeVertexKillAnd(dev_props.shaderCullDistance != 0,
+                                    vertex_shader->writes_point_size_edge_flag_kill_vertex(),
+                                    pa_cl_clip_cntl.vtx_kill_or != 0));
 
   // --- Translate. A depth-only draw has no pixel shader to translate. ---
   Shader::Translation* vtrans = vertex_shader->GetOrCreateTranslation(vmod.value);
@@ -1771,8 +1787,25 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
     system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
   }
+  // Colour exponent bias lives in RB_COLOR_INFO bits 20:25 and the shader
+  // multiplies output by 2^bias. Hardcoding 1.0f blows out any render target
+  // carrying a bias - a prime suspect for washed-out 3D scenes.
   for (uint32_t i = 0; i < 4; ++i) {
-    system_constants.color_exp_bias[i] = 1.0f;
+    const auto rt_color_info =
+        regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
+    system_constants.color_exp_bias[i] = ColorExpBiasScale(rt_color_info.color_exp_bias);
+  }
+  // The shader reads only the planes that are enabled, tightly packed.
+  if (!pa_cl_clip_cntl.clip_disable) {
+    float* ucp_write = system_constants.user_clip_planes[0];
+    uint32_t ucp_remaining = pa_cl_clip_cntl.ucp_ena & 0x3Fu;
+    uint32_t ucp_index;
+    while (rex::bit_scan_forward(ucp_remaining, &ucp_index)) {
+      ucp_remaining &= ~(uint32_t(1) << ucp_index);
+      std::memcpy(ucp_write, &regs[XE_GPU_REG_PA_CL_UCP_0_X + ucp_index * 4],
+                  4 * sizeof(float));
+      ucp_write += 4;
+    }
   }
 
   // --- Upload constant UBOs and build the constants descriptor set. ---

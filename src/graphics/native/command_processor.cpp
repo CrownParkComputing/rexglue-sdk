@@ -9,6 +9,7 @@
 #include "native/command_processor.h"
 
 #include "native/index_expand.h"
+#include "native/draw_classify.h"
 #include "native/phase_model.h"
 
 #include <array>
@@ -1540,44 +1541,45 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   rex::string::StringBuffer ucode_buffer;
   vertex_shader->AnalyzeUcode(ucode_buffer);
 
-  // Vertex memexport can't be executed natively yet (Phase 3 - needs
-  // shared-memory writes). Dropping those draws HERE, above the rasterization
-  // test, is what lets that test stand in for the oracle's combined
-  // "!is_rasterization_done && !memexport_used_vertex" discard
-  // (vulkan/command_processor.cpp:3792) - a kNoOperation draw that only exists
-  // for its memexport side effect has nothing left to do once memexport is out.
-  if (vertex_shader->memexport_eM_written()) {
-    return skip("memexport_vertex");
-  }
-
-  const bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
-  if (!draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal)) {
-    return skip("no_rasterization");
-  }
-
-  // A draw with no color output is still RASTERIZED - it populates depth for a
-  // later color pass. IsPixelShaderNeededWithRasterization means "the FRAGMENT
-  // STAGE may be dropped", NOT "drop the draw", and kDepthOnly is the guest
-  // asking for exactly that. Reading either as "skip" left every depth pre-pass
-  // out of the depth buffer, so 3D geometry failed its depth test against a
-  // buffer still cleared to 1.0 and the world rendered black - while z-testless
-  // HUD/2D drew fine. Mirrors vulkan/command_processor.cpp:3779-3791.
   auto* pixel_shader = static_cast<SpirvShader*>(active_pixel_shader());
-  if (edram_mode == xenos::EdramMode::kColorDepth) {
-    if (pixel_shader) {
-      pixel_shader->AnalyzeUcode(ucode_buffer);
-      if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
-        pixel_shader = nullptr;
-      } else if (pixel_shader->memexport_eM_written()) {
-        // Checked only AFTER the nulling: a shader that was dropped can't
-        // memexport, and testing first would drop draws the oracle renders.
-        return skip("memexport_pixel");
-      }
-    }
-  } else {
-    pixel_shader = nullptr;
+  if (pixel_shader) {
+    pixel_shader->AnalyzeUcode(ucode_buffer);
   }
-  // No fragment stage: this draw contributes depth (and nothing else).
+
+  // The decision table (including the two orderings that matter) lives in
+  // draw_classify.h so it is unit tested rather than re-derived here; see
+  // tests/unit/graphics/draw_classify_test.cpp.
+  const bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
+  DrawFacts facts;
+  facts.edram_mode = edram_mode;
+  facts.rasterization_possible =
+      draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
+  facts.vertex_memexport = vertex_shader->memexport_eM_written();
+  facts.has_pixel_shader = pixel_shader != nullptr;
+  facts.pixel_shader_needed =
+      pixel_shader && draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs);
+  facts.pixel_memexport = pixel_shader && pixel_shader->memexport_eM_written();
+
+  switch (ClassifyDraw(facts)) {
+    case DrawDisposition::kResolve:
+      return IssueCopy();
+    case DrawDisposition::kSkipVertexMemexport:
+      return skip("memexport_vertex");
+    case DrawDisposition::kSkipNoRasterization:
+      return skip("no_rasterization");
+    case DrawDisposition::kSkipPixelMemexport:
+      return skip("memexport_pixel");
+    case DrawDisposition::kDepthOnly:
+      // Rasterize with NO fragment stage - this draw contributes depth and
+      // nothing else. Dropping these instead left every depth pre-pass out of
+      // the depth buffer, so 3D geometry failed its depth test against a
+      // buffer still cleared to 1.0 and the world rendered black, while
+      // z-testless HUD/2D drew fine.
+      pixel_shader = nullptr;
+      break;
+    case DrawDisposition::kFull:
+      break;
+  }
   const bool depth_only = pixel_shader == nullptr;
 
   const reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
@@ -2818,6 +2820,27 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         // resolve rect into the phase's per-frame resolved image, so the display
         // draws below (and later offscreen phases) sample this frame's content
         // through the address aliases registered at IssueCopy time.
+        // DIAG: report EVERY phase and why it was or wasn't rendered. The
+        // per-phase "recorded" log below only fires for phases that render, so
+        // a phase dropped by this guard was invisible - which is exactly the
+        // state Choplifter and OutRun are in (offscreen phase empty on screen,
+        // no PHASE line in the log). Gated on one swap so it costs nothing.
+        {
+          static const uint64_t phases_swap =
+              getenv("REX_PHASES_SWAP") ? uint64_t(atoll(getenv("REX_PHASES_SWAP"))) : UINT64_MAX;
+          if (swap_count_ == phases_swap) {
+            REXLOG_INFO("rexgpu-native: PHASES swap={} count={} deferred={} phase_first={}",
+                        swap_count_, phases_.size(), deferred_draws_.size(), phase_first_draw_);
+            for (size_t pi = 0; pi < phases_.size(); ++pi) {
+              const RenderPhase& p = phases_[pi];
+              const char* why = p.resolved_index == SIZE_MAX ? "no_image"
+                                : (p.end_draw <= p.first_draw ? "EMPTY_RANGE" : "renders");
+              REXLOG_INFO(
+                  "rexgpu-native: PHASES [{}] dest=0x{:08X} base={} range=[{},{}) rect={}x{} -> {}",
+                  pi, p.dest_key, p.src_base, p.first_draw, p.end_draw, p.rect_w, p.rect_h, why);
+            }
+          }
+        }
         for (const RenderPhase& p : phases_) {
           if (p.resolved_index == SIZE_MAX || p.end_draw <= p.first_draw) {
             continue;

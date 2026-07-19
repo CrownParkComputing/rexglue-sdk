@@ -20,6 +20,7 @@ add_executable(unit_tests
     rexglue/migration_scan_test.cpp
     rexglue/ui_test.cpp
     graphics/index_expand_test.cpp
+    graphics/draw_classify_test.cpp
     graphics/phase_model_test.cpp
 )
 

@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -183,6 +184,58 @@ TEST_CASE("rectangle indices encode the primitive ordinal above the corner",
   // The corner pattern repeats per rectangle.
   CHECK((out[6] & 3u) == 0u);
   CHECK((out[11] & 3u) == 3u);
+}
+
+TEST_CASE("rectangle list form is equivalent to the backend's strip form",
+          "[index_expand]") {
+  // The emulating backend expands rectangles as a triangle STRIP with primitive
+  // restart, over a builtin buffer of (primitive << 2 | corner) with UINT32_MAX
+  // separators (primitive_processor.cpp:188-207). This backend uses a triangle
+  // LIST instead. This asserts the two describe the SAME triangles with the
+  // SAME winding, so the list form is not the reason rectangle expansion
+  // corrupts 3D scenes - don't re-litigate the index side.
+  const uint32_t kRestart = UINT32_MAX;
+  const uint32_t rect_count = 3;
+
+  // Build the reference strip exactly as the builtin buffer does.
+  std::vector<uint32_t> strip;
+  for (uint32_t i = 0; i < rect_count; ++i) {
+    if (i) {
+      strip.push_back(kRestart);
+    }
+    for (uint32_t j = 0; j < 4; ++j) {
+      strip.push_back((i << 2) + j);
+    }
+  }
+
+  // Decompose that strip into triangles the way the rasterizer would, flipping
+  // winding on odd triangles as a strip does.
+  std::vector<std::array<uint32_t, 3>> from_strip;
+  for (size_t i = 0; i + 2 < strip.size(); ++i) {
+    if (strip[i] == kRestart || strip[i + 1] == kRestart || strip[i + 2] == kRestart) {
+      continue;
+    }
+    size_t run_start = 0;
+    for (size_t k = 0; k <= i; ++k) {
+      if (strip[k] == kRestart) {
+        run_start = k + 1;
+      }
+    }
+    const bool odd = ((i - run_start) & 1) != 0;
+    from_strip.push_back(odd ? std::array<uint32_t, 3>{strip[i + 1], strip[i], strip[i + 2]}
+                             : std::array<uint32_t, 3>{strip[i], strip[i + 1], strip[i + 2]});
+  }
+
+  // And the list form this backend actually emits.
+  GuestIndexSource src;
+  std::vector<uint32_t> list(RectangleListExpandedCount(rect_count * 3));
+  ExpandRectangleList(rect_count * 3, src, list.data());
+  std::vector<std::array<uint32_t, 3>> from_list;
+  for (size_t i = 0; i + 2 < list.size(); i += 3) {
+    from_list.push_back({list[i], list[i + 1], list[i + 2]});
+  }
+
+  CHECK(from_strip == from_list);
 }
 
 TEST_CASE("both rectangle triangles share the 1-2 edge", "[index_expand]") {

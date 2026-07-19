@@ -46,6 +46,8 @@ REXCVAR_DEFINE_BOOL(native_marker, true, "GPU/Native",
                     "GPU backend, so it is obvious at a glance which renderer is running.");
 REXCVAR_DEFINE_BOOL(native_log_draws, false, "GPU/Native",
                     "Log every draw/copy the native renderer receives from the PM4 stream");
+REXCVAR_DEFINE_BOOL(native_expand_rects, false, "GPU",
+                    "Expand guest rectangle lists into two triangles. Off by default: the\n                    implied fourth corner is reconstructed in the vertex shader and has\n                    not been proven correct yet - see MapPrimitiveTopology.");
 
 namespace rex::graphics::native {
 
@@ -1616,7 +1618,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // corner - coming out as garbage. That reconstruction happens in the vertex
   // shader under HostVertexShaderType::kRectangleListAsTriangleStrip (see the
   // vmod below), so the remaining work is on the shader side, not here.
-  const bool expand_rects = false;
+  const bool expand_rects = REXCVAR_GET(native_expand_rects);
   // TEMP-DIAG: characterise every rectangle-list draw - are they auto-indexed
   // or DMA-indexed? Decides whether the reverted expansion's missing guest
   // index-buffer read explains the Geometry Wars regression.

@@ -2771,6 +2771,18 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     }
   }
 
+  // DIAG (REX_PHASES_SWAP): logged OUTSIDE the presenter callback, so a frame
+  // where the callback never runs is distinguishable from one where it runs
+  // and finds nothing to render. Those two look identical from inside.
+  {
+    static const uint64_t phases_swap =
+        getenv("REX_PHASES_SWAP") ? uint64_t(atoll(getenv("REX_PHASES_SWAP"))) : UINT64_MAX;
+    if (swap_count_ >= phases_swap && swap_count_ < phases_swap + 8) {
+      REXLOG_INFO("rexgpu-native: SWAPENTRY swap={} phases={} deferred={} fb=0x{:08X}",
+                  swap_count_, phases_.size(), deferred_draws_.size(), frontbuffer_ptr);
+    }
+  }
+
   const bool presented = presenter->RefreshGuestOutput(
       width, height, width, height,
       [this, width, height, clear_rgba, &display_ranges](
@@ -2828,7 +2840,11 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         {
           static const uint64_t phases_swap =
               getenv("REX_PHASES_SWAP") ? uint64_t(atoll(getenv("REX_PHASES_SWAP"))) : UINT64_MAX;
-          if (swap_count_ == phases_swap) {
+          // A WINDOW, not one swap: the presenter can decline to invoke this
+          // callback for a given frame (dropped/outdated swapchain), in which
+          // case a single-swap gate reports nothing and looks identical to
+          // "the loop never runs".
+          if (swap_count_ >= phases_swap && swap_count_ < phases_swap + 8) {
             REXLOG_INFO("rexgpu-native: PHASES swap={} count={} deferred={} phase_first={}",
                         swap_count_, phases_.size(), deferred_draws_.size(), phase_first_draw_);
             for (size_t pi = 0; pi < phases_.size(); ++pi) {

@@ -2775,11 +2775,15 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // where the callback never runs is distinguishable from one where it runs
   // and finds nothing to render. Those two look identical from inside.
   {
-    static const uint64_t phases_swap =
-        getenv("REX_PHASES_SWAP") ? uint64_t(atoll(getenv("REX_PHASES_SWAP"))) : UINT64_MAX;
-    if (swap_count_ >= phases_swap && swap_count_ < phases_swap + 8) {
-      REXLOG_INFO("rexgpu-native: SWAPENTRY swap={} phases={} deferred={} fb=0x{:08X}",
-                  swap_count_, phases_.size(), deferred_draws_.size(), frontbuffer_ptr);
+    // Gated on how many times we have REACHED HERE, not on swap_count_:
+    // swap_count_ increments before the !presenter early return, so it races
+    // far ahead during loading and an absolute gate never fires once rendering
+    // actually starts.
+    static uint64_t entry_n = 0;
+    ++entry_n;
+    if (REXCVAR_GET(native_log_draws) && (entry_n <= 4 || (entry_n % 400) == 0)) {
+      REXLOG_INFO("rexgpu-native: SWAPENTRY #{} swap={} phases={} deferred={} fb=0x{:08X}",
+                  entry_n, swap_count_, phases_.size(), deferred_draws_.size(), frontbuffer_ptr);
     }
   }
 
@@ -2838,13 +2842,11 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         // state Choplifter and OutRun are in (offscreen phase empty on screen,
         // no PHASE line in the log). Gated on one swap so it costs nothing.
         {
-          static const uint64_t phases_swap =
-              getenv("REX_PHASES_SWAP") ? uint64_t(atoll(getenv("REX_PHASES_SWAP"))) : UINT64_MAX;
-          // A WINDOW, not one swap: the presenter can decline to invoke this
-          // callback for a given frame (dropped/outdated swapchain), in which
-          // case a single-swap gate reports nothing and looks identical to
-          // "the loop never runs".
-          if (swap_count_ >= phases_swap && swap_count_ < phases_swap + 8) {
+          // Same occurrence-count gating as SWAPENTRY above, and for the same
+          // reason - see the comment there.
+          static uint64_t phases_n = 0;
+          ++phases_n;
+          if (REXCVAR_GET(native_log_draws) && (phases_n <= 4 || (phases_n % 400) == 0)) {
             REXLOG_INFO("rexgpu-native: PHASES swap={} count={} deferred={} phase_first={}",
                         swap_count_, phases_.size(), deferred_draws_.size(), phase_first_draw_);
             for (size_t pi = 0; pi < phases_.size(); ++pi) {

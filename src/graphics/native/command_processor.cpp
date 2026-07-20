@@ -2973,13 +2973,34 @@ bool NativeCommandProcessor::IssueCopy() {
   const uint32_t phase_count = uint32_t(deferred_draws_.size()) - phase_first;
   phase_first_draw_ = uint32_t(deferred_draws_.size());
 
-  // TEMP-DIAG: report why early copies do not become resolve captures.
+  // Every exit from IssueCopy logs the destination it was for, so a resolve
+  // that never becomes a phase can be traced to the exact guard that ate it.
+  // Predicated-tiling titles issue several strip resolves back to back, and a
+  // resolve dropped here is invisible downstream - it simply never appears in
+  // the phase list. Gated on the cheap phase cvar, not the per-draw flood.
+  const uint32_t diag_dest = register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE];
+  const bool diag_copy = REXCVAR_GET(native_log_phases) || REXCVAR_GET(native_log_draws);
+  auto copy_exit = [&](const char* why) {
+    static std::unordered_map<std::string, uint64_t> n;
+    const uint64_t k = ++n[why];
+    if (diag_copy && (k <= 3 || (k % 250) == 0)) {
+      REXLOG_INFO("rexgpu-native: COPYEXIT #{} dest=0x{:08X} why={} n={}", copy_count_, diag_dest,
+                  why, k);
+    }
+  };
   const bool diag = REXCVAR_GET(native_log_draws);
-  if (!draw_resources_ok_ || !frame_open_ || !phase_count) {
+  // NOT gated on phase_count: a resolve copies EDRAM out WITHOUT clearing it,
+  // so a second resolve with no draws in between is re-publishing the same
+  // content to another address - which is exactly how a title copies its
+  // finished frame to the frontbuffer. Dropping those rendered SoulCalibur II,
+  // OutRun, Ridge Racer 6, SoulCalibur IV, both Bionic Commandos and Rainbow
+  // Islands black (all seven byte-identical at mean 0.000333).
+  if (!draw_resources_ok_ || !frame_open_) {
     if (diag) {
       REXLOG_INFO("rexgpu-native: IssueCopy #{} skip res_ok={} frame_open={} phase_count={}",
                   copy_count_, draw_resources_ok_, frame_open_, phase_count);
     }
+    copy_exit(!phase_count ? "no_draws_since_last_resolve" : "resources_or_frame");
     return true;
   }
   draw_util::ResolveInfo resolve_info;
@@ -2988,6 +3009,7 @@ bool NativeCommandProcessor::IssueCopy() {
     if (diag) {
       REXLOG_INFO("rexgpu-native: IssueCopy #{} skip GetResolveInfo failed", copy_count_);
     }
+    copy_exit("get_resolve_info_failed");
     return true;
   }
   if (resolve_info.IsCopyingDepth()) {
@@ -2997,6 +3019,7 @@ bool NativeCommandProcessor::IssueCopy() {
                   uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
                   uint32_t(resolve_info.height_div_8) * 8);
     }
+    copy_exit("depth_resolve");
     return true;  // Depth resolves are not sampled as color; skip for now.
   }
   const uint32_t rect_w = resolve_info.coordinate_info.width_div_8 * 8;
@@ -3006,6 +3029,7 @@ bool NativeCommandProcessor::IssueCopy() {
       REXLOG_INFO("rexgpu-native: IssueCopy #{} skip empty rect {}x{} extent={}", copy_count_,
                   rect_w, rect_h, resolve_info.copy_dest_extent_length);
     }
+    copy_exit("empty_rect");
     return true;  // Empty / broken resolve rect - silent no-op.
   }
   // Alias by the destination TEXTURE's base, not the per-rect tile-adjusted
@@ -3103,12 +3127,38 @@ bool NativeCommandProcessor::IssueCopy() {
     base_clear_point_[src_base] = phase.end_draw;
   }
 
+  // Re-publication: this resolve owns no new draws, so it is copying EDRAM
+  // content some earlier resolve of the same base already captured. Point the
+  // new destination at that image instead of rendering nothing.
+  if (phase.end_draw <= phase.first_draw) {
+    auto prev = base_last_published_.find(src_base);
+    if (prev != base_last_published_.end() &&
+        prev->second.index < resolved_target_storage_.size()) {
+      const ResolvedTarget& img = resolved_target_storage_[prev->second.index];
+      if (img.view != VK_NULL_HANDLE) {
+        resolved_target_views_[dest_key] = img.view;
+        resolved_target_index_[dest_key] = prev->second.index;
+        resolved_target_dims_[dest_key] = {img.width, img.height};
+        phase.first_draw = prev->second.first_draw;
+        phase.end_draw = prev->second.end_draw;
+        phase.resolved_index = prev->second.index;
+        phase.republished = true;
+        phases_.push_back(phase);
+        copy_exit("REPUBLISHED");
+        return true;
+      }
+    }
+    copy_exit("empty_no_prior_publish");
+    return true;
+  }
+
   if (resolves_this_frame_ >= kMaxResolveCapturesPerFrame) {
     phases_.push_back(phase);
     if (diag) {
       REXLOG_INFO("rexgpu-native: IssueCopy #{} phase-only (resolve cap {})", copy_count_,
                   resolves_this_frame_);
     }
+    copy_exit("resolve_cap");
     return true;  // Bound the per-frame image-allocation cost.
   }
 
@@ -3148,6 +3198,8 @@ bool NativeCommandProcessor::IssueCopy() {
   phases_.push_back(phase);
   ++resolve_count_;
   ++resolves_this_frame_;
+  copy_exit("BECAME_PHASE");
+  base_last_published_[src_base] = {resolved_index, phase.first_draw, phase.end_draw};
   if (REXCVAR_GET(native_log_draws)) {
     // TEMP-DIAG: EDRAM geometry + the RT bases of the phase's draws, to ground
     // the draw-range <-> resolve mapping in real data.

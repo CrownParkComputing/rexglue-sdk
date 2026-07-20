@@ -376,7 +376,18 @@ class NativeCommandProcessor : public CommandProcessor {
     uint32_t dest_x = 0;
     uint32_t dest_y = 0;
     size_t resolved_index = SIZE_MAX;
+    // This phase rendered no new draws; it re-publishes an earlier resolve of
+    // the same EDRAM base to a second address (typically the frontbuffer).
+    bool republished = false;
   };
+  // Per EDRAM base, the last resolve that actually captured an image, so a
+  // later zero-draw resolve of that base can republish it.
+  struct PublishedPhase {
+    size_t index = SIZE_MAX;
+    uint32_t first_draw = 0;
+    uint32_t end_draw = 0;
+  };
+  std::unordered_map<uint32_t, PublishedPhase> base_last_published_;
   bool EnsureResolveRenderTarget(uint32_t width, uint32_t height);
   void DestroyResolveRenderTarget();
   bool EnsureResolveStaging(VkDeviceSize size);

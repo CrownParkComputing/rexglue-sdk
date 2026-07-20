@@ -63,6 +63,38 @@ namespace rex::graphics::native {
 
 namespace {
 
+// IEEE half -> float, for reading back kSceneColorFormat images on the host.
+float HalfToFloat(uint16_t h) {
+  const uint32_t sign = uint32_t(h >> 15) << 31;
+  uint32_t exponent = (h >> 10) & 0x1F;
+  uint32_t mantissa = h & 0x3FF;
+  if (exponent == 0) {
+    if (mantissa == 0) {
+      const uint32_t zero = sign;
+      float out;
+      std::memcpy(&out, &zero, sizeof(out));
+      return out;
+    }
+    // Subnormal: normalize it.
+    exponent = 1;
+    while (!(mantissa & 0x400)) {
+      mantissa <<= 1;
+      --exponent;
+    }
+    mantissa &= 0x3FF;
+  } else if (exponent == 0x1F) {
+    exponent = 0xFF;  // Inf / NaN
+    const uint32_t bits = sign | (exponent << 23) | (mantissa << 13);
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+  }
+  const uint32_t bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
 uint64_t HashUcode(const uint32_t* dwords, uint32_t count) {
   uint64_t hash = 1469598103934665603ull;
   for (uint32_t i = 0; i < count; ++i) {
@@ -247,7 +279,11 @@ bool NativeCommandProcessor::CreateClearResources() {
   // clear the guest output and (Phase 2) as the render pass for guest draw
   // pipelines and the swap-time replay.
   VkAttachmentDescription attachment = {};
-  attachment.format = ui::vulkan::VulkanPresenter::kGuestOutputFormat;
+  // Float, not the presenter's format: guest draws render into the HDR scene
+  // image and the finished frame is blitted down at present time (see
+  // kSceneColorFormat). Every guest pipeline is created against this render
+  // pass, so its colour format has to be the one all guest draws target.
+  attachment.format = kSceneColorFormat;
   attachment.samples = VK_SAMPLE_COUNT_1_BIT;
   attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
   attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -327,6 +363,107 @@ void NativeCommandProcessor::DestroyClearResources() {
   clear_framebuffer_version_ = UINT64_MAX;
   clear_framebuffer_width_ = 0;
   clear_framebuffer_height_ = 0;
+}
+
+bool NativeCommandProcessor::EnsureSceneFramebuffer(uint32_t width, uint32_t height) {
+  if (scene_framebuffer_ != VK_NULL_HANDLE && scene_width_ == width && scene_height_ == height) {
+    return true;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  DestroySceneFramebuffer();
+
+  VkImageCreateInfo image_info = {};
+  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  image_info.imageType = VK_IMAGE_TYPE_2D;
+  image_info.format = kSceneColorFormat;
+  image_info.extent = {width, height, 1};
+  image_info.mipLevels = 1;
+  image_info.arrayLayers = 1;
+  image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+  image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if (dfn.vkCreateImage(device, &image_info, nullptr, &scene_color_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: scene image create failed {}x{}", width, height);
+    return false;
+  }
+  VkMemoryRequirements req;
+  dfn.vkGetImageMemoryRequirements(device, scene_color_, &req);
+  uint32_t type_index;
+  if (!rex::bit_scan_forward(req.memoryTypeBits & vulkan_device_->memory_types().device_local,
+                             &type_index) &&
+      !rex::bit_scan_forward(req.memoryTypeBits, &type_index)) {
+    DestroySceneFramebuffer();
+    return false;
+  }
+  VkMemoryAllocateInfo alloc = {};
+  alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  alloc.allocationSize = req.size;
+  alloc.memoryTypeIndex = type_index;
+  if (dfn.vkAllocateMemory(device, &alloc, nullptr, &scene_color_memory_) != VK_SUCCESS ||
+      dfn.vkBindImageMemory(device, scene_color_, scene_color_memory_, 0) != VK_SUCCESS) {
+    DestroySceneFramebuffer();
+    return false;
+  }
+  VkImageViewCreateInfo view_info = {};
+  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  view_info.image = scene_color_;
+  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  view_info.format = kSceneColorFormat;
+  view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &scene_color_view_) != VK_SUCCESS) {
+    DestroySceneFramebuffer();
+    return false;
+  }
+  if (!EnsureDepthResources(width, height)) {
+    DestroySceneFramebuffer();
+    return false;
+  }
+  const VkImageView fb_attachments[2] = {scene_color_view_, depth_view_};
+  VkFramebufferCreateInfo fb_info = {};
+  fb_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  fb_info.renderPass = clear_render_pass_;
+  fb_info.attachmentCount = 2;
+  fb_info.pAttachments = fb_attachments;
+  fb_info.width = width;
+  fb_info.height = height;
+  fb_info.layers = 1;
+  if (dfn.vkCreateFramebuffer(device, &fb_info, nullptr, &scene_framebuffer_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: scene framebuffer failed {}x{}", width, height);
+    DestroySceneFramebuffer();
+    return false;
+  }
+  scene_width_ = width;
+  scene_height_ = height;
+  return true;
+}
+
+void NativeCommandProcessor::DestroySceneFramebuffer() {
+  if (!vulkan_device_) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  if (scene_framebuffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyFramebuffer(device, scene_framebuffer_, nullptr);
+    scene_framebuffer_ = VK_NULL_HANDLE;
+  }
+  if (scene_color_view_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImageView(device, scene_color_view_, nullptr);
+    scene_color_view_ = VK_NULL_HANDLE;
+  }
+  if (scene_color_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyImage(device, scene_color_, nullptr);
+    scene_color_ = VK_NULL_HANDLE;
+  }
+  if (scene_color_memory_ != VK_NULL_HANDLE) {
+    dfn.vkFreeMemory(device, scene_color_memory_, nullptr);
+    scene_color_memory_ = VK_NULL_HANDLE;
+  }
+  scene_width_ = 0;
+  scene_height_ = 0;
 }
 
 bool NativeCommandProcessor::EnsureClearFramebuffer(VkImageView image_view, uint64_t image_version,
@@ -1475,8 +1612,9 @@ VkDescriptorSet NativeCommandProcessor::AllocateTextureSet(SpirvShader* shader,
             uint32_t(fetch.pitch) << 5, resolved_target_views_.size());
       }
     }
+    bool cache_hit = true;  // Stays true when a resolved-target alias satisfied the bind.
     if (view == VK_NULL_HANDLE) {
-      bool cache_hit = false;
+      cache_hit = false;
       view = texture_cache_->GetActiveBindingOrNullImageView(tb.fetch_constant, dimension,
                                                              bool(tb.is_signed), &cache_hit);
       // TEMP-DIAG: bounded log of texture-cache MISSES (opaque-black
@@ -1500,12 +1638,16 @@ VkDescriptorSet NativeCommandProcessor::AllocateTextureSet(SpirvShader* shader,
         }
       }
     }
-    // Cumulative bind outcomes. A world that renders black while the 2D UI in
-    // the SAME phase renders correctly is either depth or textures, and a
-    // near-100% miss rate here (opaque-black null view) is what distinguishes
-    // them. Counted on the object so the rate is readable from a periodic log
-    // rather than 60 early lines the flood rotates away.
+    // Cumulative bind outcomes, read from the periodic SKIPS line.
+    // tex_miss counts CACHE MISSES (the cache's own opaque-black null view),
+    // which is the number that matters. Counting `view == VK_NULL_HANDLE`
+    // instead reads 0 even when every texture misses, because the cache
+    // returns its null VIEW rather than a null HANDLE - that mistake made an
+    // earlier run look like "textures are fine" on no evidence.
     ++texture_bind_total_;
+    if (!cache_hit) {
+      ++texture_miss_total_;
+    }
     if (view == VK_NULL_HANDLE) {
       ++texture_null_total_;
       // No cache view (e.g. cache disabled) - fall back to the dummy white one.
@@ -2361,7 +2503,7 @@ bool NativeCommandProcessor::EnsureResolveRenderTarget(uint32_t width, uint32_t 
     return dfn.vkCreateImageView(device, &view_info, nullptr, &view_out) == VK_SUCCESS;
   };
 
-  if (!make_image(ui::vulkan::VulkanPresenter::kGuestOutputFormat,
+  if (!make_image(kSceneColorFormat,
                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                   VK_IMAGE_ASPECT_COLOR_BIT, resolve_rt_color_, resolve_rt_color_memory_,
                   resolve_rt_color_view_)) {
@@ -2517,7 +2659,7 @@ void NativeCommandProcessor::DumpResolvedTargets() {
     // Dump the WHOLE layout-sized image, not just this phase's rect - a
     // texture assembled from several tiling-strip resolves is only inspectable
     // as a whole.
-    const VkDeviceSize size = VkDeviceSize(rt.width) * rt.height * 4;
+    const VkDeviceSize size = VkDeviceSize(rt.width) * rt.height * kSceneColorBytesPerPixel;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize memory_size = 0;
@@ -2585,12 +2727,16 @@ void NativeCommandProcessor::DumpResolvedTargets() {
       FILE* f = fopen(path, "wb");
       if (f) {
         fprintf(f, "P6\n%u %u\n255\n", rt.width, rt.height);
-        const uint32_t* src = static_cast<const uint32_t*>(mapped);
+        // kSceneColorFormat is R16G16B16A16_SFLOAT - 4 halves per pixel. HDR
+        // values above 1.0 are clamped for display only; the stored image
+        // keeps them.
+        const uint16_t* src = static_cast<const uint16_t*>(mapped);
         for (uint32_t i = 0; i < rt.width * rt.height; ++i) {
-          // kGuestOutputFormat is A2B10G10R10_UNORM_PACK32: R low, then G, B.
-          const uint32_t v = src[i];
-          const uint8_t rgb[3] = {uint8_t((v & 0x3FF) >> 2), uint8_t(((v >> 10) & 0x3FF) >> 2),
-                                  uint8_t(((v >> 20) & 0x3FF) >> 2)};
+          uint8_t rgb[3];
+          for (uint32_t c = 0; c < 3; ++c) {
+            const float v = HalfToFloat(src[i * 4 + c]);
+            rgb[c] = uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+          }
           fwrite(rgb, 1, 3, f);
         }
         fclose(f);
@@ -2641,7 +2787,9 @@ size_t NativeCommandProcessor::AcquireResolvedTarget(uint32_t dest_key, uint32_t
   ResolvedTarget rt;
   rt.width = width;
   rt.height = height;
-  const VkFormat resolved_format = ui::vulkan::VulkanPresenter::kGuestOutputFormat;
+  // Float: a resolved target is frequently an HDR intermediate the guest
+  // samples back and tone-maps, so it must not clamp at 1.0 either.
+  const VkFormat resolved_format = kSceneColorFormat;
   VkImageCreateInfo image_info = {};
   image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -2945,7 +3093,7 @@ bool NativeCommandProcessor::IssueCopy() {
     need_h = std::max(need_h, uint32_t(d.viewport.y + d.viewport.height));
   }
   if (!EnsureResolveRenderTarget(need_w, need_h) ||
-      !EnsureResolveStaging(VkDeviceSize(rect_w) * rect_h * 4)) {
+      !EnsureResolveStaging(VkDeviceSize(rect_w) * rect_h * kSceneColorBytesPerPixel)) {
     phases_.push_back(phase);
     return true;
   }
@@ -3164,10 +3312,10 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         }
       }
       REXLOG_INFO(
-          "rexgpu-native: SKIPS issued={} skipped={} [{}] tex_binds={} tex_null={} zclear={} "
-          "rtfmt=[{}]",
-          draw_count_, skipped_draw_total_, hist, texture_bind_total_, texture_null_total_,
-          guest_depth_clear_, rtf);
+          "rexgpu-native: SKIPS issued={} skipped={} [{}] tex_binds={} tex_miss={} tex_null={} "
+          "zclear={} rtfmt=[{}]",
+          draw_count_, skipped_draw_total_, hist, texture_bind_total_, texture_miss_total_,
+          texture_null_total_, guest_depth_clear_, rtf);
     }
   }
 
@@ -3182,7 +3330,8 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         const bool ever_written = vk_ctx.image_ever_written_previously();
         context.SetIs8bpc(deferred_draws_.empty());
 
-        if (!EnsureClearFramebuffer(image_view, vk_ctx.image_version(), width, height)) {
+        (void)image_view;
+        if (!EnsureSceneFramebuffer(width, height)) {
           return false;
         }
 
@@ -3425,24 +3574,36 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           resolved.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
+        // The swap image is now a BLIT DESTINATION, not the render target - the
+        // guest draws go into the float scene image and are tone-scaled down by
+        // the blit below.
         VkImageMemoryBarrier acquire_barrier = {};
         acquire_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         acquire_barrier.srcAccessMask =
             ever_written ? VkAccessFlags(VK_ACCESS_SHADER_READ_BIT) : VkAccessFlags(0);
-        acquire_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        acquire_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         acquire_barrier.oldLayout = ever_written ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                                                  : VK_IMAGE_LAYOUT_UNDEFINED;
-        acquire_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        acquire_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         acquire_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         acquire_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         acquire_barrier.image = image;
         acquire_barrier.subresourceRange = subresource_range;
+        // The scene image is written fresh every frame, so its previous
+        // contents are discardable (UNDEFINED).
+        VkImageMemoryBarrier scene_to_color = acquire_barrier;
+        scene_to_color.srcAccessMask = 0;
+        scene_to_color.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        scene_to_color.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        scene_to_color.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        scene_to_color.image = scene_color_;
+        const VkImageMemoryBarrier pre_scene[2] = {acquire_barrier, scene_to_color};
         dfn.vkCmdPipelineBarrier(
             command_buffer_,
             ever_written ? VkPipelineStageFlags(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
                          : VkPipelineStageFlags(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
-            &acquire_barrier);
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+            nullptr, 0, nullptr, 2, pre_scene);
 
         VkClearValue clear_values[2] = {};
         clear_values[0].color.float32[0] = clear_rgba[0];
@@ -3458,7 +3619,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         VkRenderPassBeginInfo rp_begin = {};
         rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rp_begin.renderPass = clear_render_pass_;
-        rp_begin.framebuffer = clear_framebuffer_;
+        rp_begin.framebuffer = scene_framebuffer_;
         rp_begin.renderArea.extent = {width, height};
         rp_begin.clearValueCount = 2;
         rp_begin.pClearValues = clear_values;
@@ -3502,12 +3663,35 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
         dfn.vkCmdEndRenderPass(command_buffer_);
 
-        VkImageMemoryBarrier release_barrier = acquire_barrier;
-        release_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        release_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        release_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        release_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // Scene (float, HDR) -> swap image (presenter's format). The blit does
+        // the format conversion and clamps to the destination range, which is
+        // correct AFTER the guest's own tone-map pass has run in the scene
+        // image - the point of rendering float in the first place.
+        VkImageMemoryBarrier scene_to_src = scene_to_color;
+        scene_to_src.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        scene_to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        scene_to_src.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        scene_to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &scene_to_src);
+
+        VkImageBlit blit = {};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {int32_t(width), int32_t(height), 1};
+        blit.dstSubresource = blit.srcSubresource;
+        blit.dstOffsets[0] = blit.srcOffsets[0];
+        blit.dstOffsets[1] = blit.srcOffsets[1];
+        dfn.vkCmdBlitImage(command_buffer_, scene_color_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+        VkImageMemoryBarrier release_barrier = acquire_barrier;
+        release_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        release_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        release_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        release_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                  &release_barrier);
 

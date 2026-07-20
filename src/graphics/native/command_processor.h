@@ -102,6 +102,24 @@ class NativeCommandProcessor : public CommandProcessor {
   // render pass and replay submission) -----
   bool CreateClearResources();
   void DestroyClearResources();
+  // The guest's own render targets are frequently HDR (Choplifter and PGR3
+  // render roughly half their draws to k_2_10_10_10_FLOAT, whose range runs to
+  // ~32), and the guest then tone-maps them itself. Rendering into an 8-bit
+  // UNORM target clamps everything above 1.0 BEFORE that tone-map pass runs,
+  // which is why those titles' bright surfaces come out flat white. So every
+  // guest draw lands in a float scene image, and only the finished frame is
+  // blitted down to the presenter's swap image.
+  static constexpr VkFormat kSceneColorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  static constexpr uint32_t kSceneColorBytesPerPixel = 8;
+  bool EnsureSceneFramebuffer(uint32_t width, uint32_t height);
+  void DestroySceneFramebuffer();
+  VkImage scene_color_ = VK_NULL_HANDLE;
+  VkDeviceMemory scene_color_memory_ = VK_NULL_HANDLE;
+  VkImageView scene_color_view_ = VK_NULL_HANDLE;
+  VkFramebuffer scene_framebuffer_ = VK_NULL_HANDLE;
+  uint32_t scene_width_ = 0;
+  uint32_t scene_height_ = 0;
+
   bool EnsureClearFramebuffer(VkImageView image_view, uint64_t image_version, uint32_t width,
                               uint32_t height);
 
@@ -443,6 +461,7 @@ class NativeCommandProcessor : public CommandProcessor {
   // opaque black - the other way (besides depth) that a 3D world goes black
   // while 2D UI in the same phase stays correct.
   uint64_t texture_bind_total_ = 0;
+  uint64_t texture_miss_total_ = 0;
   uint64_t texture_null_total_ = 0;
   // The guest's own depth clear value (RB_DEPTH_CLEAR), captured from the
   // resolves that clear depth. The native backend has no EDRAM, so it clears a

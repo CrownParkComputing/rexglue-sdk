@@ -116,6 +116,52 @@ inline std::vector<DisplayRange> SelectDisplayRanges(const std::vector<PhaseSpan
   return ranges;
 }
 
+// What the swap image should be built from.
+//
+// The frontbuffer is an ADDRESS holding a finished image, not a list of draws.
+// When a phase has resolved to the address IssueSwap names, the guest has
+// already produced the frame and the faithful thing to do is present that
+// image - which is what the hardware, and the emulating backend, do.
+//
+// Replaying the draws instead is only an approximation, and it is a poor one:
+// the draws that produced the frame may target an EDRAM base the replay filter
+// rejects, or be a composite that cannot be re-run against the swap image. It
+// is measurably wrong - SoulCalibur II, Ridge Racer 6, OutRun, Bionic Commando
+// 1 and 2, Rainbow Islands and SoulCalibur IV all replay to a BLACK frame
+// (mean 0.000333, byte-identical across all seven) while resolving perfectly
+// good images to their frontbuffer addresses.
+//
+// Trailing draws - those issued after the last resolve - still replay on top,
+// since a HUD drawn after the final resolve is not in the resolved image.
+struct DisplaySource {
+  // Present the resolved image aliased at resolved_key, then replay `ranges`.
+  bool present_resolved = false;
+  uint32_t resolved_key = 0;
+  std::vector<DisplayRange> ranges;
+};
+
+inline DisplaySource ChooseDisplaySource(const std::vector<PhaseSpan>& phases, uint32_t fb_key,
+                                         uint32_t deferred_count, uint32_t phase_first_draw) {
+  DisplaySource out;
+  for (const PhaseSpan& p : phases) {
+    if (p.dest_key == fb_key && p.end_draw > p.first_draw) {
+      out.present_resolved = true;
+      out.resolved_key = fb_key;
+    }
+  }
+  if (out.present_resolved) {
+    // Only what came after the last resolve; everything before it is already
+    // baked into the image being presented.
+    if (deferred_count > phase_first_draw) {
+      out.ranges.push_back({phase_first_draw, deferred_count, kAnyBase});
+    }
+    return out;
+  }
+  // No resolve reached the frontbuffer: fall back to the replay model.
+  out.ranges = SelectDisplayRanges(phases, fb_key, deferred_count, phase_first_draw);
+  return out;
+}
+
 // Two phases in ONE frame that resolve to the same destination address.
 //
 // Resolved images are keyed by destination address and reused, so colliding

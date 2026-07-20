@@ -113,6 +113,9 @@ class NativeCommandProcessor : public CommandProcessor {
   static constexpr uint32_t kSceneColorBytesPerPixel = 8;
   bool EnsureSceneFramebuffer(uint32_t width, uint32_t height);
   void DestroySceneFramebuffer();
+  // Colour-LOAD variant of clear_render_pass_, for compositing trailing draws
+  // over a presented resolved frontbuffer image.
+  VkRenderPass load_render_pass_ = VK_NULL_HANDLE;
   VkImage scene_color_ = VK_NULL_HANDLE;
   VkDeviceMemory scene_color_memory_ = VK_NULL_HANDLE;
   VkImageView scene_color_view_ = VK_NULL_HANDLE;

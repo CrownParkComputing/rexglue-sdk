@@ -54,6 +54,8 @@ REXCVAR_DEFINE_BOOL(native_expand_rects, false, "GPU",
                     "Expand guest rectangle lists into two triangles. Off by default: the\n                    implied fourth corner is reconstructed in the vertex shader and has\n                    not been proven correct yet - see MapPrimitiveTopology.");
 REXCVAR_DEFINE_BOOL(native_rect_gs, true, "GPU/Native",
                     "Expand guest rectangle lists with the oracle's geometry shader (the\n                    validated path). Off = draw each rect as a single bare triangle\n                    (loses the half past the diagonal) - kept as an A/B switch for\n                    isolating regressions to the GS path.");
+REXCVAR_DEFINE_BOOL(native_marker_empty_frames, false, "GPU/Native",
+                    "Clear draw-less frames to a recognisable mid-blue instead of black.\n                    Bring-up aid only: level loads produce long runs of draw-less\n                    frames, so with this on they flash violently blue.");
 REXCVAR_DEFINE_BOOL(native_log_phases, false, "GPU/Native",
                     "Log render-target phases, their draw ownership and their resolves.\n                    Cheap (a few lines per frame) and periodic, unlike\n                    native_log_draws, whose per-draw flood rotates these very lines\n                    out of the log file before they can be read.");
 REXCVAR_DEFINE_BOOL(native_phase_base_filter, true, "GPU/Native",
@@ -330,6 +332,19 @@ bool NativeCommandProcessor::CreateClearResources() {
     return false;
   }
 
+  // Same attachments, but the colour target is LOADED rather than cleared, for
+  // the case where the frame is a presented resolved image that trailing draws
+  // composite on top of. Render-pass compatibility depends on formats and
+  // sample counts, not load/store ops, so guest pipelines built against
+  // clear_render_pass_ are valid here too.
+  VkAttachmentDescription load_attachments[2] = {attachment, depth_attachment};
+  load_attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+  rp_info.pAttachments = load_attachments;
+  if (dfn.vkCreateRenderPass(device, &rp_info, nullptr, &load_render_pass_) != VK_SUCCESS) {
+    REXLOG_ERROR("rexgpu-native: failed to create load render pass");
+    return false;
+  }
+
   return true;
 }
 
@@ -346,6 +361,10 @@ void NativeCommandProcessor::DestroyClearResources() {
   }
   // Depth image/view is referenced by the framebuffer above - destroy after it.
   DestroyDepthResources();
+  if (load_render_pass_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyRenderPass(device, load_render_pass_, nullptr);
+    load_render_pass_ = VK_NULL_HANDLE;
+  }
   if (clear_render_pass_ != VK_NULL_HANDLE) {
     dfn.vkDestroyRenderPass(device, clear_render_pass_, nullptr);
     clear_render_pass_ = VK_NULL_HANDLE;
@@ -3243,10 +3262,14 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     clear_rgba[2] = float(clear_raw & 0xFF) / 255.0f;
     clear_rgba[3] = float((clear_raw >> 24) & 0xFF) / 255.0f;
   } else {
-    // Draw path clears via the render pass to black; only fall back to the
-    // recognisable mid-blue when there's nothing to draw.
-    clear_rgba = deferred_draws_.empty() ? std::array<float, 4>{0.16f, 0.36f, 0.72f, 1.0f}
-                                         : std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f};
+    // Black, NOT the recognisable mid-blue this used to use for empty frames.
+    // Loading screens produce long runs of draw-less frames interleaved with
+    // drawn ones, so that debug colour showed up as violent blue flashing
+    // through every level load. Keep it available for bring-up, but behind the
+    // same switch as the other renderer-identification aids.
+    clear_rgba = (deferred_draws_.empty() && REXCVAR_GET(native_marker_empty_frames))
+                     ? std::array<float, 4>{0.16f, 0.36f, 0.72f, 1.0f}
+                     : std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f};
   }
 
   // Phase-aware display: draws belonging to phases that resolved to the
@@ -3261,8 +3284,24 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   for (const RenderPhase& p : phases_) {
     phase_spans.push_back({p.src_base, p.first_draw, p.end_draw, p.dest_key});
   }
-  const std::vector<DisplayRange> display_ranges = SelectDisplayRanges(
+  DisplaySource display_source = ChooseDisplaySource(
       phase_spans, fb_key, uint32_t(deferred_draws_.size()), phase_first_draw_);
+  // Presenting requires the resolved image to actually exist; if it does not,
+  // fall back to the replay model rather than showing nothing.
+  size_t present_index = SIZE_MAX;
+  if (display_source.present_resolved) {
+    auto it = resolved_target_index_.find(display_source.resolved_key);
+    if (it != resolved_target_index_.end() &&
+        resolved_target_storage_[it->second].image != VK_NULL_HANDLE) {
+      present_index = it->second;
+    } else {
+      display_source = DisplaySource{};
+      display_source.ranges = SelectDisplayRanges(phase_spans, fb_key,
+                                                  uint32_t(deferred_draws_.size()),
+                                                  phase_first_draw_);
+    }
+  }
+  const std::vector<DisplayRange>& display_ranges = display_source.ranges;
 
   const size_t draw_replay_count = deferred_draws_.size();
   if (REXCVAR_GET(native_log_draws) && clear_raw != last_logged_clear_raw_) {
@@ -3308,6 +3347,18 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         (entry_n <= 4 || (entry_n % 137) == 0)) {
       REXLOG_INFO("rexgpu-native: SWAPENTRY #{} swap={} phases={} deferred={} fb=0x{:08X}",
                   entry_n, swap_count_, phases_.size(), deferred_draws_.size(), frontbuffer_ptr);
+      // The display decision itself: the frontbuffer key the guest named, what
+      // every phase actually resolved to, and whether a finished image was
+      // found to present. Without this the two failure modes - "no phase
+      // matched the frontbuffer" and "matched, but the image was empty" - are
+      // indistinguishable from a black frame.
+      std::string dests;
+      for (const RenderPhase& p : phases_) {
+        dests += fmt::format("{:08X}{} ", p.dest_key,
+                             p.end_draw > p.first_draw ? "" : "(empty)");
+      }
+      REXLOG_INFO("rexgpu-native: PRESENT fb_key=0x{:08X} present={} ranges={} dests=[{}]", fb_key,
+                  present_index != SIZE_MAX, display_ranges.size(), dests);
       // The skip histogram: "were the missing draws rejected, and why?" - the
       // first question for a black world, answerable only from a log the
       // per-draw flood has not rotated away.
@@ -3331,7 +3382,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
   const bool presented = presenter->RefreshGuestOutput(
       width, height, width, height,
-      [this, width, height, clear_rgba, &display_ranges](
+      [this, width, height, clear_rgba, &display_ranges, present_index](
           ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& vk_ctx =
             static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
@@ -3626,9 +3677,68 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         clear_values[1].depthStencil.depth = guest_depth_clear_;
         clear_values[1].depthStencil.stencil = 0;
 
+        // The guest already resolved this frame to the frontbuffer address, so
+        // PRESENT that image rather than trying to re-render the draws that
+        // made it (see ChooseDisplaySource). The blit scales the resolved
+        // image - which is sized to the guest's texture layout - onto the
+        // scene image.
+        if (present_index != SIZE_MAX) {
+          const ResolvedTarget& src = resolved_target_storage_[present_index];
+          VkImageMemoryBarrier to_transfer[2] = {};
+          for (uint32_t i = 0; i < 2; ++i) {
+            to_transfer[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            to_transfer[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_transfer[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            to_transfer[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+          }
+          to_transfer[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+          to_transfer[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          to_transfer[0].oldLayout = src.layout;
+          to_transfer[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+          to_transfer[0].image = src.image;
+          to_transfer[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          to_transfer[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          to_transfer[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+          to_transfer[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          to_transfer[1].image = scene_color_;
+          dfn.vkCmdPipelineBarrier(command_buffer_,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
+                                   to_transfer);
+
+          VkImageBlit present_blit = {};
+          present_blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+          present_blit.srcOffsets[0] = {0, 0, 0};
+          present_blit.srcOffsets[1] = {int32_t(src.width), int32_t(src.height), 1};
+          present_blit.dstSubresource = present_blit.srcSubresource;
+          present_blit.dstOffsets[0] = {0, 0, 0};
+          present_blit.dstOffsets[1] = {int32_t(width), int32_t(height), 1};
+          dfn.vkCmdBlitImage(command_buffer_, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             scene_color_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &present_blit,
+                             VK_FILTER_LINEAR);
+
+          VkImageMemoryBarrier back[2] = {to_transfer[0], to_transfer[1]};
+          back[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          back[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+          back[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+          back[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          back[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          back[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          back[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+          back[1].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   0, 0, nullptr, 0, nullptr, 2, back);
+        }
+
         VkRenderPassBeginInfo rp_begin = {};
         rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rp_begin.renderPass = clear_render_pass_;
+        // Presenting keeps the blitted image (LOAD); replaying starts from the
+        // clear colour.
+        rp_begin.renderPass =
+            present_index != SIZE_MAX ? load_render_pass_ : clear_render_pass_;
         rp_begin.framebuffer = scene_framebuffer_;
         rp_begin.renderArea.extent = {width, height};
         rp_begin.clearValueCount = 2;

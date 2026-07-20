@@ -242,3 +242,79 @@ TEST_CASE("a frame with no resolves AND no draws selects an empty range",
   REQUIRE(ranges.size() == 1);
   CHECK(ranges[0] == DisplayRange{0, 0, kAnyBase});
 }
+
+// --- Presenting the resolved frontbuffer, rather than replaying its draws ---
+
+TEST_CASE("SoulCalibur II shape: the finished frame is presented, not replayed",
+          "[phase_model]") {
+  // Measured on the native backend: the guest asks to display 0x1D2D0000 and
+  // 0x1CF38000 alternately (double buffered), and its phases resolve to an
+  // intermediate at 0x1E4C8000 AND to both of those frontbuffer addresses. So
+  // the finished frame already exists at the address IssueSwap names.
+  //
+  // Replaying its draws produced a BLACK frame (mean 0.000333, byte-identical
+  // across seven titles). Presenting the resolved image is what the hardware
+  // does, so that is what must be selected.
+  const std::vector<PhaseSpan> phases = {
+      {/*src_base=*/0, /*first=*/0, /*end=*/120, /*dest_key=*/0x1E4C8000u},
+      {/*src_base=*/0, /*first=*/120, /*end=*/180, /*dest_key=*/0x1D2D0000u},
+  };
+  const auto src = ChooseDisplaySource(phases, /*fb_key=*/0x1D2D0000u,
+                                       /*deferred_count=*/180, /*phase_first_draw=*/180);
+  CHECK(src.present_resolved);
+  CHECK(src.resolved_key == 0x1D2D0000u);
+  // Nothing trailing, so nothing replays on top.
+  CHECK(src.ranges.empty());
+}
+
+TEST_CASE("a HUD drawn after the last resolve still replays on top", "[phase_model]") {
+  // The resolved image cannot contain draws issued after it was resolved, so
+  // trailing draws must survive - otherwise presenting the image would silently
+  // drop the HUD.
+  const std::vector<PhaseSpan> phases = {
+      {/*src_base=*/720, /*first=*/0, /*end=*/90, /*dest_key=*/0x1F5F8000u},
+  };
+  const auto src = ChooseDisplaySource(phases, /*fb_key=*/0x1F5F8000u,
+                                       /*deferred_count=*/105, /*phase_first_draw=*/90);
+  CHECK(src.present_resolved);
+  REQUIRE(src.ranges.size() == 1);
+  CHECK(src.ranges[0] == DisplayRange{90, 105, kAnyBase});
+}
+
+TEST_CASE("no resolve reaching the frontbuffer keeps the replay model",
+          "[phase_model]") {
+  // OutRun's measured shape: one phase, resolving to 0x16818000, which is NOT
+  // the frontbuffer. There is no finished image to present, so selection must
+  // fall back to replaying - never to presenting an address nothing wrote.
+  const std::vector<PhaseSpan> phases = {
+      {/*src_base=*/0, /*first=*/0, /*end=*/57, /*dest_key=*/0x16818000u},
+  };
+  const auto src = ChooseDisplaySource(phases, /*fb_key=*/0x1F4FE000u,
+                                       /*deferred_count=*/57, /*phase_first_draw=*/57);
+  CHECK_FALSE(src.present_resolved);
+  REQUIRE(src.ranges.size() == 1);
+  CHECK(src.ranges[0] == DisplayRange{0, 57, kAnyBase});
+}
+
+TEST_CASE("Geometry Wars shape: no resolves at all still replays everything",
+          "[phase_model]") {
+  // The title never resolves; it must keep the replay-all baseline and must
+  // not be diverted into presenting a resolved image that does not exist.
+  const auto src = ChooseDisplaySource({}, /*fb_key=*/0x1F4FE000u,
+                                       /*deferred_count=*/300, /*phase_first_draw=*/0);
+  CHECK_FALSE(src.present_resolved);
+  REQUIRE(src.ranges.size() == 1);
+  CHECK(src.ranges[0] == DisplayRange{0, 300, kAnyBase});
+}
+
+TEST_CASE("an EMPTY frontbuffer phase does not count as a finished frame",
+          "[phase_model]") {
+  // A phase that owns no draws resolved nothing, so presenting its address
+  // would show a stale or blank image. Selection must fall through to replay.
+  const std::vector<PhaseSpan> phases = {
+      {/*src_base=*/0, /*first=*/40, /*end=*/40, /*dest_key=*/0x1D2D0000u},
+  };
+  const auto src = ChooseDisplaySource(phases, /*fb_key=*/0x1D2D0000u,
+                                       /*deferred_count=*/40, /*phase_first_draw=*/40);
+  CHECK_FALSE(src.present_resolved);
+}

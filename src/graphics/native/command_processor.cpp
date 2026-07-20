@@ -13,6 +13,7 @@
 #include "native/phase_model.h"
 #include "native/shader_constants.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +54,10 @@ REXCVAR_DEFINE_BOOL(native_expand_rects, false, "GPU",
                     "Expand guest rectangle lists into two triangles. Off by default: the\n                    implied fourth corner is reconstructed in the vertex shader and has\n                    not been proven correct yet - see MapPrimitiveTopology.");
 REXCVAR_DEFINE_BOOL(native_rect_gs, true, "GPU/Native",
                     "Expand guest rectangle lists with the oracle's geometry shader (the\n                    validated path). Off = draw each rect as a single bare triangle\n                    (loses the half past the diagonal) - kept as an A/B switch for\n                    isolating regressions to the GS path.");
+REXCVAR_DEFINE_BOOL(native_log_phases, false, "GPU/Native",
+                    "Log render-target phases, their draw ownership and their resolves.\n                    Cheap (a few lines per frame) and periodic, unlike\n                    native_log_draws, whose per-draw flood rotates these very lines\n                    out of the log file before they can be read.");
+REXCVAR_DEFINE_BOOL(native_phase_base_filter, true, "GPU/Native",
+                    "Restrict a phase's replay to the draws whose colour render target\n                    matches the resolved EDRAM base. Off = replay every draw in the\n                    phase's range - an A/B switch for titles whose world renders\n                    black, to separate 'draws were filtered out' from 'draws rendered\n                    nothing'.");
 
 namespace rex::graphics::native {
 
@@ -1495,7 +1500,14 @@ VkDescriptorSet NativeCommandProcessor::AllocateTextureSet(SpirvShader* shader,
         }
       }
     }
+    // Cumulative bind outcomes. A world that renders black while the 2D UI in
+    // the SAME phase renders correctly is either depth or textures, and a
+    // near-100% miss rate here (opaque-black null view) is what distinguishes
+    // them. Counted on the object so the rate is readable from a periodic log
+    // rather than 60 early lines the flood rotates away.
+    ++texture_bind_total_;
     if (view == VK_NULL_HANDLE) {
+      ++texture_null_total_;
       // No cache view (e.g. cache disabled) - fall back to the dummy white one.
       view = DummyViewForDimension(dimension);
     }
@@ -1576,16 +1588,16 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   auto skip = [&](const char* reason) {
     ++skipped_draw_total_;
-    // Aggregate: log the first time each distinct reason is seen, plus a running
-    // count every 1000 occurrences, so the dominant skip cause is visible at the
-    // default `info` log level without flooding.
-    static std::unordered_map<std::string, uint64_t> reason_counts;
-    uint64_t& n = reason_counts[reason];
-    if (REXCVAR_GET(native_log_draws) && (n == 0 || (n % 2000) == 0)) {
-      REXLOG_INFO("rexgpu-native: skip draw #{} reason={} count={} prim={}", draw_count_, reason,
-                  n + 1, uint32_t(prim_type));
+    // Counts live on the object (not in a static) so IssueSwap can dump the
+    // whole histogram periodically. An early-only or flood-gated log is
+    // useless here: the per-draw flood rotates it out of the log file long
+    // before a real in-game frame arrives.
+    ++skip_reason_counts_[reason];
+    uint64_t& n = skip_reason_counts_[reason];
+    if (REXCVAR_GET(native_log_draws) && (n == 1 || (n % 2000) == 0)) {
+      REXLOG_INFO("rexgpu-native: skip draw #{} reason={} count={} prim={}", draw_count_, reason, n,
+                  uint32_t(prim_type));
     }
-    ++n;
     return true;  // Draw is consumed; just not rendered natively yet.
   };
 
@@ -1827,6 +1839,20 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         return skip("geometry_shader_unavailable");
       }
     }
+  } else if (prim_type == xenos::PrimitiveType::kPointList) {
+    // Point sprites: the oracle NEVER draws guest point lists as bare 1-pixel
+    // points - it always attaches the kPointList geometry shader, which
+    // expands each point into a screen-facing quad sized by the point system
+    // constants (set below) and gives the pixel shader its sprite UVs via
+    // param_gen. Topology stays POINT_LIST - exactly the GS's input.
+    vulkan::VulkanPipelineCache::GeometryShaderKey gs_key;
+    if (vulkan::VulkanPipelineCache::GetGeometryShaderKey(
+            vulkan::VulkanPipelineCache::PipelineGeometryShader::kPointList, vmod, pmod, gs_key)) {
+      geometry_module = GetGeometryShader(gs_key);
+      if (geometry_module == VK_NULL_HANDLE) {
+        return skip("geometry_shader_unavailable");
+      }
+    }
   }
   VkPipeline pipeline =
       GetPipeline(vs_module, ps_module, pipeline_layout, pipeline_state, geometry_module);
@@ -1880,6 +1906,27 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   for (uint32_t i = 0; i < 3; ++i) {
     system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
     system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
+  }
+  // Point sprites: the kPointList geometry shader expands each 1-vertex point
+  // into a screen-facing quad sized by these (register-derived, mirroring
+  // vulkan/command_processor.cpp:6285-6318 with draw resolution scale 1).
+  // Left zeroed, every sprite expands to nothing - invisible sprites with a
+  // perfectly clean log.
+  if (prim_type == xenos::PrimitiveType::kPointList) {
+    const auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
+    const auto pa_su_point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
+    system_constants.point_vertex_diameter_min =
+        float(pa_su_point_minmax.min_size) * (2.0f / 16.0f);
+    system_constants.point_vertex_diameter_max =
+        float(pa_su_point_minmax.max_size) * (2.0f / 16.0f);
+    system_constants.point_constant_diameter[0] = float(pa_su_point_size.width) * (2.0f / 16.0f);
+    system_constants.point_constant_diameter[1] = float(pa_su_point_size.height) * (2.0f / 16.0f);
+    // 2 because 1 in NDC is half the viewport axis, 0.5 for diameter->radius -
+    // they cancel (see the oracle's comment).
+    system_constants.point_screen_diameter_to_ndc_radius[0] =
+        1.0f / std::max(viewport_info.xy_extent[0], uint32_t(1));
+    system_constants.point_screen_diameter_to_ndc_radius[1] =
+        1.0f / std::max(viewport_info.xy_extent[1], uint32_t(1));
   }
   // Colour exponent bias lives in RB_COLOR_INFO bits 20:25 and the shader
   // multiplies output by 2^bias. Hardcoding 1.0f blows out any render target
@@ -2209,6 +2256,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     draw.depth_edram_base =
         rb_depth_info.depth_base | (uint32_t(rb_depth_info.depth_base_bit_11) << 11);
   }
+  draw.depth_control_raw = normalized_depth_control.value;
   // TEMP-DIAG: the frontbuffer-phase draws (base 0) are where the composite goes
   // wrong - log their geometry and viewport.
   if (draw.color_edram_base == 0 && swap_count_ > 3000) {
@@ -2655,6 +2703,7 @@ uint32_t NativeCommandProcessor::RecordDeferredDrawsForBase(VkCommandBuffer cb, 
                                                             uint32_t width, uint32_t height) {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device_->functions();
   uint32_t recorded = 0;
+  const bool base_filter = REXCVAR_GET(native_phase_base_filter);
   end = std::min(end, uint32_t(deferred_draws_.size()));
   for (uint32_t i = first; i < end; ++i) {
     const DeferredDraw& draw = deferred_draws_[i];
@@ -2663,7 +2712,7 @@ uint32_t NativeCommandProcessor::RecordDeferredDrawsForBase(VkCommandBuffer cb, 
     // than one per EDRAM base - so within a pass, "depth is shared scratch" is
     // the honest model. A depth pre-pass therefore belongs to whichever phase
     // range contains it. Ordering is preserved because this is a monotonic scan.
-    if (!draw.depth_only && draw.color_edram_base != base) {
+    if (base_filter && !draw.depth_only && draw.color_edram_base != base) {
       continue;
     }
     ++recorded;
@@ -2754,7 +2803,10 @@ bool NativeCommandProcessor::IssueCopy() {
   }
   if (resolve_info.IsCopyingDepth()) {
     if (diag) {
-      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip depth resolve", copy_count_);
+      REXLOG_INFO("rexgpu-native: IssueCopy #{} skip depth resolve -> 0x{:08X} rect={}x{}",
+                  copy_count_, resolve_info.copy_dest_texture_base,
+                  uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
+                  uint32_t(resolve_info.height_div_8) * 8);
     }
     return true;  // Depth resolves are not sampled as color; skip for now.
   }
@@ -2961,6 +3013,17 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   const uint32_t width = frontbuffer_width ? frontbuffer_width : 1280u;
   const uint32_t height = frontbuffer_height ? frontbuffer_height : 720u;
 
+  // The guest's depth clear value, read straight from the register rather than
+  // captured from a clearing resolve - a depth-clear resolve does not reliably
+  // reach IssueCopy's body (it is filtered by the phase-count and depth-copy
+  // guards), and missing it leaves the fixed 1.0 that blacks out reverse-Z
+  // titles. RB_DEPTH_CLEAR packs 24-bit depth above an 8-bit stencil.
+  {
+    const uint32_t rb_depth_clear = register_file_->values[XE_GPU_REG_RB_DEPTH_CLEAR];
+    guest_depth_clear_ =
+        std::clamp(float(rb_depth_clear >> 8) / float(0xFFFFFF), 0.0f, 1.0f);
+  }
+
   // [TEMP DIAG] RenderDoc capture without the overlay/keyboard - ported from
   // vulkan/command_processor.cpp's IssueSwap so the same forensics workflow
   // (used successfully on PGR3's glass-confetti bug) works on this backend
@@ -3071,9 +3134,21 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     // actually starts.
     static uint64_t entry_n = 0;
     ++entry_n;
-    if (REXCVAR_GET(native_log_draws) && (entry_n <= 4 || (entry_n % 400) == 0)) {
+    if ((REXCVAR_GET(native_log_phases) || REXCVAR_GET(native_log_draws)) &&
+        (entry_n <= 4 || (entry_n % 137) == 0)) {
       REXLOG_INFO("rexgpu-native: SWAPENTRY #{} swap={} phases={} deferred={} fb=0x{:08X}",
                   entry_n, swap_count_, phases_.size(), deferred_draws_.size(), frontbuffer_ptr);
+      // The skip histogram: "were the missing draws rejected, and why?" - the
+      // first question for a black world, answerable only from a log the
+      // per-draw flood has not rotated away.
+      std::string hist;
+      for (const auto& [reason, n] : skip_reason_counts_) {
+        hist += fmt::format("{}={} ", reason, n);
+      }
+      REXLOG_INFO(
+          "rexgpu-native: SKIPS issued={} skipped={} [{}] tex_binds={} tex_null={} zclear={}",
+          draw_count_, skipped_draw_total_, hist, texture_bind_total_, texture_null_total_,
+          guest_depth_clear_);
     }
   }
 
@@ -3173,7 +3248,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
               &rt_to_color);
 
           VkClearValue rt_clears[2] = {};
-          rt_clears[1].depthStencil.depth = 1.0f;
+          rt_clears[1].depthStencil.depth = guest_depth_clear_;
           VkRenderPassBeginInfo rt_rp_begin = {};
           rt_rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
           rt_rp_begin.renderPass = clear_render_pass_;
@@ -3185,13 +3260,51 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           const uint32_t recorded = RecordDeferredDrawsForBase(
               command_buffer_, p.first_draw, p.end_draw, p.src_base, resolve_rt_width_,
               resolve_rt_height_);
-          // TEMP-DIAG: what each resolved image is actually built from.
+          // TEMP-DIAG: what each resolved image is actually built from. Gated on
+          // an OCCURRENCE COUNT, and on its own cheap cvar rather than
+          // native_log_draws - an early-only bound plus the per-draw flood meant
+          // these lines were always rotated out of the log before they could be
+          // read (cost a session on Choplifter).
           static uint64_t phase_log = 0;
-          if (REXCVAR_GET(native_log_draws) && phase_log < 512) {
-            ++phase_log;
+          ++phase_log;
+          if ((REXCVAR_GET(native_log_phases) || REXCVAR_GET(native_log_draws)) &&
+              (phase_log <= 8 || (phase_log % 200) == 0)) {
+            // How many draws the base filter rejected, and which bases they
+            // carried - the difference between "filtered out" and "rendered
+            // nothing" for a black world.
+            uint32_t range_size = 0, dropped = 0;
+            uint32_t other_base = UINT32_MAX;
+            for (uint32_t i = p.first_draw;
+                 i < p.end_draw && i < uint32_t(deferred_draws_.size()); ++i) {
+              ++range_size;
+              const DeferredDraw& d = deferred_draws_[i];
+              if (!d.depth_only && d.color_edram_base != p.src_base) {
+                ++dropped;
+                other_base = d.color_edram_base;
+              }
+            }
+            // Depth state of the phase's draws. The attachment is cleared to a
+            // fixed 1.0, so a guest using reverse-Z (GREATER, zfunc 4/5/6)
+            // would fail EVERY 3D depth test while 2D UI (z_enable 0) still
+            // draws - exactly the "world black, HUD correct" signature.
+            uint32_t zfunc_hist[8] = {};
+            uint32_t z_disabled = 0;
+            for (uint32_t i = p.first_draw;
+                 i < p.end_draw && i < uint32_t(deferred_draws_.size()); ++i) {
+              const reg::RB_DEPTHCONTROL dc{deferred_draws_[i].depth_control_raw};
+              if (!dc.z_enable) {
+                ++z_disabled;
+              } else {
+                ++zfunc_hist[uint32_t(dc.zfunc) & 7];
+              }
+            }
             REXLOG_INFO(
-                "rexgpu-native: PHASE dest=0x{:08X} base={} range=[{},{}) recorded={} rect={}x{}",
-                p.dest_key, p.src_base, p.first_draw, p.end_draw, recorded, p.rect_w, p.rect_h);
+                "rexgpu-native: PHASE dest=0x{:08X} base={} range=[{},{}) size={} recorded={} "
+                "dropped={} other_base={} rect={}x{} zoff={} zfunc=[{},{},{},{},{},{},{},{}]",
+                p.dest_key, p.src_base, p.first_draw, p.end_draw, range_size, recorded, dropped,
+                other_base, p.rect_w, p.rect_h, z_disabled, zfunc_hist[0], zfunc_hist[1],
+                zfunc_hist[2], zfunc_hist[3], zfunc_hist[4], zfunc_hist[5], zfunc_hist[6],
+                zfunc_hist[7]);
           }
           dfn.vkCmdEndRenderPass(command_buffer_);
 
@@ -3214,6 +3327,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           to_dst.oldLayout = resolved.layout;
           to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
           to_dst.image = resolved.image;
+          const bool first_image_write = resolved.layout == VK_IMAGE_LAYOUT_UNDEFINED;
           VkImageMemoryBarrier pre_blit[2] = {to_src, to_dst};
           dfn.vkCmdPipelineBarrier(command_buffer_,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
@@ -3222,6 +3336,22 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
                                    pre_blit);
+          if (first_image_write) {
+            // A fresh layout-sized image can be larger than any rect written
+            // this frame; clear it so never-resolved regions sample as black
+            // rather than uninitialized memory (visible as speckling).
+            VkClearColorValue zero = {};
+            dfn.vkCmdClearColorImage(command_buffer_, resolved.image,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &color_range);
+            VkImageMemoryBarrier clear_to_copy = to_dst;
+            clear_to_copy.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            clear_to_copy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            clear_to_copy.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            clear_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                     &clear_to_copy);
+          }
 
           // The staging buffer is reused serially across phases; fence off the
           // previous phase's buffer->image read before overwriting it.
@@ -3300,9 +3430,10 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         clear_values[0].color.float32[1] = clear_rgba[1];
         clear_values[0].color.float32[2] = clear_rgba[2];
         clear_values[0].color.float32[3] = clear_rgba[3];
-        // Depth cleared to 1.0 (far) each frame - the native backend keeps no
-        // persistent depth across frames (no EDRAM).
-        clear_values[1].depthStencil.depth = 1.0f;
+        // Depth cleared to the GUEST's clear value each frame - the native
+        // backend keeps no persistent depth across frames (no EDRAM). A fixed
+        // 1.0 here silently breaks reverse-Z titles (see guest_depth_clear_).
+        clear_values[1].depthStencil.depth = guest_depth_clear_;
         clear_values[1].depthStencil.stencil = 0;
 
         VkRenderPassBeginInfo rp_begin = {};

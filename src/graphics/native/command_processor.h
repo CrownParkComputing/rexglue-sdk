@@ -156,6 +156,11 @@ class NativeCommandProcessor : public CommandProcessor {
     // recorded so that grouping depth-only draws by their own EDRAM base stays a
     // small change if admitting them to any containing phase proves too loose.
     uint32_t depth_edram_base = 0;
+    // Normalized RB_DEPTHCONTROL at defer time (z_enable / zfunc / z_write).
+    // Diagnostic only: the phase's depth attachment is cleared to a fixed 1.0,
+    // so a guest using reverse-Z (clear 0.0 + GREATER) would fail every 3D
+    // depth test while 2D UI with depth disabled still draws.
+    uint32_t depth_control_raw = 0;
   };
 
   bool CreateDrawResources();
@@ -428,6 +433,24 @@ class NativeCommandProcessor : public CommandProcessor {
   std::vector<size_t> retired_resolved_slots_;
   // Index into deferred_draws_ where the current render-target phase began.
   uint32_t phase_first_draw_ = 0;
+  // Why draws were dropped in IssueDraw, cumulative. On the object rather than
+  // in a function-local static so IssueSwap can dump the whole histogram
+  // periodically - the question "were these draws skipped, or did they render
+  // nothing?" is the first one to ask about a black world, and a flood-gated
+  // per-skip log cannot answer it (it rotates out of the log file).
+  std::unordered_map<std::string, uint64_t> skip_reason_counts_;
+  // Texture bind outcomes, cumulative. A high null rate means geometry samples
+  // opaque black - the other way (besides depth) that a 3D world goes black
+  // while 2D UI in the same phase stays correct.
+  uint64_t texture_bind_total_ = 0;
+  uint64_t texture_null_total_ = 0;
+  // The guest's own depth clear value (RB_DEPTH_CLEAR), captured from the
+  // resolves that clear depth. The native backend has no EDRAM, so it clears a
+  // real depth attachment per phase - and clearing it to a hardcoded 1.0 breaks
+  // every REVERSE-Z title outright: Choplifter renders 690 of its ~856 world
+  // draws with zfunc GREATER_EQUAL, so against a 1.0 clear nothing passes and
+  // the whole 3D world vanishes while depth-disabled 2D UI still draws.
+  float guest_depth_clear_ = 1.0f;
   uint64_t resolve_count_ = 0;
   uint32_t resolves_this_frame_ = 0;
   // Bounds resolved-image creation per frame (each is a full VkImage); resolves

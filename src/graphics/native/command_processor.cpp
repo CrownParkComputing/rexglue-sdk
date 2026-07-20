@@ -56,6 +56,8 @@ REXCVAR_DEFINE_BOOL(native_rect_gs, true, "GPU/Native",
                     "Expand guest rectangle lists with the oracle's geometry shader (the\n                    validated path). Off = draw each rect as a single bare triangle\n                    (loses the half past the diagonal) - kept as an A/B switch for\n                    isolating regressions to the GS path.");
 REXCVAR_DEFINE_BOOL(native_marker_empty_frames, false, "GPU/Native",
                     "Clear draw-less frames to a recognisable mid-blue instead of black.\n                    Bring-up aid only: level loads produce long runs of draw-less\n                    frames, so with this on they flash violently blue.");
+REXCVAR_DEFINE_BOOL(native_present_frontbuffer, false, "GPU/Native",
+                    "Present the resolved frontbuffer image instead of replaying its\n                    draws. The SELECTION is correct and measured - it is what makes\n                    SoulCalibur II report present=true - but the blit that consumes\n                    it still makes vkQueueSubmit fail, so it is off until that is\n                    found with validation layers enabled.");
 REXCVAR_DEFINE_BOOL(native_log_phases, false, "GPU/Native",
                     "Log render-target phases, their draw ownership and their resolves.\n                    Cheap (a few lines per frame) and periodic, unlike\n                    native_log_draws, whose per-draw flood rotates these very lines\n                    out of the log file before they can be read.");
 REXCVAR_DEFINE_BOOL(native_phase_base_filter, true, "GPU/Native",
@@ -2826,7 +2828,12 @@ size_t NativeCommandProcessor::AcquireResolvedTarget(uint32_t dest_key, uint32_t
   image_info.arrayLayers = 1;
   image_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  // TRANSFER_SRC as well as DST: a resolved image is not only written and
+  // sampled, it is also BLITTED to the scene image when it is the frontbuffer
+  // the guest publishes (see ChooseDisplaySource), and read back by the RT
+  // dump. Without it those reads are invalid and presentation fails outright.
+  image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT;
   image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (dfn.vkCreateImage(device, &image_info, nullptr, &rt.image) != VK_SUCCESS) {
@@ -3341,7 +3348,13 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // Presenting requires the resolved image to actually exist; if it does not,
   // fall back to the replay model rather than showing nothing.
   size_t present_index = SIZE_MAX;
-  if (display_source.present_resolved) {
+  if (display_source.present_resolved && !REXCVAR_GET(native_present_frontbuffer)) {
+    // Selection found a finished frame, but consuming it is not safe yet.
+    display_source = DisplaySource{};
+    display_source.ranges = SelectDisplayRanges(phase_spans, fb_key,
+                                                uint32_t(deferred_draws_.size()),
+                                                phase_first_draw_);
+  } else if (display_source.present_resolved) {
     auto it = resolved_target_index_.find(display_source.resolved_key);
     if (it != resolved_target_index_.end() &&
         resolved_target_storage_[it->second].image != VK_NULL_HANDLE) {
@@ -3445,6 +3458,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
         (void)image_view;
         if (!EnsureSceneFramebuffer(width, height)) {
+          REXLOG_ERROR("rexgpu-native: PRESENTFAIL EnsureSceneFramebuffer {}x{}", width, height);
           return false;
         }
 
@@ -3457,6 +3471,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (dfn.vkBeginCommandBuffer(command_buffer_, &begin_info) != VK_SUCCESS) {
+          REXLOG_ERROR("rexgpu-native: PRESENTFAIL vkBeginCommandBuffer");
           return false;
         }
 
@@ -3868,6 +3883,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                  &release_barrier);
 
         if (dfn.vkEndCommandBuffer(command_buffer_) != VK_SUCCESS) {
+          REXLOG_ERROR("rexgpu-native: PRESENTFAIL vkEndCommandBuffer");
           return false;
         }
 

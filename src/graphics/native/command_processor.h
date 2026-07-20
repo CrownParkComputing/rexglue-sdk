@@ -451,6 +451,13 @@ class NativeCommandProcessor : public CommandProcessor {
   // draws with zfunc GREATER_EQUAL, so against a 1.0 clear nothing passes and
   // the whole 3D world vanishes while depth-disabled 2D UI still draws.
   float guest_depth_clear_ = 1.0f;
+  // Histogram of RT0's guest colour format over draws (indexed by
+  // xenos::ColorRenderTargetFormat). Native renders every target as 8-bit
+  // UNORM, so an HDR guest format (3 = 2_10_10_10_FLOAT, 7 = 16_16_16_16_FLOAT)
+  // has everything above 1.0 clamped - the difference between "blown out
+  // because HDR is being clipped" and "blown out because gamma is missing"
+  // (1 = 8_8_8_8_GAMMA, whose conversion flags native never sets).
+  uint64_t rt_format_counts_[16] = {};
   uint64_t resolve_count_ = 0;
   uint32_t resolves_this_frame_ = 0;
   // Bounds resolved-image creation per frame (each is a full VkImage); resolves

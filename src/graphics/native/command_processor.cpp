@@ -1898,7 +1898,9 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       rb_colorcontrol.alpha_test_enable ? rb_colorcontrol.alpha_func
                                         : xenos::CompareFunction::kAlways;
   flags |= uint32_t(alpha_test_function) << SpirvShaderTranslator::kSysFlag_AlphaPassIfLess_Shift;
-  system_constants.flags = flags;
+  // NOTE: `flags` is committed to system_constants AFTER the per-render-target
+  // loop below, which contributes the gamma bits. Assigning it here instead
+  // silently discards them.
   system_constants.vertex_base_index = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
   system_constants.vertex_index_min = regs.Get<uint32_t>(XE_GPU_REG_VGT_MIN_VTX_INDX);
   system_constants.vertex_index_max = regs.Get<uint32_t>(XE_GPU_REG_VGT_MAX_VTX_INDX);
@@ -1954,6 +1956,13 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     const int32_t adjusted_bias = AdjustColorExpBiasForFormat(
         rt_color_info.color_exp_bias, is_fixed_16_format, /*truncated_to_minus_1_to_1=*/false);
     system_constants.color_exp_bias[i] = ColorExpBiasScale(adjusted_bias);
+    // Gamma targets: the Xenos converts linear->gamma on write, which the
+    // oracle emulates with explicit PWL gamma logic in the shader
+    // (vulkan/command_processor.cpp:6165-6175). Native never set this, so a
+    // guest gamma target received raw linear colour.
+    if (rt_color_info.color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      flags |= SpirvShaderTranslator::kSysFlag_ConvertColor0ToGamma << i;
+    }
     // TEMP-DIAG: bounded log of every NONZERO exponent bias seen, with the
     // render target format and the raw vs adjusted value - ground truth for
     // whether a bias is actually in play here (and on which format) rather
@@ -1970,6 +1979,8 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       }
     }
   }
+  // Committed here, after the loop above has contributed the gamma bits.
+  system_constants.flags = flags;
   // The shader reads only the planes that are enabled, tightly packed.
   if (!pa_cl_clip_cntl.clip_disable) {
     float* ucp_write = system_constants.user_clip_planes[0];
@@ -2257,6 +2268,7 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         rb_depth_info.depth_base | (uint32_t(rb_depth_info.depth_base_bit_11) << 11);
   }
   draw.depth_control_raw = normalized_depth_control.value;
+  ++rt_format_counts_[uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format) & 15];
   // TEMP-DIAG: the frontbuffer-phase draws (base 0) are where the composite goes
   // wrong - log their geometry and viewport.
   if (draw.color_edram_base == 0 && swap_count_ > 3000) {
@@ -3145,10 +3157,17 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
       for (const auto& [reason, n] : skip_reason_counts_) {
         hist += fmt::format("{}={} ", reason, n);
       }
+      std::string rtf;
+      for (uint32_t i = 0; i < 16; ++i) {
+        if (rt_format_counts_[i]) {
+          rtf += fmt::format("{}={} ", i, rt_format_counts_[i]);
+        }
+      }
       REXLOG_INFO(
-          "rexgpu-native: SKIPS issued={} skipped={} [{}] tex_binds={} tex_null={} zclear={}",
+          "rexgpu-native: SKIPS issued={} skipped={} [{}] tex_binds={} tex_null={} zclear={} "
+          "rtfmt=[{}]",
           draw_count_, skipped_draw_total_, hist, texture_bind_total_, texture_null_total_,
-          guest_depth_clear_);
+          guest_depth_clear_, rtf);
     }
   }
 

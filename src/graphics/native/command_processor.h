@@ -35,6 +35,7 @@
 #include <rex/graphics/xenos.h>
 
 #if REX_HAS_VULKAN
+#include <rex/graphics/vulkan/pipeline_cache.h>
 #include <rex/ui/vulkan/device.h>
 #include "native/texture_cache.h"
 #endif
@@ -195,8 +196,20 @@ class NativeCommandProcessor : public CommandProcessor {
   // use. Returns VK_NULL_HANDLE on failure.
   VkShaderModule GetShaderModule(const Shader::Translation* translation);
   // Returns (creating if needed) a graphics pipeline for the given state.
+  // geometry_module is optional (VK_NULL_HANDLE = no geometry stage) and is
+  // folded into the pipeline cache key alongside the other stage modules.
   VkPipeline GetPipeline(VkShaderModule vertex_module, VkShaderModule pixel_module,
-                         VkPipelineLayout layout, const GuestPipelineState& state);
+                         VkPipelineLayout layout, const GuestPipelineState& state,
+                         VkShaderModule geometry_module = VK_NULL_HANDLE);
+  // Xenos kRectangleList gives 3 corners per rect with the 4th implied - same
+  // as kPointList/kQuadList, it has no direct Vulkan topology. The mature
+  // Vulkan backend (vulkan/pipeline_cache.cpp) expands these with a real
+  // geometry shader (triangle in, triangle-strip quad out); this reuses that
+  // exact, already-validated SPIR-V builder
+  // (VulkanPipelineCache::BuildGeometryShaderModule) instead of the
+  // vertex-shader-loop fallback, which was never a shipped/validated Xenia
+  // path (see native_expand_rects). Returns VK_NULL_HANDLE on build failure.
+  VkShaderModule GetGeometryShader(vulkan::VulkanPipelineCache::GeometryShaderKey key);
   // Fills a GuestPipelineState from the current register file + primitive type.
   GuestPipelineState BuildPipelineState(VkPrimitiveTopology topology, bool primitive_polygonal,
                                         const reg::RB_DEPTHCONTROL& depth_control,
@@ -291,8 +304,19 @@ class NativeCommandProcessor : public CommandProcessor {
     VkImageView view = VK_NULL_HANDLE;
     uint32_t width = 0;
     uint32_t height = 0;
+    // Tracked so a copy into a subrect can PRESERVE the rest of the image
+    // (oldLayout must be the real current layout - UNDEFINED discards).
+    // Updated CPU-side while recording; the image is UNDEFINED when created,
+    // SHADER_READ_ONLY after each frame's phase copy.
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
   };
-  // Resolved targets PERSIST ACROSS FRAMES, keyed by destination address.
+  // Resolved targets PERSIST ACROSS FRAMES, keyed by the destination TEXTURE's
+  // base address, and are allocated at the guest texture's declared layout size
+  // (pitch x height), not the resolve rect's size. Each resolve rect is copied
+  // to its position inside the image, so a texture built from several resolves
+  // (EDRAM tiling: Hydro Thunder's scene = two 512x576 strips into one
+  // 1024x576 texture) assembles correctly and normalized UVs computed against
+  // the guest layout sample it correctly.
   // Render-to-texture is frequently cross-frame: a title resolves a target in
   // one frame and samples it in a later one (OutRun's menu does exactly this).
   // Since the native backend never writes resolve results back into guest
@@ -318,6 +342,10 @@ class NativeCommandProcessor : public CommandProcessor {
     uint32_t dest_key = 0;
     uint32_t rect_w = 0;
     uint32_t rect_h = 0;
+    // Where the resolve rect lands inside the destination texture (and so
+    // inside the layout-sized resolved image).
+    uint32_t dest_x = 0;
+    uint32_t dest_y = 0;
     size_t resolved_index = SIZE_MAX;
   };
   bool EnsureResolveRenderTarget(uint32_t width, uint32_t height);
@@ -359,6 +387,23 @@ class NativeCommandProcessor : public CommandProcessor {
   // dest_key -> index into resolved_target_storage_, so a re-resolve of the
   // same address reuses its image instead of leaking a new one every frame.
   std::unordered_map<uint32_t, size_t> resolved_target_index_;
+  // Guest layout of each resolved destination texture, so a resolve whose
+  // RB_COPY_DEST_BASE lies INSIDE an already-known texture can be attributed
+  // to it. D3D9 expresses a rect resolve at (x,y) by pre-adding the tiled
+  // offset of the 32-aligned part of (x,y) to the base register (see
+  // GetResolveInfo), so an EDRAM tiling strip resolved into the right half of
+  // a texture arrives with a base no fetch constant ever samples. The
+  // position is recovered by inverting GetTiledOffset2D over the texture's
+  // 32x32 granule grid.
+  struct ResolvedTextureLayout {
+    uint32_t base_raw = 0;       // unmasked RB_COPY_DEST_BASE that established it
+    uint32_t pitch_aligned = 0;  // guest layout, 32-aligned pixels
+    uint32_t height_aligned = 0;
+    uint32_t bpp_log2 = 0;
+    uint32_t img_w = 0;  // host image dims used for this texture
+    uint32_t img_h = 0;
+  };
+  std::unordered_map<uint32_t, ResolvedTextureLayout> resolved_texture_layouts_;
   // Resolved rect size per alias key, to compare against the size the guest's
   // fetch constant claims the texture at that address is.
   std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> resolved_target_dims_;
@@ -394,6 +439,13 @@ class NativeCommandProcessor : public CommandProcessor {
 
   std::unordered_map<const Shader::Translation*, VkShaderModule> shader_modules_;
   std::unordered_map<uint64_t, VkPipeline> pipelines_;
+  // Geometry shaders for Xenos primitive types with no direct Vulkan
+  // topology (currently just kRectangleList - see GetGeometryShader).
+  // Stores VK_NULL_HANDLE if a build was attempted and failed, matching the
+  // oracle's geometry_shaders_ cache.
+  std::unordered_map<vulkan::VulkanPipelineCache::GeometryShaderKey, VkShaderModule,
+                     vulkan::VulkanPipelineCache::GeometryShaderKey::Hasher>
+      geometry_shaders_;
 
   std::vector<DeferredDraw> deferred_draws_;
   bool frame_open_ = false;

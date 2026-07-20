@@ -652,14 +652,20 @@ VkImageView NativeTextureCache::NullImageViewForDimension(xenos::FetchOpDimensio
 
 VkImageView NativeTextureCache::GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
                                                                xenos::FetchOpDimension dimension,
-                                                               bool is_signed) {
+                                                               bool is_signed, bool* out_hit) {
   (void)is_signed;
   const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
   if (binding && AreDimensionsCompatible(dimension, binding->key.dimension)) {
     VkImageView view = native_texture_bindings_[fetch_constant_index].image_view;
     if (view != VK_NULL_HANDLE) {
+      if (out_hit) {
+        *out_hit = true;
+      }
       return view;
     }
+  }
+  if (out_hit) {
+    *out_hit = false;
   }
   return NullImageViewForDimension(dimension);
 }

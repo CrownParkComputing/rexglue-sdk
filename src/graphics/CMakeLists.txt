@@ -48,6 +48,7 @@ set(REXGPU_XENOS_VULKAN_SOURCES
     vulkan/deferred_command_buffer.cpp
     vulkan/command_processor.cpp
     vulkan/pipeline_cache.cpp
+    vulkan/geometry_shader_builder.cpp
     vulkan/primitive_processor.cpp
     vulkan/render_target_cache.cpp
     vulkan/shader.cpp
@@ -164,6 +165,14 @@ if(REXGLUE_USE_VULKAN)
         native/command_processor.cpp
         native/native_shared_memory.cpp
         native/texture_cache.cpp
+
+        # Geometry-shader SPIR-V construction for Xenos primitive types with no
+        # direct Vulkan topology (rectangles today - see command_processor.cpp's
+        # GetGeometryShader). Split out of vulkan/pipeline_cache.cpp precisely so
+        # it can be compiled here without pulling in the rest of
+        # VulkanPipelineCache (VulkanCommandProcessor/VulkanRenderTargetCache/
+        # VulkanShader) - keeps this target independent of rexgpu-xenos.
+        vulkan/geometry_shader_builder.cpp
 
         # Shared, game-agnostic PM4 + Xenos base (identical to the rexgpu-xenos
         # backend-agnostic core; only the backend files differ).

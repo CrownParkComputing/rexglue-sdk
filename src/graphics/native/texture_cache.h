@@ -103,8 +103,13 @@ class NativeTextureCache final : public TextureCache {
   // resident texture's view, or a null (opaque-black) image view of the right
   // dimension when there's no valid texture. is_signed is accepted for API
   // parity but ignored in the MVP (unsigned view only).
+  // out_hit, if non-null, is set to whether a real resident texture was
+  // returned (true) vs. the opaque-black null fallback (false) - lets a
+  // caller distinguish "this specific binding is unresolved" from "some
+  // other cause" without needing to compare VkImageView handles itself.
   VkImageView GetActiveBindingOrNullImageView(uint32_t fetch_constant_index,
-                                              xenos::FetchOpDimension dimension, bool is_signed);
+                                              xenos::FetchOpDimension dimension, bool is_signed,
+                                              bool* out_hit = nullptr);
   VkImageView NullImageViewForDimension(xenos::FetchOpDimension dimension) const;
 
   // Sampler path (matches VulkanTextureCache). GetSamplerParameters is a pure

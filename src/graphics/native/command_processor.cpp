@@ -403,7 +403,10 @@ bool NativeCommandProcessor::EnsureSceneFramebuffer(uint32_t width, uint32_t hei
   image_info.arrayLayers = 1;
   image_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  // TRANSFER_DST as well: the scene image is blitted INTO when a resolved
+  // frontbuffer is presented, not only rendered into and blitted out of.
+  image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   if (dfn.vkCreateImage(device, &image_info, nullptr, &scene_color_) != VK_SUCCESS) {
@@ -3448,7 +3451,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   const bool presented = presenter->RefreshGuestOutput(
       width, height, width, height,
       [this, width, height, clear_rgba, &display_ranges, present_index](
-          ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+          ui::Presenter::GuestOutputRefreshContext& context) mutable -> bool {
         auto& vk_ctx =
             static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
         const VkImage image = vk_ctx.image();
@@ -3749,8 +3752,18 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         // made it (see ChooseDisplaySource). The blit scales the resolved
         // image - which is sized to the guest's texture layout - onto the
         // scene image.
+        if (present_index != SIZE_MAX &&
+            resolved_target_storage_[present_index].layout !=
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+          // Republication aliases two destination keys onto one image, so a
+          // key's tracked layout can lag what the other key did to it. Only
+          // blit from an image we know is in the layout we are about to claim -
+          // declaring the wrong oldLayout is VUID-VkImageMemoryBarrier-01213
+          // and makes the whole submit invalid.
+          present_index = SIZE_MAX;
+        }
         if (present_index != SIZE_MAX) {
-          const ResolvedTarget& src = resolved_target_storage_[present_index];
+          ResolvedTarget& src = resolved_target_storage_[present_index];
           VkImageMemoryBarrier to_transfer[2] = {};
           for (uint32_t i = 0; i < 2; ++i) {
             to_transfer[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -3798,6 +3811,7 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                    0, 0, nullptr, 0, nullptr, 2, back);
+          src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
         VkRenderPassBeginInfo rp_begin = {};

@@ -179,6 +179,9 @@ class NativeCommandProcessor : public CommandProcessor {
     // so a guest using reverse-Z (clear 0.0 + GREATER) would fail every 3D
     // depth test while 2D UI with depth disabled still draws.
     uint32_t depth_control_raw = 0;
+    // RB_BLEND_RED/GREEN/BLUE/ALPHA at defer time, replayed as Vulkan's
+    // dynamic blend constants.
+    float blend_constants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   };
 
   bool CreateDrawResources();

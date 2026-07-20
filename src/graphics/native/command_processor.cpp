@@ -1145,10 +1145,14 @@ VkPipeline NativeCommandProcessor::GetPipeline(VkShaderModule vertex_module,
   color_blend.attachmentCount = 1;
   color_blend.pAttachments = &blend_attachment;
 
-  VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  // Blend constants are dynamic, as in the oracle. Left unset, Vulkan defaults
+  // them to zero, which silently turns every kOneMinusConstant* factor into a
+  // full-strength 1 - i.e. draws that should modulate instead accumulate.
+  VkDynamicState dynamic_states[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                                      VK_DYNAMIC_STATE_BLEND_CONSTANTS};
   VkPipelineDynamicStateCreateInfo dynamic = {};
   dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-  dynamic.dynamicStateCount = 2;
+  dynamic.dynamicStateCount = 3;
   dynamic.pDynamicStates = dynamic_states;
 
   VkGraphicsPipelineCreateInfo pipeline_info = {};
@@ -2410,6 +2414,10 @@ bool NativeCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         rb_depth_info.depth_base | (uint32_t(rb_depth_info.depth_base_bit_11) << 11);
   }
   draw.depth_control_raw = normalized_depth_control.value;
+  draw.blend_constants[0] = regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
+  draw.blend_constants[1] = regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
+  draw.blend_constants[2] = regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
+  draw.blend_constants[3] = regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
   ++rt_format_counts_[uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format) & 15];
   // TEMP-DIAG: the frontbuffer-phase draws (base 0) are where the composite goes
   // wrong - log their geometry and viewport.
@@ -2877,6 +2885,7 @@ uint32_t NativeCommandProcessor::RecordDeferredDrawsForBase(VkCommandBuffer cb, 
     }
     ++recorded;
     dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+    dfn.vkCmdSetBlendConstants(cb, draw.blend_constants);
     VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
                                draw.vertex_texture_set, draw.pixel_texture_set};
     dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 0, 4,
@@ -2910,6 +2919,7 @@ void NativeCommandProcessor::RecordDeferredDrawRange(VkCommandBuffer cb, uint32_
   for (uint32_t i = first; i < end; ++i) {
     const DeferredDraw& draw = deferred_draws_[i];
     dfn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline);
+    dfn.vkCmdSetBlendConstants(cb, draw.blend_constants);
     VkDescriptorSet sets[4] = {shared_memory_descriptor_set_, draw.constants_set,
                                draw.vertex_texture_set, draw.pixel_texture_set};
     dfn.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, 0, 4,

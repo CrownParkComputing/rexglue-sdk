@@ -218,7 +218,11 @@ class UserProfile {
 
   uint64_t xuid() const { return xuid_; }
   std::string name() const { return name_; }
-  uint32_t signin_state() const { return 1; }
+  // A profile exists locally, while the "Live" state here is only the
+  // compatibility value exposed to guest code. Some retail titles (including
+  // Geometry Wars 3) reject state 1 even for offline play. Network services
+  // remain unavailable and the fixed XUID remains local to this runtime.
+  uint32_t signin_state() const { return 2; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }

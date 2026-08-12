@@ -22,6 +22,7 @@
 #include <rex/runtime.h>
 #include <rex/embedded_metadata.h>
 #include <rex/system/achievement_manager.h>
+#include <rex/system/xam/user_profile.h>
 
 namespace {
 
@@ -229,4 +230,14 @@ TEST_CASE("embedded metadata assets resolve by metadata-relative path", "[achiev
   CHECK(asset->bytes[1] == 0x50);
   CHECK(asset->bytes[2] == 0x4E);
   CHECK(asset->bytes[3] == 0x47);
+}
+
+TEST_CASE("native profile satisfies offline title sign-in gates", "[xam][profile]") {
+  rex::system::xam::UserProfile profile;
+
+  CHECK(profile.name() == "User");
+  CHECK(profile.xuid() == 0xB13EBABEBABEBABEull);
+  CHECK(profile.signin_state() == 2);
+  CHECK((profile.type() & 1) == 1);
+  CHECK((profile.type() & 2) == 2);
 }

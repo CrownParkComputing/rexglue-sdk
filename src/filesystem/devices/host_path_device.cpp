@@ -23,12 +23,13 @@ namespace rex::filesystem {
 
 HostPathDevice::HostPathDevice(const std::string_view mount_path,
                                const std::filesystem::path& host_path, bool read_only,
-                               bool allow_share_delete)
+                               bool allow_share_delete, bool hide_internal_content_metadata)
     : Device(mount_path),
       name_("STFS"),
       host_path_(host_path),
       read_only_(read_only),
-      allow_share_delete_(allow_share_delete) {}
+      allow_share_delete_(allow_share_delete),
+      hide_internal_content_metadata_(hide_internal_content_metadata) {}
 
 HostPathDevice::~HostPathDevice() = default;
 
@@ -72,6 +73,10 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
     if (part.empty()) {
       continue;
     }
+    if (hide_internal_content_metadata_ && current_entry == root_entry_.get() &&
+        rex::string::utf8_equal_case(part, "__thumbnail.png")) {
+      return nullptr;
+    }
 
     auto* child = current_entry->GetChild(part);
     if (!child) {
@@ -101,6 +106,10 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
 void HostPathDevice::PopulateEntry(HostPathEntry* parent_entry) {
   auto child_infos = rex::filesystem::ListFiles(parent_entry->host_path());
   for (auto& child_info : child_infos) {
+    if (hide_internal_content_metadata_ && parent_entry == root_entry_.get() &&
+        rex::string::utf8_equal_case(rex::path_to_utf8(child_info.name), "__thumbnail.png")) {
+      continue;
+    }
     auto child = HostPathEntry::Create(this, parent_entry,
                                        parent_entry->host_path() / child_info.name, child_info);
     parent_entry->children_.push_back(std::unique_ptr<Entry>(child));

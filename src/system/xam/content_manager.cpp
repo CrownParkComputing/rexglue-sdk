@@ -47,7 +47,8 @@ ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view
 
   auto fs = kernel_state_->file_system();
   auto device = std::make_unique<rex::filesystem::HostPathDevice>(device_path_, package_path, false,
-                                                                  /*allow_share_delete=*/true);
+                                                                  /*allow_share_delete=*/true,
+                                                                  /*hide_internal_content_metadata=*/true);
   device->Initialize();
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);

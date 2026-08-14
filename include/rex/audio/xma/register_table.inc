@@ -46,7 +46,11 @@
 //---------------------------------------------------------------------------//
 
 XE_XMA_REGISTER(0x0600, ContextArrayAddress)
-// 0x0601..0x0605 : ???
+// Observed immediately around title lock operations. Its exact hardware side
+// effect is not proven; retain the value and classify it instead of emitting
+// thousands of misleading "unknown register" diagnostics.
+XE_XMA_REGISTER(0x0601, ObservedLockControl)
+// 0x0602..0x0605 : ???
 XE_XMA_REGISTER(0x0606, CurrentContextIndex)
 XE_XMA_REGISTER(0x0607, NextContextIndex)
 // 0x0608         : ???

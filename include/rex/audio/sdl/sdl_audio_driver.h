@@ -11,11 +11,14 @@
 
 #pragma once
 
+#include <array>
+#include <fstream>
 #include <mutex>
 #include <queue>
 #include <stack>
 
 #include <rex/audio/audio_driver.h>
+#include <rex/audio/frame_statistics.h>
 #include <rex/thread.h>
 
 #include <SDL3/SDL.h>
@@ -49,6 +52,13 @@ class SDLAudioDriver : public AudioDriver {
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
+  AudioFrameStatistics statistics_;
+  AudioQueueStatistics queue_statistics_;
+  bool signal_evidence_logged_ = false;
+  uint64_t next_integrity_log_frame_ = 938;
+  std::ofstream diagnostic_dump_;
+  std::array<float, channel_samples_ * 2> diagnostic_stereo_ = {};
+  uint64_t diagnostic_dumped_frames_ = 0;
 };
 
 }  // namespace rex::audio::sdl

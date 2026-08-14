@@ -100,4 +100,14 @@ inline void sequential_6_BE_to_interleaved_2_LE(float* output, const float* inpu
 }
 #endif
 
+inline void sequential_6_BE_front_to_interleaved_2_LE(float* output,
+                                                       const float* input,
+                                                       size_t ch_sample_count) {
+  for (size_t sample = 0; sample < ch_sample_count; ++sample) {
+    output[sample * 2] = rex::byte_swap(input[sample]);
+    output[sample * 2 + 1] =
+        rex::byte_swap(input[ch_sample_count + sample]);
+  }
+}
+
 }  // namespace rex::audio::conversion

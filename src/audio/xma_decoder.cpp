@@ -11,6 +11,7 @@
 
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
+#include <rex/audio/xma/legacy_context.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -27,6 +28,8 @@ extern "C" {
 }  // extern "C"
 
 REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debug and above)");
+REXCVAR_DEFINE_STRING(xma_decoder, "new", "Audio",
+                      "XMA decoder packet walker: new (default) or old (legacy compatibility)");
 
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
@@ -53,6 +56,10 @@ REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debu
 // using the XMA* functions.
 
 namespace rex::audio {
+
+XmaDecoderKind ResolveXmaDecoderKind(std::string_view value) {
+  return value == "old" ? XmaDecoderKind::kLegacy : XmaDecoderKind::kNew;
+}
 
 XmaDecoder::XmaDecoder(runtime::FunctionDispatcher* function_dispatcher)
     : memory_(function_dispatcher->memory()), function_dispatcher_(function_dispatcher) {}
@@ -111,10 +118,16 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
   register_file_[XmaRegister::ContextArrayAddress] =
       memory()->GetPhysicalAddress(context_data_first_ptr_);
 
-  // Setup XMA contexts.
+  // Setup XMA contexts. Decoder selection is fixed for the lifetime of the
+  // audio system so every hardware context uses the same packet semantics.
+  const XmaDecoderKind decoder_kind = ResolveXmaDecoderKind(REXCVAR_GET(xma_decoder));
+  REXAPU_INFO("XMA: Using {} decoder", decoder_kind == XmaDecoderKind::kLegacy ? "old" : "new");
   for (size_t i = 0; i < kContextCount; ++i) {
     uint32_t guest_ptr = context_data_first_ptr_ + i * sizeof(XMA_CONTEXT_DATA);
-    XmaContext& context = contexts_[i];
+    contexts_[i] = decoder_kind == XmaDecoderKind::kLegacy
+                       ? std::unique_ptr<XmaContextInterface>(new XmaLegacyContext())
+                       : std::unique_ptr<XmaContextInterface>(new XmaContext());
+    XmaContextInterface& context = *contexts_[i];
     if (context.Setup(i, memory(), guest_ptr)) {
       assert_always();
     }
@@ -142,7 +155,7 @@ void XmaDecoder::WorkerThreadMain() {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
     for (uint32_t n = 0; n < kContextCount && worker_running_; n++) {
-      XmaContext& context = contexts_[n];
+      XmaContextInterface& context = *contexts_[n];
       bool worked = context.Work();
       if (worked) {
         context.SignalWorkDone();
@@ -210,7 +223,7 @@ uint32_t XmaDecoder::AllocateContext() {
     return 0;
   }
 
-  XmaContext& context = contexts_[index];
+  XmaContextInterface& context = *contexts_[index];
   assert_false(context.is_allocated());
   context.set_is_allocated(true);
   return context.guest_ptr();
@@ -220,7 +233,7 @@ void XmaDecoder::ReleaseContext(uint32_t guest_ptr) {
   auto context_id = GetContextId(guest_ptr);
   assert_true(context_id >= 0);
 
-  XmaContext& context = contexts_[context_id];
+  XmaContextInterface& context = *contexts_[context_id];
   assert_true(context.is_allocated());
   context.Release();
   context_bitmap_.Release(context_id);
@@ -230,7 +243,7 @@ bool XmaDecoder::BlockOnContext(uint32_t guest_ptr, bool poll) {
   auto context_id = GetContextId(guest_ptr);
   assert_true(context_id >= 0);
 
-  XmaContext& context = contexts_[context_id];
+  XmaContextInterface& context = *contexts_[context_id];
   return context.Block(poll);
 }
 
@@ -289,7 +302,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     for (int i = 0; value && i < 32; ++i, value >>= 1) {
       if (value & 1) {
         uint32_t context_id = base_context_id + i;
-        auto& context = contexts_[context_id];
+        auto& context = *contexts_[context_id];
         context.Enable();
       }
     }
@@ -298,7 +311,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
       if (kicked_value & 1) {
         uint32_t context_id = base_context_id + i;
-        auto& context = contexts_[context_id];
+        auto& context = *contexts_[context_id];
         if (context.Work()) {
           context.SignalWorkDone();
         }
@@ -313,7 +326,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     for (int i = 0; value && i < 32; ++i, value >>= 1) {
       if (value & 1) {
         uint32_t context_id = base_context_id + i;
-        auto& context = contexts_[context_id];
+        auto& context = *contexts_[context_id];
         context.Disable();
         // [XMA fix] Added Block(false) after Disable(). Without this, the game
         // could call XMADisableContext and start modifying the context struct
@@ -331,7 +344,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     for (int i = 0; value && i < 32; ++i, value >>= 1) {
       if (value & 1) {
         uint32_t context_id = base_context_id + i;
-        XmaContext& context = contexts_[context_id];
+        XmaContextInterface& context = *contexts_[context_id];
         context.Clear();
       }
     }
@@ -339,6 +352,10 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     // 0601h (1804h) is written to with 0x02000000 and 0x03000000 around a lock
     // operation
     switch (r) {
+      case XmaRegister::ObservedLockControl:
+        // The register file has already retained the natural value. Do not
+        // claim this observed lock-adjacent control write is unknown.
+        break;
       default: {
         const auto register_info = register_file_.GetRegisterInfo(r);
         if (register_info) {

@@ -17,6 +17,10 @@ add_executable(unit_tests
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
     system/content_package_visibility_test.cpp
+    audio/conversion_test.cpp
+    audio/frame_statistics_test.cpp
+    audio/xma_register_test.cpp
+    audio/xma_output_state_test.cpp
     codegen/manifest_test.cpp
     rexglue/migration_scan_test.cpp
     rexglue/ui_test.cpp

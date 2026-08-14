@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <queue>
+#include <string_view>
 
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/register_file.h>
@@ -28,6 +29,11 @@ class FunctionDispatcher;
 namespace rex::audio {
 
 struct XMA_CONTEXT_DATA;
+
+enum class XmaDecoderKind { kNew, kLegacy };
+
+// Invalid values deliberately resolve to the maintained default decoder.
+XmaDecoderKind ResolveXmaDecoderKind(std::string_view value);
 
 class XmaDecoder {
  public:
@@ -82,7 +88,7 @@ class XmaDecoder {
   XmaRegisterFile register_file_;
 
   static const uint32_t kContextCount = 320;
-  XmaContext contexts_[kContextCount];
+  std::unique_ptr<XmaContextInterface> contexts_[kContextCount];
   bit::BitMap context_bitmap_;
 
   uint32_t context_data_first_ptr_ = 0;

@@ -166,9 +166,38 @@ struct kPacketInfo {
   }
 };
 
+struct kPacketHandle {
+  uint32_t buffer_index_ = 0;
+  uint32_t packet_index_ = 0;
+  bool is_valid_ = false;
+};
+
+// Applies the XMA output-buffer completion rules after a decoder work pass.
+// This is deliberately a pure state transition so one-shot exhaustion and
+// full-ring behavior can be regression-tested without an FFmpeg decoder.
+void FinalizeXmaOutputBufferState(XMA_CONTEXT_DATA* data, bool initially_had_input,
+                                  uint32_t ring_write_offset_blocks,
+                                  int32_t remaining_subframe_blocks, bool output_ring_empty);
+
 static constexpr int kIdToSampleRate[4] = {24000, 32000, 44100, 48000};
 
-class XmaContext {
+class XmaContextInterface {
+ public:
+  virtual ~XmaContextInterface() = default;
+  virtual int Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr) = 0;
+  virtual bool Work() = 0;
+  virtual void Enable() = 0;
+  virtual bool Block(bool poll) = 0;
+  virtual void Clear() = 0;
+  virtual void Disable() = 0;
+  virtual void Release() = 0;
+  virtual uint32_t guest_ptr() = 0;
+  virtual bool is_allocated() = 0;
+  virtual void set_is_allocated(bool is_allocated) = 0;
+  virtual void SignalWorkDone() = 0;
+};
+
+class XmaContext final : public XmaContextInterface {
  public:
   static const uint32_t kBytesPerPacket = 2048;
   static const uint32_t kBitsPerPacket = kBytesPerPacket * 8;
@@ -188,30 +217,30 @@ class XmaContext {
   static const uint32_t kMaxFrameSizeinBits = 0x4000 - kBitsPerPacketHeader;
 
   explicit XmaContext();
-  ~XmaContext();
+  ~XmaContext() override;
 
-  int Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr);
-  bool Work();
+  int Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr) override;
+  bool Work() override;
 
-  void Enable();
-  bool Block(bool poll);
-  void Clear();
-  void Disable();
-  void Release();
+  void Enable() override;
+  bool Block(bool poll) override;
+  void Clear() override;
+  void Disable() override;
+  void Release() override;
 
   memory::Memory* memory() const { return memory_; }
 
   uint32_t id() { return id_; }
-  uint32_t guest_ptr() { return guest_ptr_; }
-  bool is_allocated() { return is_allocated_.load(std::memory_order_acquire); }
+  uint32_t guest_ptr() override { return guest_ptr_; }
+  bool is_allocated() override { return is_allocated_.load(std::memory_order_acquire); }
   bool is_enabled() { return is_enabled_.load(std::memory_order_acquire); }
 
-  void set_is_allocated(bool is_allocated) {
+  void set_is_allocated(bool is_allocated) override {
     is_allocated_.store(is_allocated, std::memory_order_release);
   }
   void set_is_enabled(bool is_enabled) { is_enabled_.store(is_enabled, std::memory_order_release); }
 
-  void SignalWorkDone() {
+  void SignalWorkDone() override {
     if (work_completion_event_) {
       work_completion_event_->Set();
     }
@@ -222,6 +251,11 @@ class XmaContext {
     }
   }
 
+  // Shared by the legacy packet walker so sample conversion remains bit-for-bit
+  // identical between decoder algorithms.
+  static void ConvertFrame(const uint8_t** samples, bool is_two_channel,
+                           uint8_t* output_buffer);
+
  private:
   static void SwapInputBuffer(XMA_CONTEXT_DATA* data);
   static int GetSampleRate(int id);
@@ -230,9 +264,13 @@ class XmaContext {
 
   kPacketInfo GetPacketInfo(uint8_t* packet, uint32_t frame_offset);
   uint32_t GetAmountOfBitsToRead(uint32_t remaining_stream_bits, uint32_t frame_size);
+  kPacketHandle GetPacketHandle(XMA_CONTEXT_DATA* data, uint32_t buffer_index,
+                                uint32_t packet_index, uint32_t current_input_packet_count);
   const uint8_t* GetNextPacket(XMA_CONTEXT_DATA* data, uint32_t next_packet_index,
                                uint32_t current_input_packet_count);
   uint32_t GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_packet_index,
+                                   uint32_t current_input_packet_count);
+  uint32_t GetNextPacketReadOffset(XMA_CONTEXT_DATA* data, uint32_t next_packet_index,
                                    uint32_t current_input_packet_count);
   uint8_t* GetCurrentInputBuffer(XMA_CONTEXT_DATA* data);
 
@@ -248,8 +286,6 @@ class XmaContext {
 
   void StoreContextMerged(const XMA_CONTEXT_DATA& data, const XMA_CONTEXT_DATA& initial_data,
                           uint8_t* context_ptr);
-
-  static void ConvertFrame(const uint8_t** samples, bool is_two_channel, uint8_t* output_buffer);
 
   memory::Memory* memory_ = nullptr;
   std::unique_ptr<rex::thread::Event> work_completion_event_;

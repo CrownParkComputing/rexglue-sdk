@@ -11,8 +11,9 @@
 
 #include "ppc/instruction.h"
 
-#include <unordered_set>
+#include <algorithm>
 
+#include <rex/codegen/function_scanner.h>
 #include <rex/codegen/phases.h>
 #include "phase_helpers.h"
 
@@ -34,55 +35,6 @@ namespace {
 //=============================================================================
 // GapFill to register uncovered code regions
 //=============================================================================
-
-// Split a code region into function segments based on terminators (blr, tail calls).
-std::vector<CodeRegion> splitRegionOnTerminators(
-    const CodeRegion& region, const BinaryView& binary,
-    const std::unordered_set<uint32_t>& knownCallables) {
-  std::vector<CodeRegion> segments;
-  uint32_t segmentStart = region.start;
-
-  for (uint32_t addr = region.start; addr < region.end; addr += 4) {
-    const uint8_t* data = binary.translate(addr);
-    if (!data)
-      break;
-
-    uint32_t raw = load_and_swap<uint32_t>(data);
-    auto decoded = decode_instruction(addr, raw);
-    bool shouldSplit = false;
-    const char* reason = nullptr;
-
-    // Check for terminators
-    if (decoded.is_return()) {
-      shouldSplit = true;
-      reason = "blr";
-    } else if (decoded.opcode == Opcode::b && decoded.branch_target.has_value()) {
-      uint32_t target = decoded.branch_target.value();
-      // Don't split on tail recursion (branch to own segment start)
-      if (target != segmentStart && knownCallables.contains(target)) {
-        shouldSplit = true;
-        reason = "tail call";
-      }
-    }
-
-    if (shouldSplit) {
-      uint32_t segmentEnd = addr + 4;
-      if (segmentEnd > segmentStart) {
-        segments.push_back({segmentStart, segmentEnd});
-        REXCODEGEN_TRACE("GapFill: split segment 0x{:08X}-0x{:08X} ({} at 0x{:08X})", segmentStart,
-                         segmentEnd, reason, addr);
-      }
-      segmentStart = segmentEnd;
-    }
-  }
-
-  // Handle remaining code after last terminator
-  if (segmentStart < region.end) {
-    segments.push_back({segmentStart, region.end});
-  }
-
-  return segments;
-}
 
 // Check if address looks like exception handler data (handler ptr + rdata ptr)
 bool looksLikeExceptionData(const BinaryView& binary, const FunctionGraph& graph, uint32_t addr) {
@@ -126,42 +78,78 @@ void gapFillCodeRegions(CodegenContext& ctx) {
   auto& binary = ctx.binary();
   auto& scan = ctx.scan;
 
-  // Build set of known callables for tail call detection
-  std::unordered_set<uint32_t> knownCallables;
-  for (const auto& [addr, node] : graph.functions()) {
-    knownCallables.insert(addr);
-  }
-
   size_t gapsFound = 0;
   size_t segmentsCreated = 0;
 
+  // Sweep each region linearly, letting block discovery decide where each
+  // uncovered function actually ends.
+  //
+  // Splitting a region on terminators cannot do this correctly: a vtable
+  // dispatch thunk ends in bctr, a shared epilogue is entered by an
+  // unconditional branch, and a tail call only terminates when its target is
+  // already known - so the result depends on the order regions are visited and
+  // routinely swallows the function that follows. Anything swallowed that way
+  // is unreachable at runtime, surfacing as "call to invalid or unregistered
+  // function" rather than as an analysis error. Walking uncovered code and
+  // taking the extent of the discovered blocks removes the guesswork.
+  FunctionScanner scanner(binary);
+
   for (const auto& region : scan.codeRegions) {
-    // Split region on terminators (blr, tail calls), then check each segment
-    auto segments = splitRegionOnTerminators(region, binary, knownCallables);
+    uint32_t addr = region.start;
+    gapsFound++;
 
-    for (const auto& segment : segments) {
-      // Skip if this segment's start is already a registered function entry
-      if (graph.isEntryPoint(segment.start))
-        continue;
-
-      // Skip if this segment's start is inside another function
-      if (auto* containingFunc = graph.getFunctionContaining(segment.start)) {
+    while (addr < region.end) {
+      if (auto* containingFunc = graph.getFunctionContaining(addr)) {
+        // Already covered - resume after it. end() can sit behind addr for a
+        // zero-sized node, so never move backwards.
+        addr = std::max(containingFunc->end(), addr + 4);
         continue;
       }
 
-      // Skip if this looks like exception handler data (handler ptr + rdata ptr)
-      if (looksLikeExceptionData(binary, graph, segment.start))
+      const uint8_t* data = binary.translate(addr);
+      if (!data)
+        break;
+
+      // Alignment padding between functions is not code.
+      if (load_and_swap<uint32_t>(data) == 0) {
+        addr += 4;
         continue;
+      }
 
-      uint32_t segmentSize = segment.size();
-      graph.addFunction(segment.start, segmentSize, FunctionAuthority::GAP_FILL, false);
+      if (looksLikeExceptionData(binary, graph, addr)) {
+        addr += 8;
+        continue;
+      }
 
-      REXCODEGEN_TRACE("GapFill: registered sub_{:08X} (0x{:08X}-0x{:08X}, {} bytes)",
-                       segment.start, segment.start, segment.end, segmentSize);
+      auto discovered = scanner.discover_blocks(addr);
+
+      // Take the extent of the contiguous run of blocks starting at the entry,
+      // not the furthest block. Block discovery follows an unconditional
+      // branch as if it were internal flow, so a two-instruction thunk that
+      // tail calls far away would otherwise claim everything in between -
+      // swallowing the thunks that follow it.
+      auto& blocks = discovered.blocks;
+      std::sort(blocks.begin(), blocks.end(),
+                [](const DiscoveredBlock& a, const DiscoveredBlock& b) { return a.base < b.base; });
+
+      uint32_t end = addr;
+      for (const auto& block : blocks) {
+        if (block.base > end)
+          break;  // discontinuity: the rest belongs to another function
+        end = std::max<uint32_t>(end, block.end);
+      }
+
+      if (end <= addr) {
+        addr += 4;
+        continue;
+      }
+
+      graph.addFunction(addr, end - addr, FunctionAuthority::GAP_FILL, false);
+      REXCODEGEN_TRACE("GapFill: registered sub_{:08X} (0x{:08X}-0x{:08X}, {} bytes)", addr, addr,
+                       end, end - addr);
       segmentsCreated++;
+      addr = end;
     }
-
-    gapsFound++;
   }
 
   if (segmentsCreated > 0) {

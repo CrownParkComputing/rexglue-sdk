@@ -37,6 +37,9 @@
 #include <rex/graphics/vulkan/pipeline_cache.h>
 #include <rex/graphics/vulkan/render_target_cache.h>
 #include <rex/graphics/vulkan/shader.h>
+#include <filesystem>
+#include <fstream>
+
 #include <rex/graphics/vulkan/shared_memory.h>
 #include <rex/graphics/xenos.h>
 #include <rex/kernel/xboxkrnl/video.h>
@@ -53,6 +56,17 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
 
 REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(frame_dump_path, "", "GPU",
+                      "Directory to write guest-output frame dumps to as .ppm. Empty disables "
+                      "dumping. Lets a title be checked headlessly, without looking at a window.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_UINT32(frame_dump_interval, 30, "GPU",
+                      "Dump every Nth presented frame when frame_dump_path is set")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_UINT32(frame_dump_count, 8, "GPU",
+                      "Stop after dumping this many frames (0 = unlimited)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
@@ -2927,6 +2941,55 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // End the frame even if did not present for any reason (the image refresher
   // was not called), to prevent leaking per-frame resources.
   EndSubmission(true);
+
+  DumpGuestOutputFrame(presenter);
+}
+
+void VulkanCommandProcessor::DumpGuestOutputFrame(ui::Presenter* presenter) {
+  const std::string dump_path = REXCVAR_GET(frame_dump_path);
+  if (dump_path.empty() || !presenter)
+    return;
+
+  uint32_t interval = std::max(REXCVAR_GET(frame_dump_interval), uint32_t(1));
+  uint32_t limit = REXCVAR_GET(frame_dump_count);
+  if (limit && frames_dumped_ >= limit)
+    return;
+  if ((frame_dump_counter_++ % interval) != 0)
+    return;
+
+  ui::RawImage image;
+  if (!presenter->CaptureGuestOutput(image) || image.data.empty()) {
+    REXGPU_WARN("Frame dump: CaptureGuestOutput failed");
+    return;
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(dump_path, ec);
+  auto file_path =
+      std::filesystem::path(dump_path) / fmt::format("frame_{:04}.ppm", frames_dumped_);
+
+  // Plain binary PPM: no encoder is vendored, and any image tool reads it.
+  std::ofstream out(file_path, std::ios::binary);
+  if (!out) {
+    REXGPU_WARN("Frame dump: cannot write {}", file_path.string());
+    return;
+  }
+  out << "P6\n" << image.width << ' ' << image.height << "\n255\n";
+
+  std::vector<uint8_t> row(size_t(image.width) * 3);
+  for (uint32_t y = 0; y < image.height; y++) {
+    const uint8_t* src = image.data.data() + size_t(y) * image.stride;
+    for (uint32_t x = 0; x < image.width; x++) {
+      // Source is R8 G8 B8 X8; drop the padding byte.
+      row[x * 3 + 0] = src[x * 4 + 0];
+      row[x * 3 + 1] = src[x * 4 + 1];
+      row[x * 3 + 2] = src[x * 4 + 2];
+    }
+    out.write(reinterpret_cast<const char*>(row.data()), std::streamsize(row.size()));
+  }
+
+  frames_dumped_++;
+  REXGPU_INFO("Frame dump: wrote {} ({}x{})", file_path.string(), image.width, image.height);
 }
 
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(

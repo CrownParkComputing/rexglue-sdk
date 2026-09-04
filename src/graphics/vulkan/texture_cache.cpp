@@ -1976,6 +1976,13 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
     image_create_info.format = wrapper_format;
     image_create_info.extent.width = key().GetWidth();
     image_create_info.extent.height = key().GetHeight();
+    if (key().scaled_resolve) {
+      // Match the sizing of the loader's scaled-resolve copies, otherwise the
+      // upload writes past the wrapper image (upstream xenia-canary 48111e8fb
+      // fixed the same in the D3D12 backend).
+      image_create_info.extent.width *= texture_cache().draw_resolution_scale_x();
+      image_create_info.extent.height *= texture_cache().draw_resolution_scale_y();
+    }
     image_create_info.extent.depth = 1;
     image_create_info.mipLevels = 1;
     image_create_info.arrayLayers = 1;

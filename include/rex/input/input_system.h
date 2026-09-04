@@ -11,6 +11,7 @@
  */
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <rex/input/device_assignment.h>
@@ -57,6 +58,12 @@ class InputSystem : public system::IInputSystem {
   rex::ui::Window* window_ = nullptr;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
+
+  // XamInput* is serviced on arbitrary guest threads while device changes are
+  // driven by the UI thread; every access to the device tables below must hold
+  // this. Without it, concurrent RefreshDevices calls corrupt the heap
+  // (free(): invalid pointer / corrupted size vs. prev_size aborts).
+  std::recursive_mutex device_mutex_;
 
   std::unique_ptr<DeviceAssignment> assignment_;
   ActiveDeviceTracker active_devices_;

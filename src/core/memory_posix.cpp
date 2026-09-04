@@ -495,6 +495,13 @@ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::pat
 #endif
 }
 
+void UnlinkFileMappingName(const std::filesystem::path& path) {
+#if !REX_PLATFORM_ANDROID
+  auto full_path = MakeShmName(path);
+  shm_unlink(full_path.c_str());
+#endif
+}
+
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset) {
   // file_offset must be page-aligned

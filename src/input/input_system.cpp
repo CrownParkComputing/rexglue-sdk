@@ -44,10 +44,12 @@ InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
 InputSystem::~InputSystem() = default;
 
 X_STATUS InputSystem::Setup() {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   return X_STATUS_SUCCESS;
 }
 
 void InputSystem::Shutdown() {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   // device_owners_ holds raw driver pointers.
   devices_.clear();
   device_owners_.clear();
@@ -55,6 +57,7 @@ void InputSystem::Shutdown() {
 }
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   drivers_.push_back(std::move(driver));
 }
 
@@ -72,6 +75,7 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
 }
 
 void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   assignment_ = std::move(assignment);
   if (assignment_) {
     assignment_->OnDevicesChanged(devices_);
@@ -79,6 +83,7 @@ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignme
 }
 
 void InputSystem::RefreshDevices() {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   std::vector<DeviceInfo> seen;
   std::vector<InputDriver*> owners;
   std::vector<DeviceInfo> enumerated;
@@ -186,6 +191,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
 
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!out_caps || !assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -213,6 +219,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
 }
 
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -252,6 +259,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 }
 
 X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -294,6 +302,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
 
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
+  std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;

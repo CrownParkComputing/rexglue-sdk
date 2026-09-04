@@ -174,6 +174,10 @@ bool Memory::Initialize() {
     return false;
   }
 #endif
+  // The views hold the mapping open from here on; drop the name so a crashed
+  // process cannot leak the arena into /dev/shm.
+  rex::memory::UnlinkFileMappingName(file_name_);
+
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
 

@@ -467,4 +467,35 @@ bool build_crxor(BuilderContext& ctx) {
   return true;
 }
 
+//=============================================================================
+// Population Count
+//=============================================================================
+
+bool build_popcntb(BuilderContext& ctx) {
+  // Per-byte population count; staged through temp so rA may alias rS.
+  ctx.println("\t{}.u64 = 0;", ctx.temp());
+  for (size_t i = 0; i < 8; i++) {
+    ctx.println("\t{}.u64 |= uint64_t(__builtin_popcountll(({}.u64 >> {}) & 0xFF)) << {};",
+                ctx.temp(), ctx.r(ctx.insn.operands[1]), i * 8, i * 8);
+  }
+  ctx.println("\t{}.u64 = {}.u64;", ctx.r(ctx.insn.operands[0]), ctx.temp());
+  return true;
+}
+
+bool build_isel(BuilderContext& ctx) {
+  // rD = CR[BC] ? (rA == 0 ? 0 : rA) : rB
+  constexpr std::string_view fields[] = {"lt", "gt", "eq", "so"};
+  uint32_t bc = ctx.insn.operands[3];
+  uint32_t rA = ctx.insn.operands[1];
+
+  if (rA != 0) {
+    ctx.println("\t{}.u64 = {}.{} ? {}.u64 : {}.u64;", ctx.r(ctx.insn.operands[0]), ctx.cr(bc / 4),
+                fields[bc % 4], ctx.r(rA), ctx.r(ctx.insn.operands[2]));
+  } else {
+    ctx.println("\t{}.u64 = {}.{} ? 0 : {}.u64;", ctx.r(ctx.insn.operands[0]), ctx.cr(bc / 4),
+                fields[bc % 4], ctx.r(ctx.insn.operands[2]));
+  }
+  return true;
+}
+
 }  // namespace rex::codegen

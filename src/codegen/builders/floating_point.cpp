@@ -304,4 +304,63 @@ bool build_fsel(BuilderContext& ctx) {
   return true;
 }
 
+//=============================================================================
+// Reciprocal Estimates, Sign Copy and Round-to-Integer
+//=============================================================================
+
+bool build_fre(BuilderContext& ctx) {
+  // Double-precision reciprocal estimate. As with fres, the exact quotient is
+  // used rather than the hardware's low-precision estimate table.
+  ctx.emit_set_flush_mode(false);
+  ctx.println("\t{}.f64 = 1.0 / {}.f64;", ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]));
+  return true;
+}
+
+bool build_frsqrtes(BuilderContext& ctx) {
+  ctx.emit_set_flush_mode(false);
+  ctx.println("\t{}.f64 = double(float(1.0 / sqrt({}.f64)));", ctx.f(ctx.insn.operands[0]),
+              ctx.f(ctx.insn.operands[1]));
+  return true;
+}
+
+bool build_fcpsgn(BuilderContext& ctx) {
+  // Sign from fA, magnitude from fB.
+  ctx.emit_set_flush_mode(false);
+  ctx.println("\t{}.u64 = ({}.u64 & 0x8000000000000000ull) | ({}.u64 & 0x7FFFFFFFFFFFFFFFull);",
+              ctx.f(ctx.insn.operands[0]), ctx.f(ctx.insn.operands[1]),
+              ctx.f(ctx.insn.operands[2]));
+  return true;
+}
+
+namespace {
+
+void emit_round_to_integer(BuilderContext& ctx, const char* fn) {
+  ctx.emit_set_flush_mode(false);
+  ctx.println("\t{}.f64 = {}({}.f64);", ctx.f(ctx.insn.operands[0]), fn,
+              ctx.f(ctx.insn.operands[1]));
+}
+
+}  // namespace
+
+bool build_frin(BuilderContext& ctx) {
+  // Round to nearest, ties away from zero - std::round matches frin exactly.
+  emit_round_to_integer(ctx, "round");
+  return true;
+}
+
+bool build_friz(BuilderContext& ctx) {
+  emit_round_to_integer(ctx, "trunc");
+  return true;
+}
+
+bool build_frip(BuilderContext& ctx) {
+  emit_round_to_integer(ctx, "ceil");
+  return true;
+}
+
+bool build_frim(BuilderContext& ctx) {
+  emit_round_to_integer(ctx, "floor");
+  return true;
+}
+
 }  // namespace rex::codegen

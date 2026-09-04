@@ -370,4 +370,71 @@ bool build_clrldi(BuilderContext& ctx) {
   return true;
 }
 
+//=============================================================================
+// FPSCR Bit Set/Clear
+//=============================================================================
+//
+// Only the rounding-mode bits (FPSCR 30 and 31) are modelled by the runtime,
+// matching mtfsf; the exception-status bits have no host representation, so
+// writes to them are dropped.
+
+namespace {
+
+bool emit_fpscr_bit(BuilderContext& ctx, bool set) {
+  uint32_t bt = ctx.insn.operands[0];
+  if (bt != 30 && bt != 31)
+    return true;
+
+  const uint32_t mask = (bt == 30) ? 0x2u : 0x1u;
+  if (set)
+    ctx.println("\tctx.fpscr.storeFromGuest(ctx.fpscr.loadFromHost() | 0x{:X});", mask);
+  else
+    ctx.println("\tctx.fpscr.storeFromGuest(ctx.fpscr.loadFromHost() & 0x{:X});", ~mask & 0x3u);
+  return true;
+}
+
+}  // namespace
+
+bool build_mtfsb0(BuilderContext& ctx) {
+  return emit_fpscr_bit(ctx, false);
+}
+
+bool build_mtfsb1(BuilderContext& ctx) {
+  return emit_fpscr_bit(ctx, true);
+}
+
+bool build_mcrfs(BuilderContext& ctx) {
+  // Only FPSCR field 7 (the rounding mode) has a modelled value; other fields
+  // read as zero.
+  constexpr std::string_view fields[] = {"lt", "gt", "eq", "so"};
+  uint32_t crfD = ctx.insn.operands[0];
+  uint32_t crfS = ctx.insn.operands[1];
+
+  if (crfS != 7) {
+    for (size_t i = 0; i < 4; i++)
+      ctx.println("\t{}.{} = 0;", ctx.cr(crfD), fields[i]);
+    return true;
+  }
+
+  ctx.println("\t{}.u32 = ctx.fpscr.loadFromHost();", ctx.temp());
+  ctx.println("\t{}.lt = 0;", ctx.cr(crfD));
+  ctx.println("\t{}.gt = 0;", ctx.cr(crfD));
+  ctx.println("\t{}.eq = ({}.u32 & 0x2) != 0;", ctx.cr(crfD), ctx.temp());
+  ctx.println("\t{}.so = ({}.u32 & 0x1) != 0;", ctx.cr(crfD), ctx.temp());
+  return true;
+}
+
+//=============================================================================
+// Cache and Stream Hints
+//=============================================================================
+//
+// These only affect the guest's cache/prefetch state, which the recompiled
+// code has no equivalent of. They are accepted and dropped so that code using
+// them does not trap.
+
+bool build_stream_hint_nop(BuilderContext& ctx) {
+  ctx.println("\t// {} (cache/stream hint, no host effect)", ctx.insn.opcode->name);
+  return true;
+}
+
 }  // namespace rex::codegen

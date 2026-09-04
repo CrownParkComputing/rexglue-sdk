@@ -148,6 +148,13 @@ constexpr FileMappingHandle kFileMappingHandleInvalid = -1;
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit);
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path);
+
+/// Removes the mapping's name from the filesystem namespace while keeping the
+/// handle (and therefore the memory) alive. Call once every view is mapped, so
+/// a crash cannot leak the backing file (POSIX shm objects otherwise persist
+/// in /dev/shm until reboot and eventually exhaust it - observed as SIGBUS in
+/// UploadRanges once /dev/shm filled with dead arenas).
+void UnlinkFileMappingName(const std::filesystem::path& path);
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset);
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length);

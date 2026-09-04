@@ -112,7 +112,21 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
   }
 
   auto* is = input_system();
-  return is->GetState(actual_user_index, input_state);
+  u32 result = is->GetState(actual_user_index, input_state);
+
+  // Log the first few nonzero pad states, so "are button presses reaching the
+  // guest at all" is answerable from a normal log.
+  if (result == X_ERROR_SUCCESS && input_state) {
+    uint16_t buttons = uint16_t(input_state->gamepad.buttons);
+    if (buttons) {
+      static std::atomic<int> nonzero_logged{0};
+      if (nonzero_logged.fetch_add(1) < 8) {
+        REXKRNL_INFO("[XAM] XamInputGetState: user={} buttons=0x{:04X}", actual_user_index,
+                     buttons);
+      }
+    }
+  }
+  return result;
 }
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx

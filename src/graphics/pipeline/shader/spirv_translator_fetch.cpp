@@ -19,8 +19,14 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/math.h>
+
+REXCVAR_DEFINE_BOOL(texture_exp_bias_ignore, false, "GPU/Shader",
+                    "Ignore the texture fetch constant result exponent bias (exp_adjust). "
+                    "Per-title workaround for HDR titles whose bloom chain blows out when the "
+                    "bias is honored. Changing this requires clearing the title's shader cache.");
 
 namespace rex::graphics {
 
@@ -1153,6 +1159,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             z_stacked =
                 builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, z_stacked, z_offset);
           }
+          // Clamp the layer index so Inf/NaN Z coordinates cannot select an
+          // undefined array layer (upstream xenia-canary 2d5b41080).
+          z_stacked = builder_->createTriBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, z_stacked, const_float_0_,
+              builder_->createNoContractionBinOp(spv::OpFSub, type_float_, z_size,
+                                                 builder_->makeFloatConstant(1.0f)));
           builder_->createBranch(&block_dimension_merge);
           // Select one of the two.
           builder_->setBuildPoint(&block_dimension_merge);
@@ -1409,8 +1421,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, is_all_signed);
 
         // Load the fetch constant word 4, needed unconditionally for LOD
-        // biasing, for result exponent biasing, and conditionally for stacked
-        // texture filtering.
+        // biasing and conditionally for stacked texture filtering. The result
+        // exponent bias comes from word 3, loaded at its application site.
         id_vector_temp_.clear();
         id_vector_temp_.push_back(const_int_0_);
         id_vector_temp_.push_back(
@@ -2030,11 +2042,31 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         }
 
         // Apply the exponent bias from the bits 13:18 of the fetch constant
-        // word 4.
-        spv::Id result_exponent_bias = builder_->createBinBuiltinCall(
-            type_float_, ext_inst_glsl_std_450_, GLSLstd450Ldexp, const_float_1_,
-            builder_->createTriOp(spv::OpBitFieldSExtract, type_int_, fetch_constant_word_4_signed,
-                                  builder_->makeUintConstant(13), builder_->makeUintConstant(6)));
+        // word 3 (exp_adjust - between the swizzle and the filters). Word 4
+        // bits 13:18 are inside lod_bias, which must not be applied to the
+        // result - see xenos.h xe_gpu_texture_fetch_t and the DXBC translator.
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(const_int_0_);
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(int((fetch_constant_word_0_index + 3) >> 2)));
+        id_vector_temp_.push_back(
+            builder_->makeIntConstant(int((fetch_constant_word_0_index + 3) & 3)));
+        spv::Id fetch_constant_word_3_signed = builder_->createUnaryOp(
+            spv::OpBitcast, type_int_,
+            builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassUniform, uniform_fetch_constants_,
+                                            id_vector_temp_),
+                spv::NoPrecision));
+        spv::Id result_exponent_bias;
+        if (REXCVAR_GET(texture_exp_bias_ignore)) {
+          result_exponent_bias = const_float_1_;
+        } else {
+          result_exponent_bias = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450Ldexp, const_float_1_,
+              builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                    fetch_constant_word_3_signed, builder_->makeUintConstant(13),
+                                    builder_->makeUintConstant(6)));
+        }
         {
           uint32_t result_remaining_components = used_result_nonzero_components;
           uint32_t result_component_index;
@@ -2205,7 +2237,11 @@ void SpirvShaderTranslator::SampleTexture(spv::Builder::TextureParameters& textu
               builder_->createNoContractionBinOp(spv::OpFSub, type_float4_, sign_result,
                                                  lerp_first),
               lerp_factor);
-          sign_result = builder_->createNoContractionBinOp(spv::OpFAdd, type_float4_, sign_result,
+          // lerp(a, b, t) = a + (b - a) * t. Accumulating onto sign_result (b)
+          // instead of lerp_first (a) extrapolated past the second layer,
+          // saturating colors when filtering across stacked/3D layers
+          // (upstream xenia-canary e519d59e4).
+          sign_result = builder_->createNoContractionBinOp(spv::OpFAdd, type_float4_, lerp_first,
                                                            lerp_difference);
         }
       }

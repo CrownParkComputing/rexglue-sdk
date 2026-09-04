@@ -192,6 +192,11 @@ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::pat
   CloseHandle(reinterpret_cast<HANDLE>(handle));
 }
 
+void UnlinkFileMappingName(const std::filesystem::path& path) {
+  // Win32 section names die with the last handle; nothing to unlink.
+  (void)path;
+}
+
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset) {
 #ifdef REX_BASE_MEMORY_WIN_USE_DESKTOP_FUNCTIONS

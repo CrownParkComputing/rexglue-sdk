@@ -172,6 +172,12 @@ class VulkanCommandProcessor : public CommandProcessor {
   // the resource in a synchronization scope, the stage masks should be 0 (top /
   // bottom of pipe should be specified only if explicitly needed). Returning
   // true if the barrier has actually been inserted and not dropped.
+  // Writes the presented guest output to frame_dump_path as .ppm, so a title
+  // can be verified headlessly instead of by looking at the window.
+  void DumpGuestOutputFrame(ui::Presenter* presenter);
+  uint32_t frame_dump_counter_ = 0;
+  uint32_t frames_dumped_ = 0;
+
   bool PushBufferMemoryBarrier(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
                                VkPipelineStageFlags src_stage_mask,
                                VkPipelineStageFlags dst_stage_mask, VkAccessFlags src_access_mask,

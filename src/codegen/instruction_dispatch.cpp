@@ -404,7 +404,46 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_MTMSRD, build_mtmsrd},
       {PPC_INST_MTFSF, build_mtfsf},
       {PPC_INST_MTXER, build_mtxer},
+      {PPC_INST_MTFSB0, build_mtfsb0},
+      {PPC_INST_MTFSB1, build_mtfsb1},
+      {PPC_INST_MCRFS, build_mcrfs},
       {PPC_INST_CLRLDI, build_clrldi},
+
+      //=====================================================================
+      // Integer Select and Population Count
+      //=====================================================================
+      {PPC_INST_ISEL, build_isel},
+      {PPC_INST_POPCNTB, build_popcntb},
+
+      //=====================================================================
+      // Load/Store Multiple and String
+      //=====================================================================
+      {PPC_INST_LMW, build_lmw},
+      {PPC_INST_LSWI, build_lswi},
+      {PPC_INST_STSWI, build_stswi},
+      {PPC_INST_LFIWAX, build_lfiwax},
+
+      //=====================================================================
+      // Reciprocal Estimates, Sign Copy and Round-to-Integer
+      //=====================================================================
+      {PPC_INST_FRE, build_fre},
+      {PPC_INST_FRSQRTES, build_frsqrtes},
+      {PPC_INST_FCPSGN, build_fcpsgn},
+      {PPC_INST_FRIN, build_frin},
+      {PPC_INST_FRIZ, build_friz},
+      {PPC_INST_FRIP, build_frip},
+      {PPC_INST_FRIM, build_frim},
+
+      //=====================================================================
+      // Cache and Stream Hints (accepted, no host effect)
+      //=====================================================================
+      {PPC_INST_DSS, build_stream_hint_nop},
+      {PPC_INST_DSSALL, build_stream_hint_nop},
+      {PPC_INST_DST, build_stream_hint_nop},
+      {PPC_INST_DSTT, build_stream_hint_nop},
+      {PPC_INST_DSTST, build_stream_hint_nop},
+      {PPC_INST_DSTSTT, build_stream_hint_nop},
+      {PPC_INST_ICBI, build_stream_hint_nop},
 
       //=====================================================================
       // Vector - Floating Point Arithmetic
@@ -482,6 +521,44 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_VMAXUB, build_vmaxub},
       {PPC_INST_VMINUB, build_vminub},
       {PPC_INST_VMINUW, build_vminuw},
+      {PPC_INST_VMAXUW, build_vmaxuw},
+      {PPC_INST_VADDCUW, build_vaddcuw},
+      {PPC_INST_VSUBCUW, build_vsubcuw},
+      {PPC_INST_VRLB, build_vrlb},
+
+      //=====================================================================
+      // Vector - Integer Multiply (even/odd, widening)
+      //=====================================================================
+      {PPC_INST_VMULESB, build_vmulesb},
+      {PPC_INST_VMULESH, build_vmulesh},
+      {PPC_INST_VMULEUB, build_vmuleub},
+      {PPC_INST_VMULEUH, build_vmuleuh},
+      {PPC_INST_VMULOSB, build_vmulosb},
+      {PPC_INST_VMULOSH, build_vmulosh},
+      {PPC_INST_VMULOUB, build_vmuloub},
+      {PPC_INST_VMULOUH, build_vmulouh},
+
+      //=====================================================================
+      // Vector - Multiply-Sum / Multiply-Add
+      //=====================================================================
+      {PPC_INST_VMSUMUBM, build_vmsumubm},
+      {PPC_INST_VMSUMMBM, build_vmsummbm},
+      {PPC_INST_VMSUMUHM, build_vmsumuhm},
+      {PPC_INST_VMSUMUHS, build_vmsumuhs},
+      {PPC_INST_VMSUMSHM, build_vmsumshm},
+      {PPC_INST_VMSUMSHS, build_vmsumshs},
+      {PPC_INST_VMHADDSHS, build_vmhaddshs},
+      {PPC_INST_VMHRADDSHS, build_vmhraddshs},
+      {PPC_INST_VMLADDUHM, build_vmladduhm},
+
+      //=====================================================================
+      // Vector - Sum Across
+      //=====================================================================
+      {PPC_INST_VSUM4UBS, build_vsum4ubs},
+      {PPC_INST_VSUM4SBS, build_vsum4sbs},
+      {PPC_INST_VSUM4SHS, build_vsum4shs},
+      {PPC_INST_VSUM2SWS, build_vsum2sws},
+      {PPC_INST_VSUMSWS, build_vsumsws},
 
       //=====================================================================
       // Vector - Average
@@ -491,6 +568,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_VAVGSW, build_vavgsw},
       {PPC_INST_VAVGUB, build_vavgub},
       {PPC_INST_VAVGUH, build_vavguh},
+      {PPC_INST_VAVGUW, build_vavguw},
 
       //=====================================================================
       // Vector - Logical
@@ -620,6 +698,7 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_VPKSWSS128, build_vpkswss},
       {PPC_INST_VPKSWUS, build_vpkswus},
       {PPC_INST_VPKSWUS128, build_vpkswus},
+      {PPC_INST_VPKPX, build_vpkpx},
       {PPC_INST_VPKD3D128, build_vpkd3d128},
 
       //=====================================================================
@@ -634,6 +713,8 @@ static const std::unordered_map<int, Builder>& GetDispatchTable() {
       {PPC_INST_VUPKLSB128, build_vupklsb},
       {PPC_INST_VUPKLSH, build_vupklsh},
       {PPC_INST_VUPKLSH128, build_vupklsh},
+      {PPC_INST_VUPKHPX, build_vupkhpx},
+      {PPC_INST_VUPKLPX, build_vupklpx},
   };
   return table;
 }

@@ -1,0 +1,27 @@
+test_frsqrtes_1:
+  #_ REGISTER_IN f1 1.0
+  frsqrtes f2, f1
+  blr
+  #_ REGISTER_OUT f1 1.00000000000000000
+  #_ REGISTER_OUT f2 1.00000000000000000
+
+test_frsqrtes_2:
+  #_ REGISTER_IN f1 4.0
+  frsqrtes f2, f1
+  blr
+  #_ REGISTER_OUT f1 4.00000000000000000
+  #_ REGISTER_OUT f2 0.50000000000000000
+
+test_frsqrtes_3:
+  #_ REGISTER_IN f1 0.25
+  frsqrtes f2, f1
+  blr
+  #_ REGISTER_OUT f1 0.25000000000000000
+  #_ REGISTER_OUT f2 2.00000000000000000
+
+test_frsqrtes_4:
+  #_ REGISTER_IN f1 64.0
+  frsqrtes f2, f1
+  blr
+  #_ REGISTER_OUT f1 64.00000000000000000
+  #_ REGISTER_OUT f2 0.12500000000000000

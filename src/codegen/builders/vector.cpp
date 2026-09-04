@@ -1559,4 +1559,441 @@ bool build_vupklsh(BuilderContext& ctx) {
   return true;
 }
 
+//=============================================================================
+// Vector Integer Multiply (even/odd, widening)
+//=============================================================================
+//
+// NOTE: vector registers are stored fully byte-reversed relative to the guest,
+// so PowerPC element i of an N-element view lives at host index (N - 1 - i).
+// That flips the meaning of "even" and "odd": the PowerPC even elements of a
+// byte view are host indices 15, 13, 11, ... Results are staged through vTemp
+// because a widening multiply reads element positions it also overwrites when
+// vD aliases vA or vB.
+
+namespace {
+
+/// Copy vTemp over vD, used to close out a staged (aliasing-safe) sequence.
+void commit_v_temp(BuilderContext& ctx, size_t dest) {
+  ctx.println(
+      "\tsimde_mm_store_si128((simde__m128i*){}.u8, "
+      "simde_mm_load_si128((simde__m128i*){}.u8));",
+      ctx.v(dest), ctx.v_temp());
+}
+
+/// vmule*/vmulo* for byte sources: 8 halfword products.
+/// @param odd  false for vmule (PowerPC even elements), true for vmulo.
+void emit_vmul_byte(BuilderContext& ctx, bool odd, bool is_signed) {
+  const char* src = is_signed ? "s8" : "u8";
+  const char* dst = is_signed ? "s16" : "u16";
+  const char* cast = is_signed ? "int16_t" : "uint16_t";
+
+  for (size_t i = 0; i < 8; i++) {
+    const size_t src_host = odd ? (14 - i * 2) : (15 - i * 2);
+    ctx.println("\t{}.{}[{}] = {}({}.{}[{}]) * {}({}.{}[{}]);", ctx.v_temp(), dst, 7 - i, cast,
+                ctx.v(ctx.insn.operands[1]), src, src_host, cast, ctx.v(ctx.insn.operands[2]), src,
+                src_host);
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+}
+
+/// vmule*/vmulo* for halfword sources: 4 word products.
+void emit_vmul_halfword(BuilderContext& ctx, bool odd, bool is_signed) {
+  const char* src = is_signed ? "s16" : "u16";
+  const char* dst = is_signed ? "s32" : "u32";
+  const char* cast = is_signed ? "int32_t" : "uint32_t";
+
+  for (size_t i = 0; i < 4; i++) {
+    const size_t src_host = odd ? (6 - i * 2) : (7 - i * 2);
+    ctx.println("\t{}.{}[{}] = {}({}.{}[{}]) * {}({}.{}[{}]);", ctx.v_temp(), dst, 3 - i, cast,
+                ctx.v(ctx.insn.operands[1]), src, src_host, cast, ctx.v(ctx.insn.operands[2]), src,
+                src_host);
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+}
+
+}  // namespace
+
+bool build_vmuleub(BuilderContext& ctx) {
+  emit_vmul_byte(ctx, /*odd=*/false, /*is_signed=*/false);
+  return true;
+}
+
+bool build_vmulesb(BuilderContext& ctx) {
+  emit_vmul_byte(ctx, /*odd=*/false, /*is_signed=*/true);
+  return true;
+}
+
+bool build_vmuloub(BuilderContext& ctx) {
+  emit_vmul_byte(ctx, /*odd=*/true, /*is_signed=*/false);
+  return true;
+}
+
+bool build_vmulosb(BuilderContext& ctx) {
+  emit_vmul_byte(ctx, /*odd=*/true, /*is_signed=*/true);
+  return true;
+}
+
+bool build_vmuleuh(BuilderContext& ctx) {
+  emit_vmul_halfword(ctx, /*odd=*/false, /*is_signed=*/false);
+  return true;
+}
+
+bool build_vmulesh(BuilderContext& ctx) {
+  emit_vmul_halfword(ctx, /*odd=*/false, /*is_signed=*/true);
+  return true;
+}
+
+bool build_vmulouh(BuilderContext& ctx) {
+  emit_vmul_halfword(ctx, /*odd=*/true, /*is_signed=*/false);
+  return true;
+}
+
+bool build_vmulosh(BuilderContext& ctx) {
+  emit_vmul_halfword(ctx, /*odd=*/true, /*is_signed=*/true);
+  return true;
+}
+
+//=============================================================================
+// Vector Multiply-Sum
+//=============================================================================
+//
+// Each result word sums products drawn from the matching source word. Because
+// the register is byte-reversed as a whole, host word h still covers host bytes
+// 4h..4h+3 and host halfwords 2h..2h+1, and the sum is order independent - so
+// these are written directly in host indices with no reversal fixup. The whole
+// right-hand side is evaluated before the store, so vD may alias any source.
+
+namespace {
+
+/// Multiply-sum over the four bytes of each word: vD.w = vC.w + sum(vA.b * vB.b)
+void emit_vmsum_byte(BuilderContext& ctx, const char* a_view, const char* b_view,
+                     const char* acc_view, const char* acc_cast) {
+  for (size_t w = 0; w < 4; w++) {
+    ctx.print("\t{}.{}[{}] = {}({}.{}[{}])", ctx.v(ctx.insn.operands[0]), acc_view, w, acc_cast,
+              ctx.v(ctx.insn.operands[3]), acc_view, w);
+    for (size_t b = 0; b < 4; b++) {
+      ctx.print(" + {}({}.{}[{}]) * {}({}.{}[{}])", acc_cast, ctx.v(ctx.insn.operands[1]), a_view,
+                w * 4 + b, acc_cast, ctx.v(ctx.insn.operands[2]), b_view, w * 4 + b);
+    }
+    ctx.println(";");
+  }
+}
+
+/// Multiply-sum over the two halfwords of each word, with optional saturation.
+/// @param sat_min  clamp bounds to emit, or nullptr for modulo (wrapping) results.
+void emit_vmsum_halfword(BuilderContext& ctx, const char* view, const char* acc_view,
+                         const char* wide, const char* temp_view, const char* sat_min,
+                         const char* sat_max) {
+  const std::string vD = ctx.v(ctx.insn.operands[0]);
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+  const std::string vB = ctx.v(ctx.insn.operands[2]);
+  const std::string vC = ctx.v(ctx.insn.operands[3]);
+
+  for (size_t w = 0; w < 4; w++) {
+    const std::string sum =
+        fmt::format("{}({}.{}[{}]) + {}({}.{}[{}]) * {}({}.{}[{}]) + {}({}.{}[{}]) * {}({}.{}[{}])",
+                    wide, vC, acc_view, w, wide, vA, view, w * 2, wide, vB, view, w * 2, wide, vA,
+                    view, w * 2 + 1, wide, vB, view, w * 2 + 1);
+
+    if (sat_min == nullptr) {
+      // Modulo form: the whole sum is evaluated before the store, so vD may
+      // alias any source.
+      ctx.println("\t{}.{}[{}] = {};", vD, acc_view, w, sum);
+      continue;
+    }
+
+    ctx.println("\t{}.{} = {};", ctx.temp(), temp_view, sum);
+    if (*sat_min == '\0') {
+      // Unsigned accumulator: only the upper bound can be exceeded.
+      ctx.println("\t{}.{}[{}] = {}.{} > {} ? {} : {}.{};", vD, acc_view, w, ctx.temp(), temp_view,
+                  sat_max, sat_max, ctx.temp(), temp_view);
+    } else {
+      ctx.println("\t{}.{}[{}] = {}.{} > {} ? {} : ({}.{} < {} ? {} : {}.{});", vD, acc_view, w,
+                  ctx.temp(), temp_view, sat_max, sat_max, ctx.temp(), temp_view, sat_min, sat_min,
+                  ctx.temp(), temp_view);
+    }
+  }
+}
+
+}  // namespace
+
+bool build_vmsumubm(BuilderContext& ctx) {
+  emit_vmsum_byte(ctx, "u8", "u8", "u32", "uint32_t");
+  return true;
+}
+
+bool build_vmsummbm(BuilderContext& ctx) {
+  // vA is signed bytes, vB unsigned bytes, accumulate into signed words.
+  emit_vmsum_byte(ctx, "s8", "u8", "s32", "int32_t");
+  return true;
+}
+
+bool build_vmsumuhm(BuilderContext& ctx) {
+  emit_vmsum_halfword(ctx, "u16", "u32", "uint32_t", "u32", nullptr, nullptr);
+  return true;
+}
+
+bool build_vmsumshm(BuilderContext& ctx) {
+  emit_vmsum_halfword(ctx, "s16", "s32", "int32_t", "s32", nullptr, nullptr);
+  return true;
+}
+
+bool build_vmsumuhs(BuilderContext& ctx) {
+  emit_vmsum_halfword(ctx, "u16", "u32", "uint64_t", "u64", "", "0xFFFFFFFFull");
+  return true;
+}
+
+bool build_vmsumshs(BuilderContext& ctx) {
+  emit_vmsum_halfword(ctx, "s16", "s32", "int64_t", "s64", "INT32_MIN", "INT32_MAX");
+  return true;
+}
+
+//=============================================================================
+// Vector Multiply-High/Low Add (halfword, element-wise)
+//=============================================================================
+
+bool build_vmhaddshs(BuilderContext& ctx) {
+  // vD.h = sat16((vA.h * vB.h) >> 15) + vC.h)
+  for (size_t i = 0; i < 8; i++) {
+    ctx.println(
+        "\t{}.s32 = ((int32_t({}.s16[{}]) * int32_t({}.s16[{}])) >> 15) + "
+        "int32_t({}.s16[{}]);",
+        ctx.temp(), ctx.v(ctx.insn.operands[1]), i, ctx.v(ctx.insn.operands[2]), i,
+        ctx.v(ctx.insn.operands[3]), i);
+    ctx.println(
+        "\t{}.s16[{}] = {}.s32 > INT16_MAX ? INT16_MAX : ({}.s32 < INT16_MIN ? INT16_MIN : "
+        "{}.s32);",
+        ctx.v(ctx.insn.operands[0]), i, ctx.temp(), ctx.temp(), ctx.temp());
+  }
+  return true;
+}
+
+bool build_vmhraddshs(BuilderContext& ctx) {
+  // Rounding variant: the 0x4000 bias rounds the 15-bit shift to nearest.
+  for (size_t i = 0; i < 8; i++) {
+    ctx.println(
+        "\t{}.s32 = (((int32_t({}.s16[{}]) * int32_t({}.s16[{}])) + 0x4000) >> 15) + "
+        "int32_t({}.s16[{}]);",
+        ctx.temp(), ctx.v(ctx.insn.operands[1]), i, ctx.v(ctx.insn.operands[2]), i,
+        ctx.v(ctx.insn.operands[3]), i);
+    ctx.println(
+        "\t{}.s16[{}] = {}.s32 > INT16_MAX ? INT16_MAX : ({}.s32 < INT16_MIN ? INT16_MIN : "
+        "{}.s32);",
+        ctx.v(ctx.insn.operands[0]), i, ctx.temp(), ctx.temp(), ctx.temp());
+  }
+  return true;
+}
+
+bool build_vmladduhm(BuilderContext& ctx) {
+  // vD.h = (vA.h * vB.h + vC.h) modulo 16 bits - element-wise, so aliasing-safe.
+  ctx.println(
+      "\tsimde_mm_store_si128((simde__m128i*){}.u16, "
+      "simde_mm_add_epi16(simde_mm_mullo_epi16(simde_mm_load_si128((simde__m128i*){}.u16), "
+      "simde_mm_load_si128((simde__m128i*){}.u16)), "
+      "simde_mm_load_si128((simde__m128i*){}.u16)));",
+      ctx.v(ctx.insn.operands[0]), ctx.v(ctx.insn.operands[1]), ctx.v(ctx.insn.operands[2]),
+      ctx.v(ctx.insn.operands[3]));
+  return true;
+}
+
+//=============================================================================
+// Vector Sum Across
+//=============================================================================
+//
+// vsum4* reduce within each word and stay in host word order. vsum2sws and
+// vsumsws place their results in specific PowerPC words, which the reversal
+// maps to the opposite end of the register - see the index comments below.
+// All of them stage through vTemp so vD may alias vA or vC.
+
+namespace {
+
+/// vsum4*: vD.w = sat(vC.w + sum of the sub-elements of vA.w)
+void emit_vsum4(BuilderContext& ctx, const char* view, size_t per_word, const char* acc_view,
+                const char* wide, const char* temp_view, const char* sat_min, const char* sat_max) {
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+  const std::string vC = ctx.v(ctx.insn.operands[2]);
+
+  for (size_t w = 0; w < 4; w++) {
+    std::string sum = fmt::format("{}({}.{}[{}])", wide, vC, acc_view, w);
+    for (size_t e = 0; e < per_word; e++)
+      sum += fmt::format(" + {}({}.{}[{}])", wide, vA, view, w * per_word + e);
+
+    ctx.println("\t{}.{} = {};", ctx.temp(), temp_view, sum);
+    if (*sat_min == '\0') {
+      ctx.println("\t{}.{}[{}] = {}.{} > {} ? {} : {}.{};", ctx.v_temp(), acc_view, w, ctx.temp(),
+                  temp_view, sat_max, sat_max, ctx.temp(), temp_view);
+    } else {
+      ctx.println("\t{}.{}[{}] = {}.{} > {} ? {} : ({}.{} < {} ? {} : {}.{});", ctx.v_temp(),
+                  acc_view, w, ctx.temp(), temp_view, sat_max, sat_max, ctx.temp(), temp_view,
+                  sat_min, sat_min, ctx.temp(), temp_view);
+    }
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+}
+
+}  // namespace
+
+bool build_vsum4ubs(BuilderContext& ctx) {
+  emit_vsum4(ctx, "u8", 4, "u32", "uint64_t", "u64", "", "0xFFFFFFFFull");
+  return true;
+}
+
+bool build_vsum4sbs(BuilderContext& ctx) {
+  emit_vsum4(ctx, "s8", 4, "s32", "int64_t", "s64", "INT32_MIN", "INT32_MAX");
+  return true;
+}
+
+bool build_vsum4shs(BuilderContext& ctx) {
+  emit_vsum4(ctx, "s16", 2, "s32", "int64_t", "s64", "INT32_MIN", "INT32_MAX");
+  return true;
+}
+
+bool build_vsum2sws(BuilderContext& ctx) {
+  // Per doubleword: sum both words of vA plus the odd word of vC into the odd
+  // PowerPC word; the even word is zeroed. PowerPC word 1 is host word 2 and
+  // PowerPC word 3 is host word 0.
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+  const std::string vC = ctx.v(ctx.insn.operands[2]);
+
+  for (size_t dw = 0; dw < 2; dw++) {
+    const size_t lo = dw * 2;  // host words lo, lo+1 form one doubleword
+    ctx.println("\t{}.s64 = int64_t({}.s32[{}]) + int64_t({}.s32[{}]) + int64_t({}.s32[{}]);",
+                ctx.temp(), vC, lo, vA, lo, vA, lo + 1);
+    ctx.println(
+        "\t{}.s32[{}] = {}.s64 > INT32_MAX ? INT32_MAX : ({}.s64 < INT32_MIN ? INT32_MIN : "
+        "{}.s64);",
+        ctx.v_temp(), lo, ctx.temp(), ctx.temp(), ctx.temp());
+    ctx.println("\t{}.s32[{}] = 0;", ctx.v_temp(), lo + 1);
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+  return true;
+}
+
+bool build_vsumsws(BuilderContext& ctx) {
+  // Sum all four words of vA plus PowerPC word 3 of vC into PowerPC word 3
+  // (host word 0); the remaining words are zeroed.
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+  const std::string vC = ctx.v(ctx.insn.operands[2]);
+
+  ctx.println(
+      "\t{}.s64 = int64_t({}.s32[0]) + int64_t({}.s32[0]) + int64_t({}.s32[1]) + "
+      "int64_t({}.s32[2]) + int64_t({}.s32[3]);",
+      ctx.temp(), vC, vA, vA, vA, vA);
+  ctx.println(
+      "\t{}.s32[0] = {}.s64 > INT32_MAX ? INT32_MAX : ({}.s64 < INT32_MIN ? INT32_MIN : {}.s64);",
+      ctx.v_temp(), ctx.temp(), ctx.temp(), ctx.temp());
+  for (size_t w = 1; w < 4; w++)
+    ctx.println("\t{}.s32[{}] = 0;", ctx.v_temp(), w);
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+  return true;
+}
+
+//=============================================================================
+// Vector Carry / Borrow, Average, Max, Rotate
+//=============================================================================
+
+bool build_vaddcuw(BuilderContext& ctx) {
+  // vD.w = carry out of (vA.w + vB.w)
+  for (size_t w = 0; w < 4; w++) {
+    ctx.println("\t{}.u32[{}] = (uint64_t({}.u32[{}]) + uint64_t({}.u32[{}])) >> 32;",
+                ctx.v(ctx.insn.operands[0]), w, ctx.v(ctx.insn.operands[1]), w,
+                ctx.v(ctx.insn.operands[2]), w);
+  }
+  return true;
+}
+
+bool build_vsubcuw(BuilderContext& ctx) {
+  // vD.w = NOT borrow of (vA.w - vB.w), i.e. 1 when no borrow is generated.
+  for (size_t w = 0; w < 4; w++) {
+    ctx.println("\t{}.u32[{}] = {}.u32[{}] >= {}.u32[{}] ? 1 : 0;", ctx.v(ctx.insn.operands[0]), w,
+                ctx.v(ctx.insn.operands[1]), w, ctx.v(ctx.insn.operands[2]), w);
+  }
+  return true;
+}
+
+bool build_vavguw(BuilderContext& ctx) {
+  // Rounding unsigned average: (a + b + 1) >> 1, computed in 64 bits so the
+  // carry out of the 32-bit add is not lost.
+  for (size_t w = 0; w < 4; w++) {
+    ctx.println("\t{}.u32[{}] = (uint64_t({}.u32[{}]) + uint64_t({}.u32[{}]) + 1) >> 1;",
+                ctx.v(ctx.insn.operands[0]), w, ctx.v(ctx.insn.operands[1]), w,
+                ctx.v(ctx.insn.operands[2]), w);
+  }
+  return true;
+}
+
+bool build_vmaxuw(BuilderContext& ctx) {
+  ctx.emit_vec_int_binary("max_epu32", "u32");
+  return true;
+}
+
+bool build_vrlb(BuilderContext& ctx) {
+  // vD.b = rotate-left(vA.b, vB.b & 7)
+  for (size_t i = 0; i < 16; i++) {
+    ctx.println(
+        "\t{}.u8[{}] = uint8_t(({}.u8[{}] << ({}.u8[{}] & 7)) | ({}.u8[{}] >> ((8 - "
+        "({}.u8[{}] & 7)) & 7)));",
+        ctx.v(ctx.insn.operands[0]), i, ctx.v(ctx.insn.operands[1]), i, ctx.v(ctx.insn.operands[2]),
+        i, ctx.v(ctx.insn.operands[1]), i, ctx.v(ctx.insn.operands[2]), i);
+  }
+  return true;
+}
+
+//=============================================================================
+// Vector Pixel Pack / Unpack (1-5-5-5)
+//=============================================================================
+
+bool build_vpkpx(BuilderContext& ctx) {
+  // Each source word contributes one 1:5:5:5 pixel: bit 7 becomes the pixel's
+  // high bit, then bits 8:12, 16:20 and 24:28 become the three 5-bit channels.
+  // vA fills the PowerPC high halfwords (host 7..4), vB the low ones (host 3..0).
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+  const std::string vB = ctx.v(ctx.insn.operands[2]);
+
+  for (size_t i = 0; i < 4; i++) {
+    const std::string src[2] = {vA, vB};
+    const size_t dst_hw[2] = {7 - i, 3 - i};
+    for (size_t half = 0; half < 2; half++) {
+      ctx.println(
+          "\t{}.u16[{}] = uint16_t(((({}.u32[{}] >> 24) & 1) << 15) | ((({}.u32[{}] >> 19) "
+          "& 0x1F) << 10) | ((({}.u32[{}] >> 11) & 0x1F) << 5) | (({}.u32[{}] >> 3) & "
+          "0x1F));",
+          ctx.v_temp(), dst_hw[half], src[half], 3 - i, src[half], 3 - i, src[half], 3 - i,
+          src[half], 3 - i);
+    }
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+  return true;
+}
+
+namespace {
+
+/// vupkhpx/vupklpx: expand four 1:5:5:5 pixels into words.
+/// @param high  true to take the PowerPC high halfwords (host 7..4).
+void emit_vupkpx(BuilderContext& ctx, bool high) {
+  const std::string vA = ctx.v(ctx.insn.operands[1]);
+
+  for (size_t i = 0; i < 4; i++) {
+    const size_t src_hw = high ? (7 - i) : (3 - i);
+    ctx.println(
+        "\t{}.u32[{}] = ((({}.u16[{}] >> 15) & 1) ? 0xFF000000u : 0u) | "
+        "(uint32_t(({}.u16[{}] >> 10) & 0x1F) << 16) | (uint32_t(({}.u16[{}] >> 5) & 0x1F) "
+        "<< 8) | uint32_t({}.u16[{}] & 0x1F);",
+        ctx.v_temp(), 3 - i, vA, src_hw, vA, src_hw, vA, src_hw, vA, src_hw);
+  }
+  commit_v_temp(ctx, ctx.insn.operands[0]);
+}
+
+}  // namespace
+
+bool build_vupkhpx(BuilderContext& ctx) {
+  emit_vupkpx(ctx, /*high=*/true);
+  return true;
+}
+
+bool build_vupklpx(BuilderContext& ctx) {
+  emit_vupkpx(ctx, /*high=*/false);
+  return true;
+}
+
 }  // namespace rex::codegen

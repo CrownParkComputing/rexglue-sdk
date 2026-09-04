@@ -431,6 +431,31 @@ bool build_mtxer(BuilderContext& ctx);
 // Clear left double word immediate
 bool build_clrldi(BuilderContext& ctx);
 
+// Load/store multiple and string
+bool build_lmw(BuilderContext& ctx);
+bool build_lswi(BuilderContext& ctx);
+bool build_stswi(BuilderContext& ctx);
+bool build_lfiwax(BuilderContext& ctx);
+
+// Reciprocal estimates, sign copy and round-to-integer
+bool build_fre(BuilderContext& ctx);
+bool build_frsqrtes(BuilderContext& ctx);
+bool build_fcpsgn(BuilderContext& ctx);
+bool build_frin(BuilderContext& ctx);
+bool build_friz(BuilderContext& ctx);
+bool build_frip(BuilderContext& ctx);
+bool build_frim(BuilderContext& ctx);
+
+// Integer select and population count
+bool build_isel(BuilderContext& ctx);
+bool build_popcntb(BuilderContext& ctx);
+
+// FPSCR bit set/clear and cache/stream hints
+bool build_mtfsb0(BuilderContext& ctx);
+bool build_mtfsb1(BuilderContext& ctx);
+bool build_mcrfs(BuilderContext& ctx);
+bool build_stream_hint_nop(BuilderContext& ctx);
+
 //=============================================================================
 // Vector Builders (AltiVec/VMX instructions)
 //=============================================================================
@@ -487,7 +512,39 @@ bool build_vminsw(BuilderContext& ctx);
 bool build_vminuh(BuilderContext& ctx);
 bool build_vminuw(BuilderContext& ctx);
 bool build_vmaxub(BuilderContext& ctx);
+bool build_vmaxuw(BuilderContext& ctx);
 bool build_vminub(BuilderContext& ctx);
+bool build_vaddcuw(BuilderContext& ctx);
+bool build_vsubcuw(BuilderContext& ctx);
+bool build_vrlb(BuilderContext& ctx);
+
+// Vector integer multiply (even/odd, widening)
+bool build_vmulesb(BuilderContext& ctx);
+bool build_vmulesh(BuilderContext& ctx);
+bool build_vmuleub(BuilderContext& ctx);
+bool build_vmuleuh(BuilderContext& ctx);
+bool build_vmulosb(BuilderContext& ctx);
+bool build_vmulosh(BuilderContext& ctx);
+bool build_vmuloub(BuilderContext& ctx);
+bool build_vmulouh(BuilderContext& ctx);
+
+// Vector multiply-sum and multiply-add
+bool build_vmsumubm(BuilderContext& ctx);
+bool build_vmsummbm(BuilderContext& ctx);
+bool build_vmsumuhm(BuilderContext& ctx);
+bool build_vmsumuhs(BuilderContext& ctx);
+bool build_vmsumshm(BuilderContext& ctx);
+bool build_vmsumshs(BuilderContext& ctx);
+bool build_vmhaddshs(BuilderContext& ctx);
+bool build_vmhraddshs(BuilderContext& ctx);
+bool build_vmladduhm(BuilderContext& ctx);
+
+// Vector sum across
+bool build_vsum4ubs(BuilderContext& ctx);
+bool build_vsum4sbs(BuilderContext& ctx);
+bool build_vsum4shs(BuilderContext& ctx);
+bool build_vsum2sws(BuilderContext& ctx);
+bool build_vsumsws(BuilderContext& ctx);
 
 // Vector average
 bool build_vavgsb(BuilderContext& ctx);
@@ -495,6 +552,7 @@ bool build_vavgsh(BuilderContext& ctx);
 bool build_vavgsw(BuilderContext& ctx);
 bool build_vavgub(BuilderContext& ctx);
 bool build_vavguh(BuilderContext& ctx);
+bool build_vavguw(BuilderContext& ctx);
 
 // Vector logical
 bool build_vand(BuilderContext& ctx);
@@ -574,13 +632,16 @@ bool build_vpkshss(BuilderContext& ctx);
 bool build_vpkshus(BuilderContext& ctx);
 bool build_vpkswss(BuilderContext& ctx);
 bool build_vpkswus(BuilderContext& ctx);
+bool build_vpkpx(BuilderContext& ctx);
 bool build_vpkd3d128(BuilderContext& ctx);
 
 // Vector unpack
 bool build_vupkd3d128(BuilderContext& ctx);
 bool build_vupkhsb(BuilderContext& ctx);
 bool build_vupkhsh(BuilderContext& ctx);
+bool build_vupkhpx(BuilderContext& ctx);
 bool build_vupklsb(BuilderContext& ctx);
 bool build_vupklsh(BuilderContext& ctx);
+bool build_vupklpx(BuilderContext& ctx);
 
 }  // namespace rex::codegen

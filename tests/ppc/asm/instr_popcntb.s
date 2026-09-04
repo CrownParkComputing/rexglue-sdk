@@ -1,0 +1,27 @@
+test_popcntb_1:
+  #_ REGISTER_IN r5 0x1122334455667788
+  popcntb r6, r5
+  blr
+  #_ REGISTER_OUT r5 0x1122334455667788
+  #_ REGISTER_OUT r6 0x202040204040602
+
+test_popcntb_2:
+  #_ REGISTER_IN r5 0xFFFFFFFFFFFFFFFF
+  popcntb r6, r5
+  blr
+  #_ REGISTER_OUT r5 0xFFFFFFFFFFFFFFFF
+  #_ REGISTER_OUT r6 0x808080808080808
+
+test_popcntb_3:
+  #_ REGISTER_IN r5 0x0
+  popcntb r6, r5
+  blr
+  #_ REGISTER_OUT r5 0x0
+  #_ REGISTER_OUT r6 0x0
+
+test_popcntb_4:
+  #_ REGISTER_IN r5 0x102040810204080
+  popcntb r6, r5
+  blr
+  #_ REGISTER_OUT r5 0x102040810204080
+  #_ REGISTER_OUT r6 0x101010101010101

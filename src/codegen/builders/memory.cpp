@@ -653,4 +653,81 @@ bool build_stvx(BuilderContext& ctx) {
   return true;
 }
 
+//=============================================================================
+// Load/Store Multiple and String
+//=============================================================================
+
+bool build_lmw(BuilderContext& ctx) {
+  // EA = (rA == 0 ? 0 : r[rA]) + EXTS(d); load r[rD]..r[31] from EA, EA+4, ...
+  uint32_t rD = ctx.insn.operands[0];
+  int32_t offset = static_cast<int32_t>(ctx.insn.operands[1]);
+  uint32_t rA = ctx.insn.operands[2];
+  if (rA != 0)
+    ctx.println("\t{} = {}.u32 + {};", ctx.ea(), ctx.r(rA), offset);
+  else
+    ctx.println("\t{} = {};", ctx.ea(), offset);
+  for (uint32_t i = rD; i <= 31; ++i)
+    ctx.println("\t{}.u64 = REX_LOAD_U32({} + {});", ctx.r(i), ctx.ea(), (i - rD) * 4);
+  return true;
+}
+
+bool build_lfiwax(BuilderContext& ctx) {
+  // Load a word and sign-extend it into the FPR as an integer, not a float.
+  ctx.print("\t{}.s64 = int32_t(REX_LOAD_U32(", ctx.f(ctx.insn.operands[0]));
+  if (ctx.insn.operands[1] != 0)
+    ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
+  ctx.println("{}.u32));", ctx.r(ctx.insn.operands[2]));
+  return true;
+}
+
+namespace {
+
+/// Byte count for the immediate string forms: NB == 0 means 32 bytes.
+uint32_t string_byte_count(uint32_t nb) {
+  return nb == 0 ? 32 : nb;
+}
+
+}  // namespace
+
+bool build_lswi(BuilderContext& ctx) {
+  // Bytes fill each register from its most significant byte down; registers
+  // wrap around from r31 to r0, and the trailing partial register is zeroed.
+  uint32_t rD = ctx.insn.operands[0];
+  uint32_t rA = ctx.insn.operands[1];
+  uint32_t count = string_byte_count(ctx.insn.operands[2]);
+
+  if (rA != 0)
+    ctx.println("\t{} = {}.u32;", ctx.ea(), ctx.r(rA));
+  else
+    ctx.println("\t{} = 0;", ctx.ea());
+
+  for (uint32_t n = 0; n < count; ++n) {
+    uint32_t reg = (rD + n / 4) % 32;
+    uint32_t shift = 24 - 8 * (n % 4);
+    if (n % 4 == 0)
+      ctx.println("\t{}.u64 = 0;", ctx.r(reg));
+    ctx.println("\t{}.u64 |= uint64_t(REX_LOAD_U8({} + {})) << {};", ctx.r(reg), ctx.ea(), n,
+                shift);
+  }
+  return true;
+}
+
+bool build_stswi(BuilderContext& ctx) {
+  uint32_t rS = ctx.insn.operands[0];
+  uint32_t rA = ctx.insn.operands[1];
+  uint32_t count = string_byte_count(ctx.insn.operands[2]);
+
+  if (rA != 0)
+    ctx.println("\t{} = {}.u32;", ctx.ea(), ctx.r(rA));
+  else
+    ctx.println("\t{} = 0;", ctx.ea());
+
+  for (uint32_t n = 0; n < count; ++n) {
+    uint32_t reg = (rS + n / 4) % 32;
+    uint32_t shift = 24 - 8 * (n % 4);
+    ctx.println("\tREX_STORE_U8({} + {}, uint8_t({}.u32 >> {}));", ctx.ea(), n, ctx.r(reg), shift);
+  }
+  return true;
+}
+
 }  // namespace rex::codegen

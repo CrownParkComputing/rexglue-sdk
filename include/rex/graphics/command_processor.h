@@ -130,6 +130,10 @@ class CommandProcessor {
   bool Restore(::rex::stream::ByteStream* stream);
 
  protected:
+  // Forensic trail of recently executed PM4 headers (see ExecutePacket).
+  uint32_t packet_history_[16] = {};
+  uint32_t packet_history_pos_ = 0;
+
   struct IndexBufferInfo {
     xenos::IndexFormat format = xenos::IndexFormat::kInt16;
     xenos::Endian endianness = xenos::Endian::kNone;

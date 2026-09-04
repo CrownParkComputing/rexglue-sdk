@@ -641,8 +641,26 @@ void CommandProcessor::ExecuteIndirectBuffer(uint32_t ptr, uint32_t count) {
   reader.set_write_offset(count * sizeof(uint32_t));
   do {
     if (!ExecutePacket(&reader)) {
-      // Return up a level if we encounter a bad packet.
-      REXGPU_ERROR("**** INDIRECT RINGBUFFER: Failed to execute packet.");
+      // Return up a level if we encounter a bad packet. Dump the buffer's
+      // identity and leading words: distinguishing "engine wrote garbage"
+      // from "we are reading the wrong memory" needs the physical address
+      // and raw contents in the log.
+      const uint32_t* words = reinterpret_cast<const uint32_t*>(memory_->TranslatePhysical(ptr));
+      uint32_t read_off = uint32_t(count * sizeof(uint32_t) - reader.read_count());
+      REXGPU_ERROR(
+          "**** INDIRECT RINGBUFFER: Failed to execute packet. phys={:08X} count={:08X} "
+          "fail_off={:08X} head: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+          "at_fail: {:08X} {:08X} {:08X} {:08X}",
+          ptr, count, read_off, rex::byte_swap(words[0]), rex::byte_swap(words[1]),
+          rex::byte_swap(words[2]), rex::byte_swap(words[3]), rex::byte_swap(words[4]),
+          rex::byte_swap(words[5]), rex::byte_swap(words[6]), rex::byte_swap(words[7]),
+          rex::byte_swap(words[read_off / 4]), rex::byte_swap(words[read_off / 4 + 1]),
+          rex::byte_swap(words[read_off / 4 + 2]), rex::byte_swap(words[read_off / 4 + 3]));
+      std::string trail;
+      for (uint32_t i = 0; i < 16; i++) {
+        trail += fmt::format("{:08X} ", packet_history_[(packet_history_pos_ + i) & 15]);
+      }
+      REXGPU_ERROR("**** packet trail (oldest first): {}", trail);
       assert_always();
       break;
     }
@@ -665,6 +683,10 @@ void CommandProcessor::ExecutePacket(uint32_t ptr, uint32_t count) {
 bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
   const uint32_t packet = reader->ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
+  // Rolling forensic trail: which packets led here. Dumped when an indirect
+  // buffer derails (observed executing vertex data as packets on
+  // Split/Second) - the last legitimate packets identify the writer at fault.
+  packet_history_[packet_history_pos_++ & 15] = packet;
   if (packet == 0) {
     return true;
   }
@@ -886,8 +908,22 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       break;
   }
 
-  assert_true(reader->read_offset() ==
-              (data_start_offset + (count * sizeof(uint32_t))) % reader->capacity());
+  // Force the reader to the packet's declared end. A handler that consumes
+  // the wrong number of words (a stubbed or partially-implemented opcode)
+  // would otherwise desync the stream and make the next data word decode as a
+  // bogus packet - the "INDIRECT RINGBUFFER: Failed to execute packet" garbage
+  // seen on Split/Second. The count field is authoritative; honor it
+  // unconditionally, as upstream Xenia does. (Was assert-only, which compiles
+  // out in release.)
+  memory::ring_size_t expected_offset =
+      (data_start_offset + (count * sizeof(uint32_t))) % reader->capacity();
+  if (reader->read_offset() != expected_offset) {
+    REXGPU_WARN("Type-3 opcode {:#x} consumed {} words, expected {}; resyncing", opcode,
+                (reader->read_offset() + reader->capacity() - data_start_offset) %
+                    reader->capacity() / sizeof(uint32_t),
+                count);
+    reader->set_read_offset(expected_offset);
+  }
   return result;
 }
 
@@ -971,6 +1007,7 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
   uint32_t list_length = reader->ReadAndSwap<uint32_t>();
   assert_zero(list_length & ~0xFFFFF);
   list_length &= 0xFFFFF;
+  REXGPU_DEBUG("INDIRECT_BUFFER ptr={:08X} len={:05X}", list_ptr, list_length);
   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
   return true;
 }

@@ -1928,7 +1928,8 @@ VkImageView VulkanTextureCache::VulkanTexture::GetView(bool is_signed, uint32_t 
         view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
       } else {
         view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view_create_info.subresourceRange.layerCount = 1;
+        // One layer per depth slice of the 2D-array-compatible 3D image.
+        view_create_info.subresourceRange.layerCount = key().GetDepthOrArraySize();
       }
       break;
   }
@@ -1971,8 +1972,15 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
     VkImageCreateInfo image_create_info = {};
     image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_create_info.pNext = nullptr;
-    image_create_info.flags = 0;
-    image_create_info.imageType = VK_IMAGE_TYPE_2D;
+    // A true 3D image whose slices are exposed to the shader as 2D array
+    // layers. Keeping the image (and the texture key) fully 3D means the
+    // loader takes the exact path already proven for the native texture -
+    // 3D guest layout, 3D tiled addressing, all depth slices - where the
+    // previous single-slice 2D wrapper uploaded only Z=0 and crushed any
+    // volume texture sampled through a 2D fetch (colour-grade LUTs lost
+    // their whole blue axis).
+    image_create_info.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+    image_create_info.imageType = VK_IMAGE_TYPE_3D;
     image_create_info.format = wrapper_format;
     image_create_info.extent.width = key().GetWidth();
     image_create_info.extent.height = key().GetHeight();
@@ -1983,7 +1991,7 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
       image_create_info.extent.width *= texture_cache().draw_resolution_scale_x();
       image_create_info.extent.height *= texture_cache().draw_resolution_scale_y();
     }
-    image_create_info.extent.depth = 1;
+    image_create_info.extent.depth = key().GetDepthOrArraySize();
     image_create_info.mipLevels = 1;
     image_create_info.arrayLayers = 1;
     image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2005,12 +2013,12 @@ VkImageView VulkanTextureCache::VulkanTexture::GetOrCreate3DAs2DImageView(bool i
       return VK_NULL_HANDLE;
     }
 
+    // Full-depth 3D key: only the mip count differs from the native texture,
+    // so guest layout and untiling are identical to the proven 3D load path.
     TextureKey key_2d = key();
-    key_2d.depth_or_array_size_minus_1 = 0;
     key_2d.mip_max_level = 0;
     texture_3d_as_2d_.reset(
         new VulkanTexture(vulkan_texture_cache, key_2d, image_2d, allocation_2d, false));
-    texture_3d_as_2d_->SetForceLoad3DTiling(true);
 
     if (!vulkan_texture_cache.LoadTextureData(*texture_3d_as_2d_)) {
       REXGPU_ERROR("VulkanTextureCache: Failed to load 3D-as-2D wrapper data");

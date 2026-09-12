@@ -32,7 +32,9 @@ namespace rex::kernel::xboxkrnl {
 // the one that describes what the thread is actually stuck on.
 class GuestWaitScope {
  public:
-  GuestWaitScope(const char* api, uint32_t target);
+  // signal_target is the object the call signals first, for the
+  // signal-and-wait handshake; 0 when the API only waits.
+  GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target = 0);
   ~GuestWaitScope();
 
   GuestWaitScope(const GuestWaitScope&) = delete;
@@ -41,5 +43,10 @@ class GuestWaitScope {
  private:
   bool recorded_ = false;
 };
+
+// Counts a guest signal of a kernel object, so the watchdog can say whether the
+// thing a thread waits on is ever signalled at all. Cheap and ignored unless
+// the watchdog is enabled.
+void RecordGuestSignal(uint32_t handle);
 
 }  // namespace rex::kernel::xboxkrnl

@@ -20,6 +20,8 @@
 #include <thread>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <pthread.h>
@@ -39,12 +41,19 @@ namespace {
 struct WaitRecord {
   const char* api;
   uint32_t target;
+  uint32_t signal_target;
   std::chrono::steady_clock::time_point started;
   std::string thread_name;
 };
 
+struct SignalRecord {
+  uint64_t count = 0;
+  std::chrono::steady_clock::time_point last;
+};
+
 std::mutex g_waits_lock;
 std::map<uint64_t, WaitRecord> g_waits;  // keyed by host thread id
+std::map<uint32_t, SignalRecord> g_signals;  // guest handle -> signal history
 std::atomic<bool> g_watchdog_started{false};
 
 void WatchdogMain() {
@@ -77,9 +86,28 @@ void WatchdogMain() {
               [](const auto& a, const auto& b) { return a.first > b.first; });
     REXLOG_WARN("[GUESTWAIT] {} guest wait(s) outstanding:", outstanding.size());
     for (const auto& [seconds, record] : outstanding) {
-      REXLOG_WARN("[GUESTWAIT]   {:<24} {} on {:#010x} for {:.1f} s",
-                  record.thread_name.empty() ? "?" : record.thread_name, record.api, record.target,
-                  seconds);
+      uint64_t signals = 0;
+      double since_signal = -1.0;
+      {
+        std::lock_guard<std::mutex> lock(g_waits_lock);
+        auto it = g_signals.find(record.target);
+        if (it != g_signals.end()) {
+          signals = it->second.count;
+          since_signal = std::chrono::duration<double>(now - it->second.last).count();
+        }
+      }
+      // The interesting case is a signal that arrived DURING the wait: the
+      // object was signalled and the waiter did not wake, which is a runtime
+      // bug rather than a guest handshake nobody completes.
+      const bool signalled_during_wait = signals && since_signal >= 0.0 && since_signal < seconds;
+      REXLOG_WARN(
+          "[GUESTWAIT]   {:<24} {} on {:#010x}{} for {:.1f} s (signalled {} times{}{})",
+          record.thread_name.empty() ? "?" : record.thread_name, record.api, record.target,
+          record.signal_target ? fmt::format(", signalling {:#010x}", record.signal_target)
+                               : std::string(),
+          seconds, signals,
+          signals ? fmt::format(", last {:.1f} s ago", since_signal) : std::string(),
+          signalled_during_wait ? " <- SIGNALLED WHILE WAITING" : "");
     }
   }
 }
@@ -99,7 +127,7 @@ void EnsureWatchdog() {
 
 }  // namespace
 
-GuestWaitScope::GuestWaitScope(const char* api, uint32_t target) {
+GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target) {
   if (REXCVAR_GET(guest_wait_report_seconds) == 0) {
     return;
   }
@@ -120,9 +148,19 @@ GuestWaitScope::GuestWaitScope(const char* api, uint32_t target) {
   if (g_waits.find(thread_id) != g_waits.end()) {
     return;
   }
-  g_waits.emplace(thread_id,
-                  WaitRecord{api, target, std::chrono::steady_clock::now(), std::move(name)});
+  g_waits.emplace(thread_id, WaitRecord{api, target, signal_target,
+                                        std::chrono::steady_clock::now(), std::move(name)});
   recorded_ = true;
+}
+
+void RecordGuestSignal(uint32_t handle) {
+  if (REXCVAR_GET(guest_wait_report_seconds) == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_waits_lock);
+  auto& record = g_signals[handle];
+  ++record.count;
+  record.last = std::chrono::steady_clock::now();
 }
 
 GuestWaitScope::~GuestWaitScope() {

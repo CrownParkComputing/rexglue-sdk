@@ -545,10 +545,12 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
 }
 
 u32 NtSetEvent_entry(u32 handle, mapped_u32 previous_state_ptr) {
+  RecordGuestSignal(handle);
   return xeNtSetEvent(handle, previous_state_ptr);
 }
 
 u32 NtPulseEvent_entry(u32 handle, mapped_u32 previous_state_ptr) {
+  RecordGuestSignal(handle);
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
@@ -656,6 +658,7 @@ u32 NtCreateSemaphore_entry(mapped_u32 handle_ptr, mapped_void obj_attributes_pt
 }
 
 u32 NtReleaseSemaphore_entry(u32 sem_handle, u32 release_count, mapped_u32 previous_count_ptr) {
+  RecordGuestSignal(sem_handle);
   X_STATUS result = X_STATUS_SUCCESS;
   int32_t previous_count = 0;
 
@@ -708,6 +711,7 @@ u32 NtCreateMutant_entry(mapped_u32 handle_out, ppc_ptr_t<X_OBJECT_ATTRIBUTES> o
 }
 
 u32 NtReleaseMutant_entry(u32 mutant_handle, u32 unknown) {
+  RecordGuestSignal(mutant_handle);
   // This doesn't seem to be supported.
   // int32_t previous_count_ptr = SHIM_GET_ARG_32(2);
 
@@ -943,7 +947,8 @@ u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u
   auto wait_object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(wait_handle);
   if (signal_object && wait_object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-    GuestWaitScope wait_scope("NtSignalAndWaitForSingleObjectEx", wait_handle);
+    RecordGuestSignal(signal_handle);
+    GuestWaitScope wait_scope("NtSignalAndWaitForSingleObjectEx", wait_handle, signal_handle);
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3, 1, alertable,
                                     timeout_ptr ? &timeout : nullptr);
   } else {

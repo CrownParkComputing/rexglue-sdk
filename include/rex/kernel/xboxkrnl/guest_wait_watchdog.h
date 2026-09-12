@@ -1,0 +1,45 @@
+/**
+ * @file        include/rex/kernel/xboxkrnl/guest_wait_watchdog.h
+ * @brief       Reports what the guest is waiting on while it is still waiting.
+ *
+ *              A title that has stopped making progress is almost always parked
+ *              in a kernel wait, and the log says nothing: a wait that never
+ *              returns can never be reported by timing it after the fact. This
+ *              records waits as they START and a watchdog prints every one that
+ *              is still outstanding, so a stalled bring-up says
+ *
+ *                [GUESTWAIT] Main XThread: NtSignalAndWaitForSingleObjectEx on
+ *                            0x00000114 for 42.0 s (lr 82546924)
+ *
+ *              instead of nothing at all. Off unless
+ *              guest_wait_report_seconds is set.
+ *
+ * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
+ *              All rights reserved.
+ *
+ * @license     BSD 3-Clause License
+ *              See LICENSE file in the project root for full license text.
+ */
+
+#pragma once
+
+#include <cstdint>
+
+namespace rex::kernel::xboxkrnl {
+
+// Records one in-flight guest wait for the lifetime of the scope. Nested waits
+// on one thread (a wait entered from an APC, say) keep the outermost, which is
+// the one that describes what the thread is actually stuck on.
+class GuestWaitScope {
+ public:
+  GuestWaitScope(const char* api, uint32_t target);
+  ~GuestWaitScope();
+
+  GuestWaitScope(const GuestWaitScope&) = delete;
+  GuestWaitScope& operator=(const GuestWaitScope&) = delete;
+
+ private:
+  bool recorded_ = false;
+};
+
+}  // namespace rex::kernel::xboxkrnl

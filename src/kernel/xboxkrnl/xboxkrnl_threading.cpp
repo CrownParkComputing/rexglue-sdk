@@ -20,6 +20,7 @@
 
 #include <rex/chrono/clock.h>
 #include <rex/dbg.h>
+#include <rex/kernel/xboxkrnl/guest_wait_watchdog.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/logging.h>
@@ -844,6 +845,7 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
   // object_ptr.guest_address(), (uint32_t)wait_reason,
   //(uint32_t)processor_mode, (uint32_t)alertable,
   // timeout_ptr ? (int64_t)timeout : -1);
+  GuestWaitScope wait_scope("KeWaitForSingleObject", object_ptr.guest_address());
   auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode, alertable,
                                         timeout_ptr ? &timeout : nullptr);
   REXKRNL_NOISY_TRACE("[KeWaitForSingleObject] obj={:#x} timeout={} -> {:#x}",
@@ -852,6 +854,7 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
   return result;
 }
 
+
 u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertable,
                                   mapped_u64 timeout_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
@@ -859,6 +862,7 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    GuestWaitScope wait_scope("NtWaitForSingleObjectEx", object_handle);
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
@@ -926,6 +930,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
 u32 NtWaitForMultipleObjectsEx_entry(u32 count, mapped_u32 handles, u32 wait_type, u32 wait_mode,
                                      u32 alertable, mapped_u64 timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  GuestWaitScope wait_scope("NtWaitForMultipleObjectsEx", count ? uint32_t(*handles) : 0u);
   return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode, alertable,
                                       timeout_ptr ? &timeout : nullptr);
 }
@@ -938,6 +943,7 @@ u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u
   auto wait_object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(wait_handle);
   if (signal_object && wait_object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    GuestWaitScope wait_scope("NtSignalAndWaitForSingleObjectEx", wait_handle);
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3, 1, alertable,
                                     timeout_ptr ? &timeout : nullptr);
   } else {

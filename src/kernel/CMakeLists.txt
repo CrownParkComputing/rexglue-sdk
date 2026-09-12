@@ -49,6 +49,7 @@ set(REXKERNEL_SOURCES
     xboxkrnl/xboxkrnl_ob.cpp
     xboxkrnl/xboxkrnl_rtl.cpp
     xboxkrnl/xboxkrnl_strings.cpp
+    xboxkrnl/guest_wait_watchdog.cpp
     xboxkrnl/xboxkrnl_threading.cpp
     # xboxkrnl/xboxkrnl_usbcam.cpp  # TODO: lol eventually.
     xboxkrnl/xboxkrnl_video.cpp

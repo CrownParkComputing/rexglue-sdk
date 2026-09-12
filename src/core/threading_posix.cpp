@@ -267,6 +267,79 @@ static sem_t* RexCreateAnonymousSemaphore() {
 }
 #endif  // __APPLE__
 
+// WaitMultiple used to poll: it try-locked every handle, tested them, dropped
+// the locks and slept for a millisecond, forever. That cost about a quarter of
+// all cycles in a running game, because a guest thread can sit in a multi-handle
+// wait for whole frames. A waiter now registers itself with each handle it is
+// waiting on and blocks; a handle wakes only the waiters registered with it, so
+// unrelated traffic elsewhere in the process does not wake anybody. The
+// registration is made before the handles are tested, so a signal landing
+// between the test and the block sets the flag rather than being lost, and a
+// bounded fallback timeout keeps the wait live if some future state change
+// forgets to notify.
+namespace {
+
+struct MultiWaiter {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool notified = false;
+
+  void Notify() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      notified = true;
+    }
+    cv.notify_one();
+  }
+};
+
+constexpr std::chrono::milliseconds kMultiWaitFallbackInterval{50};
+
+// Opt-in instrumentation: REX_WAITMULTI_STATS=1 prints multi-wait traffic once
+// a second, so a hot waiter can be characterised without a debugger. Off by
+// default; this is how the polling cost above was found and measured.
+struct MultiWaitStats {
+  std::atomic<uint64_t> calls{0};
+  std::atomic<uint64_t> iterations{0};
+  std::atomic<uint64_t> lock_retries{0};
+  std::atomic<uint64_t> short_timeout_calls{0};
+  std::atomic<uint64_t> blocks{0};
+};
+MultiWaitStats g_multi_wait_stats;
+std::atomic<int> g_multi_wait_stats_on{-1};
+
+bool MultiWaitStatsEnabled() {
+  int enabled = g_multi_wait_stats_on.load(std::memory_order_relaxed);
+  if (enabled < 0) {
+    const char* value = getenv("REX_WAITMULTI_STATS");
+    enabled = (value && *value == '1') ? 1 : 0;
+    g_multi_wait_stats_on.store(enabled, std::memory_order_relaxed);
+  }
+  return enabled == 1;
+}
+
+void MultiWaitStatsTick() {
+  static std::atomic<int64_t> next_report{0};
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  auto now_s = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+  int64_t expected = next_report.load(std::memory_order_relaxed);
+  if (now_s < expected) {
+    return;
+  }
+  if (!next_report.compare_exchange_strong(expected, now_s + 1)) {
+    return;
+  }
+  fprintf(stderr,
+          "WAITMULTI calls=%llu iters=%llu lock_retries=%llu short_timeout=%llu blocks=%llu\n",
+          (unsigned long long)g_multi_wait_stats.calls.exchange(0),
+          (unsigned long long)g_multi_wait_stats.iterations.exchange(0),
+          (unsigned long long)g_multi_wait_stats.lock_retries.exchange(0),
+          (unsigned long long)g_multi_wait_stats.short_timeout_calls.exchange(0),
+          (unsigned long long)g_multi_wait_stats.blocks.exchange(0));
+}
+
+}  // namespace
+
 class PosixConditionBase {
  public:
   PosixConditionBase() {
@@ -286,6 +359,30 @@ class PosixConditionBase {
 
   virtual ~PosixConditionBase() = default;
   virtual bool Signal() = 0;
+
+  // Wakes this handle's own waiters and any WaitMultiple watching it. Every
+  // state change that can make a handle signaled must go through this.
+  void NotifyAll() {
+    cond_.notify_all();
+    NotifyMultiWaiters();
+  }
+
+  void AddMultiWaiter(MultiWaiter* waiter) {
+    std::lock_guard<std::mutex> lock(multi_waiters_mutex_);
+    multi_waiters_.push_back(waiter);
+    multi_waiter_count_.store(multi_waiters_.size(), std::memory_order_release);
+  }
+
+  void RemoveMultiWaiter(MultiWaiter* waiter) {
+    std::lock_guard<std::mutex> lock(multi_waiters_mutex_);
+    for (auto it = multi_waiters_.begin(); it != multi_waiters_.end(); ++it) {
+      if (*it == waiter) {
+        multi_waiters_.erase(it);
+        break;
+      }
+    }
+    multi_waiter_count_.store(multi_waiters_.size(), std::memory_order_release);
+  }
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
@@ -335,7 +432,42 @@ class PosixConditionBase {
                         ? std::chrono::steady_clock::time_point::max()
                         : start_time + timeout;
 
+    const bool stats = MultiWaitStatsEnabled();
+    if (stats) {
+      g_multi_wait_stats.calls.fetch_add(1, std::memory_order_relaxed);
+      if (timeout != std::chrono::milliseconds::max() &&
+          timeout <= std::chrono::milliseconds(2)) {
+        g_multi_wait_stats.short_timeout_calls.fetch_add(1, std::memory_order_relaxed);
+      }
+      MultiWaitStatsTick();
+    }
+
+    MultiWaiter waiter;
+    for (auto* handle : handles) {
+      handle->AddMultiWaiter(&waiter);
+    }
+    struct Unregister {
+      std::vector<PosixConditionBase*>& handles;
+      MultiWaiter* waiter;
+      ~Unregister() {
+        for (auto* handle : handles) {
+          handle->RemoveMultiWaiter(waiter);
+        }
+      }
+    } unregister{handles, &waiter};
+
     while (true) {
+      if (stats) {
+        g_multi_wait_stats.iterations.fetch_add(1, std::memory_order_relaxed);
+      }
+
+      // Cleared before the handles are tested, so a signal arriving after the
+      // test but before the block below is still seen by the block.
+      {
+        std::lock_guard<std::mutex> lock(waiter.mutex);
+        waiter.notified = false;
+      }
+
       size_t first_signaled = std::numeric_limits<size_t>::max();
       bool condition_met = false;
       bool all_locked = true;
@@ -367,6 +499,9 @@ class PosixConditionBase {
 
       if (!all_locked) {
         locks.clear();
+        if (stats) {
+          g_multi_wait_stats.lock_retries.fetch_add(1, std::memory_order_relaxed);
+        }
         std::this_thread::yield();
         continue;
       }
@@ -411,13 +546,19 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      if (timeout == std::chrono::milliseconds::max()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
+      // Block until the deadline itself, never a rounded-down duration: the
+      // old code cast the remaining time to whole milliseconds, so a wait with
+      // less than a millisecond left blocked for zero and spun to its deadline.
+      // That was most of the cost of this function.
+      auto deadline = now + kMultiWaitFallbackInterval;
+      if (end_time < deadline) {
+        deadline = end_time;
       }
+      if (stats) {
+        g_multi_wait_stats.blocks.fetch_add(1, std::memory_order_relaxed);
+      }
+      std::unique_lock<std::mutex> wait_lock(waiter.mutex);
+      waiter.cv.wait_until(wait_lock, deadline, [&waiter] { return waiter.notified; });
     }
   }
 
@@ -426,10 +567,26 @@ class PosixConditionBase {
   }
 
  protected:
+  // Called with mutex_ held by every signalling path. Takes only the waiter
+  // registry lock and then each waiter's own lock, so the order is always
+  // handle -> registry -> waiter and never the reverse.
+  void NotifyMultiWaiters() {
+    if (multi_waiter_count_.load(std::memory_order_acquire) == 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(multi_waiters_mutex_);
+    for (auto* waiter : multi_waiters_) {
+      waiter->Notify();
+    }
+  }
+
   inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
   std::condition_variable cond_;
   std::mutex mutex_;
+  std::mutex multi_waiters_mutex_;
+  std::vector<MultiWaiter*> multi_waiters_;
+  std::atomic<size_t> multi_waiter_count_{0};
 };
 
 // There really is no native POSIX handle for a single wait/signal construct
@@ -449,7 +606,7 @@ class PosixCondition<Event> : public PosixConditionBase {
   bool Signal() override {
     auto lock = std::unique_lock<std::mutex>(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -486,7 +643,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
       *out_previous_count = count_;
     }
     count_ += release_count;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -494,7 +651,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
   inline bool signaled() const override { return count_ > 0; }
   inline void post_execution() override {
     count_--;
-    cond_.notify_all();
+    NotifyAll();
   }
   uint32_t count_;
   const uint32_t maximum_count_;
@@ -518,7 +675,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
-        cond_.notify_all();
+        NotifyAll();
       }
       return true;
     }
@@ -550,7 +707,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
   bool Signal() override {
     std::lock_guard<std::mutex> lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -978,7 +1135,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
       exit_code_ = exit_code;
       signaled_ = true;
-      cond_.notify_all();
+      NotifyAll();
     }
     if (is_current_thread) {
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1448,7 +1605,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock<std::mutex> lock(thread->handle_.mutex_);
     thread->handle_.exit_code_ = 0;
     thread->handle_.signaled_ = true;
-    thread->handle_.cond_.notify_all();
+    thread->handle_.NotifyAll();
   }
 
   current_thread_ = nullptr;

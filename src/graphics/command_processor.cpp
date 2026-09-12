@@ -35,6 +35,9 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
+REXCVAR_DEFINE_BOOL(gpu_skip_tile_replay, false, "GPU",
+                    "Execute each indirect buffer only once per frame, suppressing the guest's\n"
+                    "per-EDRAM-tile replay (diagnostic).");
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
@@ -60,8 +63,13 @@ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
-                    "Enable CPU readback of shader memexport writes for guest memory "
-                    "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")
+                    "Copy shader memexport results back into guest RAM for coherency. "
+                    "NOTE: exported data already reaches later vertex fetches through GPU "
+                    "shared memory, and upstream Xenia has no such feature. Split/Second "
+                    "must run with this OFF (see its config/splitsecond.toml): its engine "
+                    "uploads streamed geometry with memexport draws, and the readback "
+                    "overwrote megabytes of the vertex pool. Left on by default only "
+                    "because shipped titles were tuned with it on")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
@@ -994,6 +1002,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
+  if (REXCVAR_GET(gpu_skip_tile_replay) && !executed_indirect_buffers_.empty()) {
+    REXGPU_DEBUG("tile-replay filter: {} distinct IBs, {} replays skipped",
+                 executed_indirect_buffers_.size(), skipped_tile_replays_);
+    executed_indirect_buffers_.clear();
+    skipped_tile_replays_ = 0;
+  }
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
   ++counter_;
@@ -1008,6 +1022,17 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
   assert_zero(list_length & ~0xFFFFF);
   list_length &= 0xFFFFF;
   REXGPU_DEBUG("INDIRECT_BUFFER ptr={:08X} len={:05X}", list_ptr, list_length);
+  // Predicated-tiling replay suppression (diagnostic): the guest re-submits the
+  // same recorded indirect buffer once per EDRAM tile. A host renderer has no
+  // EDRAM and no reason to tile; with this on, each distinct buffer executes
+  // once per frame. Cleared in IssueSwap via ResetTileReplayFilter().
+  if (REXCVAR_GET(gpu_skip_tile_replay)) {
+    uint64_t key = (uint64_t(list_ptr) << 20) | list_length;
+    if (!executed_indirect_buffers_.insert(key).second) {
+      ++skipped_tile_replays_;
+      return true;
+    }
+  }
   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
   return true;
 }

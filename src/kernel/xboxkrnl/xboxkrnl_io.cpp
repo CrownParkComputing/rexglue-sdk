@@ -29,6 +29,14 @@
 #include <rex/system/xtypes.h>
 #include <rex/thread/mutex.h>
 
+#include <chrono>
+#include <thread>
+#include <rex/cvar.h>
+
+REXCVAR_DEFINE_UINT32(io_async_read_delay_us, 0, "Kernel",
+                      "Artificial latency (microseconds) applied to asynchronous NtReadFile calls "
+                      "before completion, to mimic optical-drive timing (0 = off)");
+
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
 
@@ -189,12 +197,16 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
                      mapped_void buffer, u32 buffer_length, mapped_u64 byte_offset_ptr) {
   uint64_t byte_offset = byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : 0;
   const bool apc_requested = (static_cast<uint32_t>(apc_routine_ptr) & ~1u) != 0;
-  REXKRNL_IMPORT_TRACE(
-      "NtReadFile",
-      "handle={:#x} event={:#x} apc={:#x} apc_ctx={:#x} iosb={:#x} buf={:#x} len={:#x} offset={}",
-      (uint32_t)file_handle, (uint32_t)event_handle, apc_routine_ptr.guest_address(),
-      apc_context.guest_address(), io_status_block.guest_address(), buffer.guest_address(),
-      (uint32_t)buffer_length, byte_offset_ptr ? (int64_t)byte_offset : -1);
+  {
+    auto cur = XThread::GetCurrentThread();
+    uint32_t caller_lr = cur ? static_cast<uint32_t>(cur->thread_state()->context()->lr) : 0;
+    REXKRNL_IMPORT_TRACE(
+        "NtReadFile",
+        "handle={:#x} event={:#x} apc={:#x} apc_ctx={:#x} iosb={:#x} buf={:#x} len={:#x} offset={} lr={:#x}",
+        (uint32_t)file_handle, (uint32_t)event_handle, apc_routine_ptr.guest_address(),
+        apc_context.guest_address(), io_status_block.guest_address(), buffer.guest_address(),
+        (uint32_t)buffer_length, byte_offset_ptr ? (int64_t)byte_offset : -1, caller_lr);
+  }
   X_STATUS result = X_STATUS_SUCCESS;
   bool apc_queued = false;
 
@@ -212,6 +224,12 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
   if (XSUCCEEDED(result)) {
     if (true || file->is_synchronous()) {
       // Synchronous.
+      {
+        uint32_t delay_us = REXCVAR_GET(io_async_read_delay_us);
+        if (delay_us && !file->is_synchronous()) {
+          std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+        }
+      }
       uint32_t bytes_read = 0;
       result = file->Read(buffer.guest_address(), buffer_length,
                           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,

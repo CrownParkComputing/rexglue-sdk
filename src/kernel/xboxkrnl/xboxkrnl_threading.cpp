@@ -846,7 +846,9 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
   // timeout_ptr ? (int64_t)timeout : -1);
   auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode, alertable,
                                         timeout_ptr ? &timeout : nullptr);
-  // REXKRNL_IMPORT_RESULT("KeWaitForSingleObject", "{:#x}", result);
+  REXKRNL_NOISY_TRACE("[KeWaitForSingleObject] obj={:#x} timeout={} -> {:#x}",
+                      object_ptr.guest_address(), timeout_ptr ? (int64_t)timeout : (int64_t)1,
+                      (uint32_t)result);
   return result;
 }
 
@@ -861,8 +863,12 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
     }
+    REXKRNL_NOISY_TRACE("[NtWaitForSingleObjectEx] handle={:#x} type={} timeout={} -> {:#x}",
+                        (uint32_t)object_handle, (int)object->type(),
+                        timeout_ptr ? (int64_t)timeout : (int64_t)1, (uint32_t)result);
   } else {
     result = X_STATUS_INVALID_HANDLE;
+    REXKRNL_NOISY_TRACE("[NtWaitForSingleObjectEx] handle={:#x} INVALID", (uint32_t)object_handle);
   }
 
   return result;

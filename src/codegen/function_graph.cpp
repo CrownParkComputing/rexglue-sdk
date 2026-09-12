@@ -753,6 +753,36 @@ FunctionNode* FunctionGraph::addFunction(uint32_t base, uint32_t size, FunctionA
                      AuthorityName(existing->authority()), AuthorityName(authority));
   }
 
+  // Guard: reject a low-authority "entry" that lands strictly INSIDE an
+  // existing authoritative (PDATA/CONFIG) function's declared extent. Such an
+  // address is not a real function - it is an internal branch/label target that
+  // the aggressive call-target/vtable/pointer scans mis-promoted to an entry.
+  // Creating an overlapping function here fragments the real one: its blocks
+  // get truncated at this spurious entry (discover_blocks stops at known
+  // callables) and getFunctionContaining() then returns the fragment, so
+  // intra-function branches past the split can no longer resolve and emit a
+  // spurious REX_FATAL (observed in Split/Second's engine around 0x88CF5268).
+  // Absorb it as a label of the parent instead. Authoritative additions
+  // (PDATA/CONFIG/IMPORT/HELPER/PDATA-derived) are never absorbed.
+  if (authority == FunctionAuthority::DISCOVERED || authority == FunctionAuthority::VTABLE ||
+      authority == FunctionAuthority::GAP_FILL) {
+    if (FunctionNode* parent = getFunctionContaining(base)) {
+      // CONFIG only, NOT PDATA: a PDATA function's declared extent can legitimately
+      // enclose a real, separately-called sub-function (shared code / SEH funclet);
+      // absorbing those would drop a called symbol (undefined-symbol link error,
+      // e.g. sub_889003AC). CONFIG extents are hand-declared for exactly the
+      // fragmented-function case, and their interior entries are verified spurious.
+      if (parent->base() != base && parent->size() > 0 &&
+          parent->authority() == FunctionAuthority::CONFIG) {
+        REXCODEGEN_DEBUG(
+            "FunctionGraph: absorbing spurious entry 0x{:08X} ({}) as label of {} [0x{:08X}+0x{:X}]",
+            base, AuthorityName(authority), parent->name(), parent->base(), parent->size());
+        parent->addLabel(base);
+        return parent;
+      }
+    }
+  }
+
   // Create new node
   auto node = std::make_unique<FunctionNode>(base, size, authority);
   FunctionNode* nodePtr = node.get();
@@ -1274,8 +1304,17 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
   }
 
   // Case 4: Target is inside caller's function -> InternalLabel
-  // For bl, this would be a rare PIC code pattern
-  if (callerFn && callerFn->containsAddress(target)) {
+  // For bl, this would be a rare PIC code pattern.
+  //
+  // containsAddress tests the discovered block ranges, but a function with
+  // out-of-line blocks (multi-return / hoisted switch arms) can have a branch
+  // target that sits in a GAP between two discovered blocks yet is still a
+  // real label of this function - it is emitted as loc_XXXX and reached by
+  // other branches. isLabel() covers that case: a goto to an emitted label is
+  // always valid, so classify it InternalLabel rather than Unknown (which
+  // would emit a spurious REX_FATAL on a live intra-function branch - observed
+  // in Split/Second's engine at 0x88CF5268).
+  if (callerFn && (callerFn->containsAddress(target) || callerFn->isLabel(target))) {
     return TargetKind::InternalLabel;
   }
 

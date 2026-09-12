@@ -37,6 +37,8 @@
 #include <rex/graphics/vulkan/pipeline_cache.h>
 #include <rex/graphics/vulkan/render_target_cache.h>
 #include <rex/graphics/vulkan/shader.h>
+#include <cmath>
+#include <unordered_set>
 #include <filesystem>
 #include <fstream>
 
@@ -68,6 +70,27 @@ REXCVAR_DEFINE_UINT32(frame_dump_interval, 30, "GPU",
 REXCVAR_DEFINE_UINT32(frame_dump_count, 8, "GPU",
                       "Stop after dumping this many frames (0 = unlimited)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_UINT32(gpu_draw_trace_start, 0, "GPU",
+                      "Swap index at which to start per-draw tracing (0 = off)");
+REXCVAR_DEFINE_UINT32(gpu_draw_trace_frames, 1, "GPU",
+                      "Number of swaps to trace once gpu_draw_trace_start is reached");
+REXCVAR_DEFINE_STRING(gpu_draw_trace_trigger_file, "", "GPU",
+                      "If this file exists at swap time, start per-draw tracing for "
+                      "gpu_draw_trace_frames swaps and delete the file");
+REXCVAR_DEFINE_BOOL(gpu_log_memexport, false, "GPU",
+                    "Log distinct memexport destination ranges (diagnostic).");
+REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
+                    "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
+REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
+                      "Percentage of sampled vertices that must be non-finite to drop a draw.");
+static uint32_t g_nonfinite_draws_skipped = 0;
+static std::unordered_set<uint64_t> g_corrupt_vb_logged;
+static std::unordered_set<uint64_t> g_memexport_logged;
+static uint32_t g_draw_trace_swap_count = 0;
+static uint32_t g_draw_trace_draw_index = 0;
+static uint32_t g_draw_trace_forced_start = 0;
+REXCVAR_DEFINE_STRING(gpu_draw_trace_dump_dir, "", "GPU",
+                      "If set, traced draws also write their vertex/index buffers here");
 
 REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                     "When async shader compilation is enabled, skip presenting frames that "
@@ -621,6 +644,11 @@ void VulkanCommandProcessor::ClearCaches() {
 void VulkanCommandProcessor::InvalidateGpuMemory() {
   if (shared_memory_) {
     shared_memory_->InvalidateAllPages();
+  }
+  if (primitive_processor_) {
+    // Upstream also drops cached converted index buffers on explicit
+    // invalidation (TracePlaybackWroteMemory does the same).
+    primitive_processor_->MemoryInvalidationCallback(0, 0x20000000, true);
   }
 }
 
@@ -2286,6 +2314,22 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
+  ++g_draw_trace_swap_count;
+  if (g_nonfinite_draws_skipped) {
+    REXGPU_WARN("[NONFINITE] swap {}: skipped {} draws", g_draw_trace_swap_count, g_nonfinite_draws_skipped);
+    g_nonfinite_draws_skipped = 0;
+    g_corrupt_vb_logged.clear();
+    g_memexport_logged.clear();
+  }
+  g_draw_trace_draw_index = 0;
+  {
+    const std::string& trig = REXCVAR_GET(gpu_draw_trace_trigger_file);
+    if (!trig.empty() && std::filesystem::exists(trig)) {
+      std::filesystem::remove(trig);
+      g_draw_trace_forced_start = g_draw_trace_swap_count;
+      REXGPU_WARN("[DRAWTRACE] triggered at swap {}", g_draw_trace_swap_count);
+    }
+  }
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
 
@@ -4049,9 +4093,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       vfetch_bits_remaining &= ~(uint32_t(1) << j);
       uint32_t vfetch_index = i * 32 + j;
       uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
-      if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
-        continue;
-      }
+      // Always request the range (upstream Xenia behaviour): SharedMemory's
+      // page-valid tracking makes this cheap when nothing changed, and it is
+      // the only path that re-uploads CPU-rewritten vertex data whose fetch
+      // constant (address/size) is unchanged - e.g. per-frame scratch pools.
       xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
       switch (vfetch_constant.type) {
         case xenos::FetchConstantType::kVertex:
@@ -4073,10 +4118,6 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           return false;
       }
       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
-        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
-        continue;
-      }
       if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
         REXGPU_ERROR(
             "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
@@ -4087,6 +4128,158 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       state.address = vfetch_constant.address;
       state.size = vfetch_constant.size;
       vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+    }
+  }
+
+  // Diagnostic: drop draws whose position stream is not finite. The streamed
+  // world geometry arrives truncated in guest memory (see docs/d3d/FINDINGS.md);
+  // past the truncation the buffer holds unrelated pool data, which decodes to
+  // NaN/huge float3 positions and rasterises as screen-spanning triangles.
+  // Uses the shader's own declared layout (binding stride + the 32_32_32_FLOAT
+  // attribute at offset 0), so formats other than float3 positions are ignored.
+  if (REXCVAR_GET(gpu_skip_nonfinite_draws) && memory_) {
+    bool drop = false;
+    for (const auto& binding : vertex_shader->vertex_bindings()) {
+      if (drop) break;
+      uint32_t stride = binding.stride_words * 4;
+      if (stride < 12) continue;
+      for (const auto& attr : binding.attributes) {
+        const auto& a = attr.fetch_instr.attributes;
+        if (a.data_format != xenos::VertexFormat::k_32_32_32_FLOAT || a.offset != 0) continue;
+        xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(binding.fetch_constant);
+        uint32_t addr = vf.address << 2, size = vf.size << 2;
+        if (!addr || size < stride) break;
+        const uint8_t* p8 = memory_->TranslatePhysical<const uint8_t*>(addr);
+        uint32_t n = std::min<uint32_t>(size / stride, 256), bad = 0, tot = 0;
+        for (uint32_t v = 0; v < n; ++v) {
+          const uint8_t* q = p8 + size_t(v) * stride;
+          bool vbad = false;
+          for (int c = 0; c < 3; ++c) {
+            uint32_t w = rex::byte_swap(*reinterpret_cast<const uint32_t*>(q + c * 4));
+            float f;
+            std::memcpy(&f, &w, 4);
+            if (!std::isfinite(f) || std::fabs(f) > 1e5f) vbad = true;
+          }
+          ++tot;
+          bad += vbad ? 1 : 0;
+        }
+        if (tot >= 8 && bad * 100 >= tot * REXCVAR_GET(gpu_nonfinite_threshold_pct)) {
+          drop = true;
+          // First non-finite vertex: the truncation point of the streamed mesh.
+          uint32_t first_bad = UINT32_MAX;
+          for (uint32_t v = 0; v < n && first_bad == UINT32_MAX; ++v) {
+            const uint8_t* q = p8 + size_t(v) * stride;
+            for (int c = 0; c < 3; ++c) {
+              uint32_t w = rex::byte_swap(*reinterpret_cast<const uint32_t*>(q + c * 4));
+              float f;
+              std::memcpy(&f, &w, 4);
+              if (!std::isfinite(f) || std::fabs(f) > 1e5f) { first_bad = v * stride; break; }
+            }
+          }
+          if (g_corrupt_vb_logged.insert((uint64_t(addr) << 20) | (size & 0xFFFFF)).second) {
+            REXGPU_WARN("[CORRUPT-VB] addr=0x{:08X} size={} stride={} first_bad_off={} "
+                        "first_bad_abs=0x{:08X} bad={}/{}",
+                        addr, size, stride, first_bad, addr + first_bad, bad, tot);
+          }
+        }
+        break;
+      }
+    }
+    if (drop) {
+      ++g_nonfinite_draws_skipped;
+      return true;  // pretend the draw succeeded
+    }
+  }
+
+  // Per-draw trace (bring-up diagnostics): --gpu_draw_trace_start=<swap>.
+  {
+    uint32_t trace_start = g_draw_trace_forced_start ? g_draw_trace_forced_start
+                                                     : REXCVAR_GET(gpu_draw_trace_start);
+    if (trace_start && g_draw_trace_swap_count >= trace_start &&
+        g_draw_trace_swap_count < trace_start + REXCVAR_GET(gpu_draw_trace_frames)) {
+      uint32_t di = g_draw_trace_draw_index++;
+      auto vte = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
+      auto clip = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
+      auto vgt_di = regs[XE_GPU_REG_VGT_DRAW_INITIATOR];
+      uint32_t min_idx = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
+      uint32_t max_idx = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
+      uint32_t idx_off = regs[XE_GPU_REG_VGT_INDX_OFFSET];
+      std::string line = fmt::format(
+          "[DRAWTRACE] swap={} draw={} prim={} count={} host_prim={} host_vtx={} ibtype={} "
+          "idxfmt={} idxendian={} idxbase=0x{:08X} vs={:016X} ps={:016X} VTE=0x{:08X} "
+          "CLIP=0x{:08X} DI=0x{:08X} min={} max={} off={} vs_type={}",
+          g_draw_trace_swap_count, di, uint32_t(prim_type), index_count,
+          uint32_t(primitive_processing_result.host_primitive_type),
+          primitive_processing_result.host_draw_vertex_count,
+          uint32_t(primitive_processing_result.index_buffer_type),
+          index_buffer_info ? uint32_t(index_buffer_info->format) : 99,
+          index_buffer_info ? uint32_t(index_buffer_info->endianness) : 99,
+          index_buffer_info ? index_buffer_info->guest_base : 0,
+          vertex_shader->ucode_data_hash(), pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+          vte, clip, vgt_di, min_idx, max_idx, idx_off,
+          uint32_t(primitive_processing_result.host_vertex_shader_type));
+      for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+        uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+        uint32_t j;
+        while (rex::bit_scan_forward(bits, &j)) {
+          bits &= ~(uint32_t(1) << j);
+          uint32_t vi = i * 32 + j;
+          xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(vi);
+          uint32_t addr = vf.address << 2, size = vf.size << 2;
+          std::string peek;
+          if (memory_ && addr && size) {
+            const uint32_t* p = memory_->TranslatePhysical<const uint32_t*>(addr);
+            for (int k = 0; k < 8 && (k * 4) < int(size); ++k) {
+              peek += fmt::format("{:08X} ", rex::byte_swap(p[k]));
+            }
+          }
+          line += fmt::format(" | vf{} type={} addr=0x{:08X} size={} endian={} peek=[{}]", vi,
+                              uint32_t(vf.type), addr, size, uint32_t(vf.endian), peek);
+        }
+      }
+      if (index_buffer_info && index_buffer_info->guest_base && memory_) {
+        const uint32_t* p = memory_->TranslatePhysical<const uint32_t*>(index_buffer_info->guest_base);
+        line += " | idx=[";
+        for (int k = 0; k < 8; ++k) line += fmt::format("{:08X} ", rex::byte_swap(p[k]));
+        line += "]";
+      }
+      REXGPU_WARN("{}", line);
+      const std::string& dd = REXCVAR_GET(gpu_draw_trace_dump_dir);
+      if (!dd.empty() && memory_) {
+        std::filesystem::create_directories(dd);
+        for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+          uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+          uint32_t j;
+          while (rex::bit_scan_forward(bits, &j)) {
+            bits &= ~(uint32_t(1) << j);
+            uint32_t vi = i * 32 + j;
+            xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(vi);
+            uint32_t addr = vf.address << 2, size = std::min<uint32_t>(vf.size << 2, 4u << 20);
+            if (!addr || !size) continue;
+            FILE* f = fopen(fmt::format("{}/s{}_d{}_vf{}_{:08X}.bin", dd, g_draw_trace_swap_count, di, vi, addr).c_str(), "wb");
+            if (f) { fwrite(memory_->TranslatePhysical<const void*>(addr), 1, size, f); fclose(f); }
+            {
+              // View-aliasing check: physical view vs 0xA0000000 / 0xE0000000 virtual views.
+              const uint8_t* pp = memory_->TranslatePhysical<const uint8_t*>(addr);
+              const uint8_t* pa = memory_->TranslateVirtual<const uint8_t*>(0xA0000000u + addr);
+              const uint8_t* pe = (addr >= 0x1000) ? memory_->TranslateVirtual<const uint8_t*>(0xE0000000u + addr - 0x1000) : nullptr;
+              uint32_t fa = UINT32_MAX, fe = UINT32_MAX, na = 0, ne = 0;
+              for (uint32_t k = 0; k < size; ++k) {
+                if (pa && pp[k] != pa[k]) { if (fa == UINT32_MAX) fa = k; ++na; }
+                if (pe && pp[k] != pe[k]) { if (fe == UINT32_MAX) fe = k; ++ne; }
+              }
+              REXGPU_WARN("[DRAWTRACE-VIEWS] swap={} draw={} vf{} addr=0x{:08X} size={} A-view: first_mismatch={} count={} E-view: first_mismatch={} count={}",
+                          g_draw_trace_swap_count, di, vi, addr, size, (int64_t)(fa == UINT32_MAX ? -1 : (int64_t)fa), na,
+                          (int64_t)(fe == UINT32_MAX ? -1 : (int64_t)fe), ne);
+            }
+          }
+        }
+        if (index_buffer_info && index_buffer_info->guest_base) {
+          size_t len = index_buffer_info->length;
+          FILE* f = fopen(fmt::format("{}/s{}_d{}_ib_{:08X}.bin", dd, g_draw_trace_swap_count, di, index_buffer_info->guest_base).c_str(), "wb");
+          if (f) { fwrite(memory_->TranslatePhysical<const void*>(index_buffer_info->guest_base), 1, len, f); fclose(f); }
+        }
+      }
     }
   }
 
@@ -4220,6 +4413,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // Invalidate textures in memexported memory and watch for changes.
   if (!memexport_ranges_.empty()) {
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      if (REXCVAR_GET(gpu_log_memexport)) {
+        uint32_t b0 = memexport_range.base_address_dwords << 2;
+        if (g_memexport_logged.insert((uint64_t(b0) << 20) | (memexport_range.size_bytes & 0xFFFFF))
+                .second) {
+          REXGPU_WARN("[MEMEXPORT] base=0x{:08X} size={} vs={:016X}", b0,
+                      memexport_range.size_bytes, vertex_shader->ucode_data_hash());
+        }
+      }
       shared_memory_->RangeWrittenByGpu(memexport_range.base_address_dwords << 2,
                                         memexport_range.size_bytes);
     }

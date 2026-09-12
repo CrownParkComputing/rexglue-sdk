@@ -145,13 +145,43 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
     title_id = kernel_state_->title_id();
   }
 
+  // Marketplace content (DLC) lives in the common (xuid 0) directory regardless
+  // of which profile enumerates it - mirror ResolvePackagePath so a signed-in
+  // user's non-zero xuid still finds the shared DLC packages.
+  if (content_type == XContentType::kMarketplaceContent) {
+    xuid = 0;
+  }
+
   // Search path:
   // content_root/xuid/title_id/type_name/*
   auto package_root = ResolvePackageRoot(xuid, content_type, title_id);
   auto file_infos = rex::filesystem::ListFiles(package_root);
   for (const auto& file_info : file_infos) {
     if (file_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
-      // Directories only.
+      // Not an extracted-content directory. It may be a raw STFS package file
+      // (downloadable content ships as one LIVE/CON/PIRS file per pack). Read
+      // its header without mounting; if it is a valid package, enumerate it by
+      // its on-disk file name so the guest can XamContentCreate it (which
+      // mounts the STFS device). This mirrors how Xenia enumerates DLC and is
+      // what Split/Second's skipper content thread needs to see real content
+      // instead of walking an empty list.
+      auto stfs_header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(
+          package_root / file_info.name);
+      if (stfs_header && stfs_header->header.is_magic_valid()) {
+        XCONTENT_AGGREGATE_DATA content_data;
+        content_data.device_id = device_id;
+        content_data.content_type = content_type;
+        content_data.title_id = title_id;
+        content_data.xuid = xuid;
+        content_data.set_file_name(rex::path_to_utf8(file_info.name));
+        auto display_name = stfs_header->metadata.display_name(rex::system::XLanguage::kEnglish);
+        if (!display_name.empty()) {
+          content_data.set_display_name(display_name);
+        } else {
+          content_data.set_display_name(rex::path_to_utf16(file_info.name));
+        }
+        result.emplace_back(std::move(content_data));
+      }
       continue;
     }
 

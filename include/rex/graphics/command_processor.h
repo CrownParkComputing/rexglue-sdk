@@ -10,6 +10,7 @@
  */
 
 #pragma once
+#include <unordered_set>
 
 #include <atomic>
 #include <cstring>
@@ -266,6 +267,10 @@ class CommandProcessor {
 
   uint64_t bin_select_ = 0xFFFFFFFFull;
   uint64_t bin_mask_ = 0xFFFFFFFFull;
+  // Diagnostic: distinct indirect buffers already executed this frame, used by
+  // gpu_skip_tile_replay to collapse the guest's per-EDRAM-tile replay.
+  std::unordered_set<uint64_t> executed_indirect_buffers_;
+  uint32_t skipped_tile_replays_ = 0;
 
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;

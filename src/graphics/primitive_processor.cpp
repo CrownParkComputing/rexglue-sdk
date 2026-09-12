@@ -363,6 +363,22 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       assert_always();
       return false;
     }
+    // One-shot diagnostic: which tessellation paths does this title actually use?
+    {
+      static uint32_t logged_tess_combos = 0;
+      uint32_t combo_bit = (uint32_t(guest_primitive_type) << 8) |
+                           (uint32_t(tessellation_mode) << 4) |
+                           uint32_t(host_vertex_shader_type);
+      // crude dedup by hashing into a 32-slot bitmask keyed on combo low bits
+      uint32_t slot = 1u << (combo_bit % 32u);
+      if (!(logged_tess_combos & slot)) {
+        logged_tess_combos |= slot;
+        REXGPU_INFO(
+            "TESS-DIAG: tessellated draw prim_type={} tess_mode={} host_vs_type={}",
+            uint32_t(guest_primitive_type), uint32_t(tessellation_mode),
+            uint32_t(host_vertex_shader_type));
+      }
+    }
   } else {
     host_vertex_shader_type = Shader::HostVertexShaderType::kVertex;
     switch (guest_primitive_type) {

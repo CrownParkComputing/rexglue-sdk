@@ -11,7 +11,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <utility>
+
+#include <dlfcn.h>
 
 #include <rex/assert.h>
 #include <rex/exception_handler.h>
@@ -416,6 +420,44 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     }
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
+    //
+    // A genuine violation repeats forever (the guest retries the instruction),
+    // so the log says only that something read a null pointer and never which
+    // guest code did. Name the recompiled function the first time each faulting
+    // instruction is seen: that is the whole difference between "a null deref
+    // somewhere" and an address to look at.
+    if (!is_write || true) {
+      static std::mutex reported_lock;
+      static std::set<uintptr_t> reported;
+      const uintptr_t pc = reinterpret_cast<uintptr_t>(ex->pc());
+      bool first = false;
+      {
+        std::lock_guard<std::mutex> guard(reported_lock);
+        first = reported.size() < 64 && reported.insert(pc).second;
+      }
+      if (first) {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname) {
+          REXLOG_ERROR(
+              "Access violation at host pc {:016X} in {}+{:#x} ({}), guest address {:08X}, {}",
+              pc, info.dli_sname, pc - reinterpret_cast<uintptr_t>(info.dli_saddr),
+              info.dli_fname ? info.dli_fname : "?",
+              host_to_guest_virtual_(host_to_guest_virtual_context_, fault_host_address),
+              is_write ? "write" : "read");
+        } else {
+          // Recompiled functions are local symbols in the executable, which
+          // dladdr cannot name. The module base makes the address resolvable
+          // offline: nm the binary and look for the symbol containing
+          // (pc - base).
+          REXLOG_ERROR(
+              "Access violation at host pc {:016X} (+{:#x} in {}), guest address {:08X}, {}",
+              pc, info.dli_fbase ? pc - reinterpret_cast<uintptr_t>(info.dli_fbase) : 0,
+              info.dli_fname ? info.dli_fname : "?",
+              host_to_guest_virtual_(host_to_guest_virtual_context_, fault_host_address),
+              is_write ? "write" : "read");
+        }
+      }
+    }
     if (access_violation_callback_) {
       return access_violation_callback_(std::move(lock), access_violation_callback_context_,
                                         fault_host_address, is_write);

@@ -2529,10 +2529,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   // won't be modified by the shaders.
   memexport_ranges_.clear();
   if (memexport_used_vertex) {
-    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
+    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_, index_count);
   }
   if (memexport_used_pixel) {
-    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_, index_count);
   }
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     if (!shared_memory_->RequestRange(memexport_range.base_address_dwords << 2,

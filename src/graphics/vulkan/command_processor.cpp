@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <set>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -67,6 +69,10 @@ REXCVAR_DEFINE_STRING(frame_dump_path, "", "GPU",
 REXCVAR_DEFINE_UINT32(frame_dump_interval, 30, "GPU",
                       "Dump every Nth presented frame when frame_dump_path is set")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(frame_dump_only_while_sweeping, false, "GPU",
+                    "Only dump frames once the gpu_skip_sweep_chunk bisection sweep is armed, so "
+                    "dump N corresponds to the sweep's Nth chunk.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_UINT32(frame_dump_count, 8, "GPU",
                       "Stop after dumping this many frames (0 = unlimited)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -83,6 +89,31 @@ REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
                     "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
 REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
                       "Percentage of sampled vertices that must be non-finite to drop a draw.");
+REXCVAR_DEFINE_UINT32(gpu_skip_sweep_chunk, 0, "GPU",
+                      "Diagnostic: if non-zero, arm an automatic draw-range bisection sweep -- "
+                      "swap N suppresses draws [base + k*chunk, base + k*chunk + chunk - 1] where "
+                      "k counts swaps since the sweep armed. Use with frame_dump_interval=1 on a "
+                      "static scene and read the [SKIPSWEEP] line for each dumped frame.");
+REXCVAR_DEFINE_UINT32(gpu_skip_sweep_base, 0, "GPU",
+                      "First draw index of the gpu_skip_sweep_chunk sweep.");
+REXCVAR_DEFINE_UINT32(gpu_skip_sweep_start, 0, "GPU",
+                      "Swap index at which to arm the sweep (0 = arm at the first swap).");
+REXCVAR_DEFINE_STRING(gpu_skip_draws, "", "GPU",
+                      "Diagnostic: suppress an inclusive per-frame draw range \"first:last\" (or "
+                      "a single index). Bisects a visible bad material without touching guest "
+                      "data or shaders. Note some draws are query/sync draws and skipping them "
+                      "can hang the title.");
+static uint32_t g_skipped_range_draws = 0;
+// Per-frame draw counter, incremented for EVERY draw (unlike g_draw_trace_draw_index,
+// which only advances while tracing). Shared by --gpu_skip_draws and the per-draw
+// trace so an index printed by one can be fed to the other.
+static uint32_t g_frame_draw_index = 0;
+// Automatic bisection: once armed, each successive swap suppresses the next
+// chunk of draw indices, so a single run tests every chunk of a static scene
+// instead of needing one run per range. Pair the [SKIPSWEEP] line with the
+// frame dump written for the same swap.
+static uint32_t g_skip_sweep_start_swap = 0;
+static bool g_skip_sweep_armed = false;
 static uint32_t g_nonfinite_draws_skipped = 0;
 static std::unordered_set<uint64_t> g_corrupt_vb_logged;
 static std::unordered_set<uint64_t> g_memexport_logged;
@@ -2315,6 +2346,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
   ++g_draw_trace_swap_count;
+  if (g_skipped_range_draws) {
+    REXGPU_WARN("[SKIPDRAWS] swap {}: suppressed {} draws ({})", g_draw_trace_swap_count,
+                g_skipped_range_draws, REXCVAR_GET(gpu_skip_draws));
+    g_skipped_range_draws = 0;
+  }
   if (g_nonfinite_draws_skipped) {
     REXGPU_WARN("[NONFINITE] swap {}: skipped {} draws", g_draw_trace_swap_count, g_nonfinite_draws_skipped);
     g_nonfinite_draws_skipped = 0;
@@ -2322,12 +2358,37 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     g_memexport_logged.clear();
   }
   g_draw_trace_draw_index = 0;
+  g_frame_draw_index = 0;
+  if (REXCVAR_GET(gpu_skip_sweep_chunk) && !g_skip_sweep_armed &&
+      REXCVAR_GET(gpu_skip_sweep_start) &&
+      g_draw_trace_swap_count >= REXCVAR_GET(gpu_skip_sweep_start)) {
+    g_skip_sweep_armed = true;
+    g_skip_sweep_start_swap = g_draw_trace_swap_count;
+    REXGPU_WARN("[SKIPSWEEP] armed at swap {} chunk={} base={}", g_skip_sweep_start_swap,
+                REXCVAR_GET(gpu_skip_sweep_chunk), REXCVAR_GET(gpu_skip_sweep_base));
+  }
+  if (g_skip_sweep_armed) {
+    const uint32_t chunk = REXCVAR_GET(gpu_skip_sweep_chunk);
+    const uint32_t k = g_draw_trace_swap_count - g_skip_sweep_start_swap;
+    const uint32_t first = REXCVAR_GET(gpu_skip_sweep_base) + k * chunk;
+    REXGPU_WARN("[SKIPSWEEP] swap {} suppressing draws {}..{}", g_draw_trace_swap_count, first,
+                first + chunk - 1);
+  }
   {
     const std::string& trig = REXCVAR_GET(gpu_draw_trace_trigger_file);
     if (!trig.empty() && std::filesystem::exists(trig)) {
       std::filesystem::remove(trig);
       g_draw_trace_forced_start = g_draw_trace_swap_count;
       REXGPU_WARN("[DRAWTRACE] triggered at swap {}", g_draw_trace_swap_count);
+      if (REXCVAR_GET(gpu_skip_sweep_chunk) && !g_skip_sweep_armed) {
+        // The same trigger file arms the bisection sweep, so a sweep can be started
+        // at a chosen moment (a static scene) without knowing the swap index up front.
+        g_skip_sweep_armed = true;
+        g_skip_sweep_start_swap = g_draw_trace_swap_count;
+        REXGPU_WARN("[SKIPSWEEP] armed by trigger at swap {} chunk={} base={}",
+                    g_skip_sweep_start_swap, REXCVAR_GET(gpu_skip_sweep_chunk),
+                    REXCVAR_GET(gpu_skip_sweep_base));
+      }
     }
   }
   vertex_buffers_in_sync_[0] = 0;
@@ -2992,6 +3053,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 void VulkanCommandProcessor::DumpGuestOutputFrame(ui::Presenter* presenter) {
   const std::string dump_path = REXCVAR_GET(frame_dump_path);
   if (dump_path.empty() || !presenter)
+    return;
+
+  if (REXCVAR_GET(frame_dump_only_while_sweeping) && !g_skip_sweep_armed)
     return;
 
   uint32_t interval = std::max(REXCVAR_GET(frame_dump_interval), uint32_t(1));
@@ -3719,6 +3783,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EdramMode::kCopy) {
+    // Diagnostic: a resolve whose RB_COPY_CONTROL/RB_COPY_DEST_INFO are entirely
+    // zero is indistinguishable from a normal draw that arrived while
+    // RB_MODECONTROL was left in kCopy. Log what the draw actually looks like,
+    // deduplicated, so real geometry being swallowed as a resolve is visible.
+    if (!regs[XE_GPU_REG_RB_COPY_CONTROL] && !regs[XE_GPU_REG_RB_COPY_DEST_INFO]) {
+      static std::mutex m;
+      static std::set<uint64_t> seen;
+      uint64_t key = (uint64_t(prim_type) << 32) ^ uint64_t(index_count);
+      bool first;
+      {
+        std::lock_guard<std::mutex> lock(m);
+        first = seen.insert(key).second;
+      }
+      if (first) {
+        REXGPU_WARN(
+            "[ZERORESOLVE] resolve with zeroed copy registers: prim={} index_count={} "
+            "modecontrol={:#010x} surface_pitch={} msaa={}",
+            uint32_t(prim_type), index_count, regs[XE_GPU_REG_RB_MODECONTROL], uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
+            uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples));
+      }
+    }
     // Special copy handling.
     return IssueCopy();
   }
@@ -3744,7 +3829,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           "vertexPipelineStoresAndAtomics support");
       return false;
     }
-    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
+    draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_, index_count);
   }
 
   // Pixel shader analysis.
@@ -3784,7 +3869,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           "fragmentStoresAndAtomics support");
       return false;
     }
-    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_, index_count);
   }
   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
 
@@ -4191,13 +4276,46 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  const uint32_t frame_draw_index = g_frame_draw_index;
+
+  // Diagnostic: suppress an inclusive draw-index range (--gpu_skip_draws=first:last).
+  // The index is the per-frame draw counter, the same one the per-draw trace prints,
+  // so a range read off a [DRAWTRACE] line can be fed straight back here.
+  {
+    if (g_skip_sweep_armed) {
+      const uint32_t chunk = REXCVAR_GET(gpu_skip_sweep_chunk);
+      const uint32_t k = g_draw_trace_swap_count - g_skip_sweep_start_swap;
+      const uint32_t first = REXCVAR_GET(gpu_skip_sweep_base) + k * chunk;
+      if (frame_draw_index >= first && frame_draw_index < first + chunk) {
+        ++g_frame_draw_index;
+        ++g_skipped_range_draws;
+        return true;  // pretend the draw succeeded
+      }
+    }
+    const std::string& spec = REXCVAR_GET(gpu_skip_draws);
+    if (!spec.empty()) {
+      uint32_t first = 0, last = 0;
+      const size_t colon = spec.find(':');
+      const char* b = spec.c_str();
+      first = uint32_t(std::strtoul(b, nullptr, 10));
+      last = (colon == std::string::npos)
+                 ? first
+                 : uint32_t(std::strtoul(b + colon + 1, nullptr, 10));
+      if (frame_draw_index >= first && frame_draw_index <= last) {
+        ++g_frame_draw_index;
+        ++g_skipped_range_draws;
+        return true;  // pretend the draw succeeded
+      }
+    }
+  }
+
   // Per-draw trace (bring-up diagnostics): --gpu_draw_trace_start=<swap>.
   {
     uint32_t trace_start = g_draw_trace_forced_start ? g_draw_trace_forced_start
                                                      : REXCVAR_GET(gpu_draw_trace_start);
     if (trace_start && g_draw_trace_swap_count >= trace_start &&
         g_draw_trace_swap_count < trace_start + REXCVAR_GET(gpu_draw_trace_frames)) {
-      uint32_t di = g_draw_trace_draw_index++;
+      uint32_t di = frame_draw_index;
       auto vte = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
       auto clip = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
       auto vgt_di = regs[XE_GPU_REG_VGT_DRAW_INITIATOR];
@@ -4282,6 +4400,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       }
     }
   }
+
+  ++g_frame_draw_index;
 
   // Synchronize the memory pages backing memory scatter export streams, and
   // calculate the range that includes the streams for the buffer barrier.

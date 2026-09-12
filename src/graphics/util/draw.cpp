@@ -10,6 +10,8 @@
  */
 
 #include <algorithm>
+#include <set>
+#include <mutex>
 #include <cmath>
 
 #include <rex/assert.h>
@@ -620,8 +622,15 @@ uint32_t GetNormalizedColorMask(const RegisterFile& regs,
   return normalized_color_mask;
 }
 
+REXCVAR_DEFINE_BOOL(gpu_memexport_clamp_to_draw, false, "GPU",
+                    "Bound a memexport destination range by what the draw can actually write\n"
+                    "(vertices x eM# exports x element size) instead of trusting the stream\n"
+                    "constant's declared buffer capacity. Titles that declare huge export\n"
+                    "buffers otherwise mark tens of megabytes as GPU-written, which suppresses\n"
+                    "legitimate CPU uploads of streamed geometry in that span.");
+
 void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
-                        std::vector<MemExportRange>& ranges_out) {
+                        std::vector<MemExportRange>& ranges_out, uint32_t draw_vertex_count) {
   if (!shader.memexport_eM_written()) {
     // The shader has eA writes, but no real exports.
     return;
@@ -665,6 +674,23 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
         break;
     }
     uint32_t stream_size_bytes = stream.index_count * (format_info.bits_per_pixel >> 3);
+    // stream.index_count is the declared CAPACITY of the export buffer, not how
+    // much this draw writes. Split/Second's tile-classification pass declares
+    // 63 MB and 20 MB destinations while drawing only a few hundred vertices,
+    // and the whole declared span then gets marked GPU-written - which
+    // suppresses every legitimate CPU upload in it, so streamed geometry keeps
+    // rendering stale contents. A draw can write at most one element per vertex
+    // per eM# export, so bound the range by that.
+    if (REXCVAR_GET(gpu_memexport_clamp_to_draw) && draw_vertex_count) {
+      uint32_t eM_count = uint32_t(rex::bit_count(uint32_t(shader.memexport_eM_written())));
+      if (eM_count) {
+        uint64_t max_written = uint64_t(draw_vertex_count) * eM_count *
+                               uint64_t(format_info.bits_per_pixel >> 3);
+        if (max_written < stream_size_bytes) {
+          stream_size_bytes = uint32_t(max_written);
+        }
+      }
+    }
     // Try to reduce the number of shared memory operations when writing
     // different elements into the same buffer through different exports
     // (happens in 4D5307E6).
@@ -955,6 +981,24 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
       (rb_copy_dest_pitch.copy_dest_height + (xenos::kTextureTileWidthHeight - 1)) >>
       xenos::kTextureTileWidthHeightLog2;
   const FormatInfo& dest_format_info = *FormatInfo::Get(dest_format);
+  {
+    // Diagnostic: one line per distinct (RB_COPY_DEST_INFO, RB_COPY_CONTROL) seen
+    // by ANY resolve, so a zeroed pair can be compared against the values the
+    // title uses elsewhere.
+    static std::mutex all_mutex;
+    static std::set<uint64_t> all_logged;
+    const uint64_t key = (uint64_t(rb_copy_dest_info.value) << 32) ^ rb_copy_control.value;
+    bool first;
+    {
+      std::lock_guard<std::mutex> lock(all_mutex);
+      first = all_logged.insert(key).second;
+    }
+    if (first) {
+      REXGPU_WARN("[RESOLVE] dest_info={:#010x} control={:#010x} fmt={} depth={} resolvable={}",
+                  rb_copy_dest_info.value, rb_copy_control.value, dest_format_info.name, is_depth,
+                  dest_format_info.type == FormatType::kResolvable);
+    }
+  }
   if (is_depth || dest_format_info.type == FormatType::kResolvable) {
     uint32_t bpp_log2 = rex::log2_floor(dest_format_info.bits_per_pixel >> 3);
     uint32_t dest_base_relative_x_mask = (UINT32_C(1) << xenos::GetTextureTiledXBaseGranularityLog2(
@@ -997,8 +1041,39 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
                                                      rb_copy_dest_pitch.copy_dest_pitch, bpp_log2);
     }
   } else {
-    REXGPU_ERROR("Tried to resolve to format {}, which is not a ColorFormat",
-                 dest_format_info.name);
+    // Diagnostic: this path drops the resolve's destination extent, so the
+    // texture cache never learns the destination was written and later reads of
+    // it return stale pixels. Split/Second hits it tens of thousands of times
+    // per run, so log the raw registers behind it once per distinct combination
+    // rather than once per resolve.
+    {
+      static std::mutex log_mutex;
+      static std::set<uint64_t> logged;
+      const uint64_t key = (uint64_t(rb_copy_dest_info.value) << 32) ^ rb_copy_control.value;
+      bool first;
+      {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        first = logged.insert(key).second;
+      }
+      if (first) {
+        REXGPU_ERROR(
+            "Tried to resolve to format {}, which is not a ColorFormat. "
+            "RB_COPY_DEST_INFO={:#010x} (fmt={} num={} endian={} array={} slice={} exp_bias={} "
+            "swap={}) RB_COPY_CONTROL={:#010x} (cmd={} src_select={} sample_select={}) "
+            "dest_base={:#010x} pitch={} height={} surface_msaa={} surface_pitch={}",
+            dest_format_info.name, rb_copy_dest_info.value,
+            uint32_t(rb_copy_dest_info.copy_dest_format),
+            uint32_t(rb_copy_dest_info.copy_dest_number),
+            uint32_t(rb_copy_dest_info.copy_dest_endian), uint32_t(rb_copy_dest_info.copy_dest_array),
+            uint32_t(rb_copy_dest_info.copy_dest_slice), int32_t(rb_copy_dest_info.copy_dest_exp_bias),
+            uint32_t(rb_copy_dest_info.copy_dest_swap), rb_copy_control.value,
+            uint32_t(rb_copy_control.copy_command), uint32_t(rb_copy_control.copy_src_select),
+            uint32_t(rb_copy_control.copy_sample_select), rb_copy_dest_base,
+            uint32_t(rb_copy_dest_pitch.copy_dest_pitch),
+            uint32_t(rb_copy_dest_pitch.copy_dest_height), uint32_t(rb_surface_info.msaa_samples),
+            uint32_t(rb_surface_info.surface_pitch));
+      }
+    }
     copy_dest_extent_start = copy_dest_base_adjusted;
     copy_dest_extent_end = copy_dest_base_adjusted;
   }

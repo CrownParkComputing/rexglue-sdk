@@ -35,6 +35,12 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 
+REXCVAR_DEFINE_BOOL(gpu_ignore_bin_predication, false, "GPU",
+                    "Execute predicated type-3 packets regardless of the guest's bin mask /\n"
+                    "bin select. The bin mask is only a per-EDRAM-tile culling optimisation, so\n"
+                    "ignoring it costs draws but cannot remove geometry that belongs in a tile.\n"
+                    "Needed by titles that compute their bin masks from memexported data that\n"
+                    "never reaches the CPU (readback_memexport disabled).");
 REXCVAR_DEFINE_BOOL(gpu_skip_tile_replay, false, "GPU",
                     "Execute each indirect buffer only once per frame, suppressing the guest's\n"
                     "per-EDRAM-tile replay (diagnostic).");
@@ -350,6 +356,7 @@ uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   RegisterFile& regs = *register_file_;
+
   if (index >= RegisterFile::kRegisterCount) {
     auto [it, inserted] = extended_register_values_.insert_or_assign(index, value);
     (void)it;
@@ -775,7 +782,8 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
   // the packet. Only type 3 packets are affected.
   // We also skip predicated swaps, as they are never valid (probably?).
   if (packet & 1) {
-    bool any_pass = (bin_select_ & bin_mask_) != 0;
+    bool any_pass =
+        REXCVAR_GET(gpu_ignore_bin_predication) || (bin_select_ & bin_mask_) != 0;
     if (!any_pass || opcode == PM4_XE_SWAP) {
       reader->AdvanceRead(count * sizeof(uint32_t));
       return true;

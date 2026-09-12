@@ -328,7 +328,8 @@ struct MemExportRange {
 // Gathers memory ranges involved in memexports in the shader with the float
 // constants from the registers, adding them to ranges_out.
 void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
-                        std::vector<MemExportRange>& ranges_out);
+                        std::vector<MemExportRange>& ranges_out,
+                        uint32_t draw_vertex_count);
 
 // To avoid passing values that the shader won't understand (even though
 // Direct3D 9 shouldn't pass them anyway).

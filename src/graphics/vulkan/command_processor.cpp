@@ -60,6 +60,10 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
                     "Read render-to-texture results on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(gpu_log_resolve_readbacks, false, "GPU",
+                   "Log resolve readback destinations for CPU texture diagnostics")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
                     "Read data written by memory export in shaders on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -4925,6 +4929,14 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   if (!written_length) {
     return true;
+  }
+
+  if (REXCVAR_GET(gpu_log_resolve_readbacks)) {
+    const auto pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+    const auto info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+    REXGPU_INFO("RESOLVE_READBACK swap={} address={:08X} length={} pitch={} height={} format={}",
+                g_draw_trace_swap_count, written_address, written_length, uint32_t(pitch.copy_dest_pitch),
+                uint32_t(pitch.copy_dest_height), uint32_t(info.copy_dest_format));
   }
 
   if (!memory_->TranslatePhysical(written_address)) {

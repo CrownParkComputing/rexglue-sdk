@@ -290,6 +290,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
   uint32_t valid_page_last = last >> page_size_log2_;
   uint32_t valid_block_first = valid_page_first >> 6;
   uint32_t valid_block_last = valid_page_last >> 6;
+  bool enable_callbacks = false;
 
   {
     auto global_lock = global_critical_region_.Acquire();
@@ -302,13 +303,17 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
       if (i == valid_block_last && (valid_page_last & 63) != 63) {
         valid_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
       }
+      // Already-valid pages already have CPU write callbacks armed. Repeated
+      // memexports (for example one AABB per draw into the same pool) need not
+      // walk all three physical heaps again just to re-arm the same pages.
+      enable_callbacks |= (system_page_flags_valid_[i] & valid_bits) != valid_bits;
       system_page_flags_valid_[i] |= valid_bits;
       uint64_t& gpu_written = system_page_flags_valid_and_gpu_written_[i];
       gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits);
     }
   }
 
-  if (memory_invalidation_callback_handle_) {
+  if (enable_callbacks && memory_invalidation_callback_handle_) {
     memory().EnablePhysicalMemoryAccessCallbacks(
         valid_page_first << page_size_log2_,
         (valid_page_last - valid_page_first + 1) << page_size_log2_, true, false);
@@ -469,6 +474,28 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
 }
 
 bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+  // Most vertex-buffer requests are for a single already-resident range.
+  // Avoid allocating/sorting a temporary range vector and assembling an upload
+  // list for this overwhelmingly common case. Keep the same bounds and sparse
+  // allocation contract as RequestRanges.
+  if (!length) return true;
+  if (start >= kBufferSize || length > kBufferSize - start) return false;
+  uint32_t first_page = start >> page_size_log2_;
+  uint32_t last_page = (start + length - 1) >> page_size_log2_;
+  bool valid = true;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (uint32_t block = first_page >> 6; block <= (last_page >> 6); ++block) {
+      uint64_t mask = UINT64_MAX;
+      if (block == (first_page >> 6)) mask &= UINT64_MAX << (first_page & 63);
+      if (block == (last_page >> 6)) mask &= UINT64_MAX >> (63 - (last_page & 63));
+      if ((system_page_flags_valid_[block] & mask) != mask) {
+        valid = false;
+        break;
+      }
+    }
+  }
+  if (valid) return EnsureHostGpuMemoryAllocated(start, length);
   std::pair<uint32_t, uint32_t> range(start, length);
   return RequestRanges(&range, 1);
 }

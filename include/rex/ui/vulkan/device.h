@@ -154,6 +154,7 @@ class VulkanDevice {
     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
 
     bool dynamicRendering = false;
+    bool pipelineCreationCacheControl = false;
 
     // VK_EXT_non_seamless_cube_map (#423)
 

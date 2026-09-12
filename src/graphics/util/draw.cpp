@@ -22,6 +22,7 @@
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/graphics/util/memexport_copy.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -629,6 +630,11 @@ REXCVAR_DEFINE_BOOL(gpu_memexport_clamp_to_draw, false, "GPU",
                     "buffers otherwise mark tens of megabytes as GPU-written, which suppresses\n"
                     "legitimate CPU uploads of streamed geometry in that span.");
 
+REXCVAR_DEFINE_BOOL(gpu_memexport_copy_ranges, false, "GPU",
+                    "Use the computed destination of the Split/Second 64-byte copy shader\n"
+                    "for memexport ownership instead of its whole destination pool.\n"
+                    "Only applies to verified constants and sequential point-list draws.");
+
 void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
                         std::vector<MemExportRange>& ranges_out, uint32_t draw_vertex_count) {
   if (!shader.memexport_eM_written()) {
@@ -674,6 +680,45 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
         break;
     }
     uint32_t stream_size_bytes = stream.index_count * (format_info.bits_per_pixel >> 3);
+    uint32_t stream_base_dwords = stream.base_address;
+    bool stream_range_is_exact = false;
+    if (REXCVAR_GET(gpu_memexport_copy_ranges) &&
+        shader.type() == xenos::ShaderType::kVertex &&
+        shader.ucode_data_hash() == UINT64_C(0xC8302F90258AC60E) && constant_index == 69 &&
+        float_constants_base <= 256 && format_info.bits_per_pixel == 64 &&
+        stream.const_0x4b000000 == 0x4B000000) {
+      // This shader fetches eight vectors and has two exports, each of four
+      // elements. Its address-only instructions are:
+      //   r0.x = trunc((vertex_index + c68.x) * c255.w)
+      //   eA = r0.x * c255.xyxx + c69; export eM0..3
+      //   r0.x += c255.z
+      //   eA = r0.x * c255.xyxx + c69; export eM0..3
+      // With c255 = (0, 1, 4, 8), this copies 64 bytes per invocation.
+      // A count-only clamp loses the destination offset (and the second export).
+      auto constant = [&](uint32_t index, uint32_t component) {
+        return regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_X +
+                               4 * (float_constants_base + index) + component);
+      };
+      auto initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+      uint32_t first = regs[XE_GPU_REG_VGT_INDX_OFFSET];
+      uint64_t end = uint64_t(first) + draw_vertex_count;
+      if (initiator.source_select == xenos::SourceSelect::kAutoIndex &&
+          initiator.prim_type == xenos::PrimitiveType::kPointList &&
+          first >= regs[XE_GPU_REG_VGT_MIN_VTX_INDX] && end &&
+          end - 1 <= regs[XE_GPU_REG_VGT_MAX_VTX_INDX] &&
+          end - 1 <= xenos::kVertexIndexMask &&
+          constant(255, 0) == 0 && constant(255, 1) == 1 &&
+          constant(255, 2) == 4 && constant(255, 3) == 8) {
+        auto copy = GetMemExportCopyOffset(first, draw_vertex_count, constant(68, 0),
+                                          stream.index_count);
+        if (copy && (uint64_t(stream_base_dwords) << 2) + copy->first + copy->second <=
+                        (uint64_t(1) << 29)) {
+          stream_base_dwords += copy->first >> 2;
+          stream_size_bytes = copy->second;
+          stream_range_is_exact = true;
+        }
+      }
+    }
     // stream.index_count is the declared CAPACITY of the export buffer, not how
     // much this draw writes. Split/Second's tile-classification pass declares
     // 63 MB and 20 MB destinations while drawing only a few hundred vertices,
@@ -681,7 +726,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     // suppresses every legitimate CPU upload in it, so streamed geometry keeps
     // rendering stale contents. A draw can write at most one element per vertex
     // per eM# export, so bound the range by that.
-    if (REXCVAR_GET(gpu_memexport_clamp_to_draw) && draw_vertex_count) {
+    if (!stream_range_is_exact && REXCVAR_GET(gpu_memexport_clamp_to_draw) && draw_vertex_count) {
       uint32_t eM_count = uint32_t(rex::bit_count(uint32_t(shader.memexport_eM_written())));
       if (eM_count) {
         uint64_t max_written = uint64_t(draw_vertex_count) * eM_count *
@@ -696,7 +741,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     // (happens in 4D5307E6).
     bool range_reused = false;
     for (MemExportRange& range : ranges_out) {
-      if (range.base_address_dwords == stream.base_address) {
+      if (range.base_address_dwords == stream_base_dwords) {
         range.size_bytes = std::max(range.size_bytes, stream_size_bytes);
         range_reused = true;
         break;
@@ -704,7 +749,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     // Add a new range if haven't expanded an existing one.
     if (!range_reused) {
-      ranges_out.emplace_back(uint32_t(stream.base_address), stream_size_bytes);
+      ranges_out.emplace_back(stream_base_dwords, stream_size_bytes);
     }
   }
 }

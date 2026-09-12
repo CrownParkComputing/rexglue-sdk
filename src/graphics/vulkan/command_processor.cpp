@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -36,6 +37,7 @@
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/vulkan/command_processor.h>
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/vulkan/pipeline_cache.h>
 #include <rex/graphics/vulkan/render_target_cache.h>
 #include <rex/graphics/vulkan/shader.h>
@@ -85,6 +87,14 @@ REXCVAR_DEFINE_STRING(gpu_draw_trace_trigger_file, "", "GPU",
                       "gpu_draw_trace_frames swaps and delete the file");
 REXCVAR_DEFINE_BOOL(gpu_log_memexport, false, "GPU",
                     "Log distinct memexport destination ranges (diagnostic).");
+REXCVAR_DEFINE_UINT32(gpu_log_slow_draw_ms, 0, "GPU",
+                      "Log draw stages taking at least this many milliseconds (0 disables).\n"
+                      "Separates shader/pipeline compilation from texture and buffer uploads.");
+REXCVAR_DEFINE_STRING(gpu_frame_stats_path, "", "GPU",
+                      "Append per-frame CPU, fence wait and descriptor statistics to a CSV file.");
+REXCVAR_DEFINE_BOOL(vulkan_reuse_texture_descriptors, true, "GPU/Vulkan",
+                    "Reuse texture descriptor sets when their layout, image views and samplers\n"
+                    "are unchanged. Disable for diagnostic comparison.");
 REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
                     "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
 REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
@@ -140,6 +150,20 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
 namespace rex::graphics::vulkan {
 
 namespace {
+
+struct AccumulateCpuTime {
+  double* total;
+  std::chrono::steady_clock::time_point start;
+  explicit AccumulateCpuTime(double* total_ms)
+      : total(total_ms), start(total ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{}) {}
+  ~AccumulateCpuTime() {
+    if (total) {
+      *total += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+    }
+  }
+};
 
 // glslang default built-in resource limits.
 constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
@@ -2346,6 +2370,27 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
   ++g_draw_trace_swap_count;
+  const auto& stats_path = REXCVAR_GET(gpu_frame_stats_path);
+  if (!stats_path.empty()) {
+    uint64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (FILE* f = fopen(stats_path.c_str(), "a")) {
+      if (!frame_stats_.last_swap_us) {
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused\n");
+      } else {
+        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu\n", g_draw_trace_swap_count,
+                double(now_us - frame_stats_.last_swap_us) / 1000.0,
+                frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
+                (unsigned long long)frame_stats_.draws,
+                (unsigned long long)frame_stats_.submissions,
+                (unsigned long long)frame_stats_.texture_sets_written,
+                (unsigned long long)frame_stats_.texture_sets_reused);
+      }
+      fclose(f);
+    }
+    frame_stats_ = {};
+    frame_stats_.last_swap_us = now_us;
+  }
   if (g_skipped_range_draws) {
     REXGPU_WARN("[SKIPDRAWS] swap {}: suppressed {} draws ({})", g_draw_trace_swap_count,
                 g_skipped_range_draws, REXCVAR_GET(gpu_skip_draws));
@@ -3767,6 +3812,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   const RegisterFile& regs = *register_file_;
   (void)index_buffer_info;
+  AccumulateCpuTime draw_timer(REXCVAR_GET(gpu_frame_stats_path).empty()
+                                   ? nullptr : &frame_stats_.draw_cpu_ms);
+  ++frame_stats_.draws;
+  uint32_t slow_draw_ms = REXCVAR_GET(gpu_log_slow_draw_ms);
+  auto stage_start = slow_draw_ms ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  auto log_slow_stage = [&](const char* stage) {
+    if (!slow_draw_ms) return;
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double, std::milli>(now - stage_start).count();
+    if (elapsed >= slow_draw_ms) {
+      REXGPU_WARN("[SLOWDRAW] swap={} stage={} ms={:.2f} vs={:016X} ps={:016X} count={}",
+                  g_draw_trace_swap_count, stage, elapsed,
+                  active_vertex_shader() ? active_vertex_shader()->ucode_data_hash() : 0,
+                  active_pixel_shader() ? active_pixel_shader()->ucode_data_hash() : 0,
+                  index_count);
+    }
+    stage_start = now;
+  };
   auto draw_fail = [&](const char* stage) {
     auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
     REXGPU_ERROR(
@@ -3949,6 +4013,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                                   pixel_shader_translation)) {
       return draw_fail("shader_translation");
     }
+    log_slow_stage("analysis_and_translation");
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
@@ -4027,7 +4092,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+  log_slow_stage("primitive_and_sampler_setup");
   texture_cache_->RequestTextures(used_texture_mask);
+  log_slow_stage("texture_upload");
 
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
   // Set up the render targets - this may perform dispatches and draws.
@@ -4053,6 +4120,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // may happen between pipeline configuration and binding.
   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
                                                 &pipeline_is_placeholder);
+  log_slow_stage("pipeline_compile");
   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
     frame_used_async_placeholder_pipeline_ = true;
     return true;
@@ -4086,6 +4154,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         descriptor_sets_kept = std::min(
             descriptor_sets_kept, uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesPixel));
       }
+      current_graphics_descriptor_sets_bound_up_to_date_ &=
+          (uint32_t(1) << descriptor_sets_kept) - 1;
     } else {
       // No or unknown pipeline layout previously bound - all bindings are in an
       // indeterminate state.
@@ -4168,6 +4238,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (!UpdateBindings(vertex_shader, pixel_shader)) {
     return draw_fail("update_bindings");
   }
+  log_slow_stage("bindings");
 
   // Ensure vertex buffers are resident.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
@@ -4365,6 +4436,60 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       const std::string& dd = REXCVAR_GET(gpu_draw_trace_dump_dir);
       if (!dd.empty() && memory_) {
         std::filesystem::create_directories(dd);
+        // Keep the actual draw constants and linear 8-bit planes with the
+        // vertex/index dump, so video sampling can be checked independently of
+        // guest decode. The register file describes pitch, endian and swizzle.
+        FILE* register_dump = fopen(
+            fmt::format("{}/s{}_d{}_regs.bin", dd, g_draw_trace_swap_count, di).c_str(), "wb");
+        if (register_dump) {
+          fwrite(regs.values, sizeof(uint32_t), RegisterFile::kRegisterCount, register_dump);
+          fclose(register_dump);
+        }
+        for (uint32_t ti = 0; ti < 32; ++ti) {
+          if (!(used_texture_mask & (uint32_t(1) << ti))) continue;
+          auto tf = regs.GetTextureFetch(ti);
+          // Texture bindings and raw guest texture bytes for material diagnosis.
+          // One file per address/extent per traced frame avoids duplicating a
+          // shared atlas on every car/world draw. GPU resolves may differ from
+          // these CPU bytes; these dumps are not GPU readback.
+          uint32_t width, height, depth, base_page, mip_page, max_mip;
+          texture_util::GetSubresourcesFromFetchConstant(tf, &width, &height, &depth,
+              &base_page, &mip_page, nullptr, &max_mip);
+          if (tf.type == xenos::FetchConstantType::kTexture) {
+            auto layout = texture_util::GetGuestTextureLayout(tf.dimension, tf.pitch,
+                width + 1, height + 1, depth + 1, tf.tiled, tf.format, tf.packed_mips,
+                base_page != 0, max_mip);
+            uint32_t base_bytes = base_page ? layout.base.level_data_extent_bytes : 0;
+            uint32_t mip_bytes = layout.mips_total_extent_bytes;
+            for (auto [page, bytes] : {std::pair(base_page, base_bytes), std::pair(mip_page, mip_bytes)}) {
+              uint32_t address = page << 12;
+              if (!page || !bytes || bytes > (32u << 20) || address >= SharedMemory::kBufferSize ||
+                  bytes > SharedMemory::kBufferSize - address) continue;
+              auto path = fmt::format("{}/s{}_tex_{:08X}_{}.bin", dd, g_draw_trace_swap_count,
+                                      address, bytes);
+              if (!std::filesystem::exists(path)) {
+                if (FILE* dump = fopen(path.c_str(), "wb")) {
+                  fwrite(memory_->TranslatePhysical<const void*>(address), 1, bytes, dump);
+                  fclose(dump);
+                }
+              }
+            }
+          }
+
+          if (tf.format != xenos::TextureFormat::k_8 || tf.tiled ||
+              tf.dimension != xenos::DataDimension::k2DOrStacked || tf.stacked) continue;
+          uint32_t addr = tf.base_address << 12;
+          uint32_t pitch = rex::align(uint32_t(tf.pitch) << 5, uint32_t(256));
+          uint32_t size = pitch * (uint32_t(tf.size_2d.height) + 1);
+          if (!addr || !size || size > (4u << 20) || addr >= SharedMemory::kBufferSize ||
+              size > SharedMemory::kBufferSize - addr) continue;
+          FILE* plane_dump = fopen(fmt::format("{}/s{}_d{}_tf{}_{:08X}.bin", dd,
+                                              g_draw_trace_swap_count, di, ti, addr).c_str(), "wb");
+          if (plane_dump) {
+            fwrite(memory_->TranslatePhysical<const void*>(addr), 1, size, plane_dump);
+            fclose(plane_dump);
+          }
+        }
         for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
           uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
           uint32_t j;
@@ -4428,6 +4553,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  log_slow_stage("buffer_upload");
   ScratchBufferAcquisition guest_dma_index_scratch_buffer;
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
@@ -4530,6 +4656,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                               0, 0, 0);
   }
 
+  log_slow_stage("draw_submission");
   // Invalidate textures in memexported memory and watch for changes.
   if (!memexport_ranges_.empty()) {
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
@@ -4565,6 +4692,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  log_slow_stage("ownership_and_readback");
   return true;
 }
 
@@ -5349,6 +5477,8 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
   size_t fences_total = submissions_in_flight_fences_.size();
   size_t fences_awaited = 0;
   if (await_submission > submission_completed_) {
+    AccumulateCpuTime wait_timer(REXCVAR_GET(gpu_frame_stats_path).empty()
+                                     ? nullptr : &frame_stats_.fence_wait_ms);
     // Await in a blocking way if requested.
     // TODO(Triang3l): Await only one fence. "Fence signal operations that are
     // defined by vkQueueSubmit additionally include in the first
@@ -5802,6 +5932,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+      ++frame_stats_.submissions;
     }
     if (submit_result != VK_SUCCESS) {
       REXGPU_ERROR("Failed to submit a Vulkan command buffer");
@@ -6943,26 +7074,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
-  // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
-  current_graphics_descriptor_set_values_up_to_date_ &=
-      ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
-
-  // Make sure new descriptor sets are bound to the command buffer.
-
-  current_graphics_descriptor_sets_bound_up_to_date_ &=
-      current_graphics_descriptor_set_values_up_to_date_;
-
-  // Fill the texture and sampler write image infos.
-
-  bool write_vertex_textures =
-      (texture_count_vertex || sampler_count_vertex) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex));
-  bool write_pixel_textures =
-      (texture_count_pixel || sampler_count_pixel) &&
-      !(current_graphics_descriptor_set_values_up_to_date_ &
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  // Resolve the actual image views and sampler handles before deciding whether
+  // a descriptor set needs replacing. Guest fetch constants alone aren't enough:
+  // a texture may have been reloaded, or its view/swizzle may have changed.
+  bool write_vertex_textures = texture_count_vertex || sampler_count_vertex;
+  bool write_pixel_textures = texture_count_pixel || sampler_count_pixel;
   descriptor_write_image_info_.clear();
   descriptor_write_image_info_.reserve(
       (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
@@ -7007,6 +7123,42 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       descriptor_image_info.sampler = sampler_pair.second;
     }
   }
+
+  auto texture_descriptors_changed = [&](uint32_t stage, uint32_t set_index,
+                                         VkDescriptorSetLayout layout, size_t offset,
+                                         size_t count) {
+    if (!count) return false;
+    auto& cached = cached_texture_descriptors_[stage];
+    auto first = descriptor_write_image_info_.begin() + offset;
+    uint32_t set_bit = uint32_t(1) << set_index;
+    bool same = REXCVAR_GET(vulkan_reuse_texture_descriptors) &&
+                (current_graphics_descriptor_set_values_up_to_date_ & set_bit) &&
+                cached.layout == layout && cached.images.size() == count &&
+                std::equal(cached.images.begin(), cached.images.end(), first,
+                           [](const VkDescriptorImageInfo& a, const VkDescriptorImageInfo& b) {
+                             return a.sampler == b.sampler && a.imageView == b.imageView &&
+                                    a.imageLayout == b.imageLayout;
+                           });
+    if (same) {
+      ++frame_stats_.texture_sets_reused;
+      return false;
+    }
+    current_graphics_descriptor_set_values_up_to_date_ &= ~set_bit;
+    cached.layout = layout;
+    cached.images.assign(first, first + count);
+    return true;
+  };
+  write_vertex_textures = texture_descriptors_changed(
+      0, SpirvShaderTranslator::kDescriptorSetTexturesVertex,
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref(),
+      vertex_texture_image_info_offset, texture_count_vertex + sampler_count_vertex);
+  write_pixel_textures = texture_descriptors_changed(
+      1, SpirvShaderTranslator::kDescriptorSetTexturesPixel,
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref(),
+      pixel_texture_image_info_offset, texture_count_pixel + sampler_count_pixel);
+  // Rebind only replaced descriptor sets or sets disturbed by a layout change.
+  current_graphics_descriptor_sets_bound_up_to_date_ &=
+      current_graphics_descriptor_set_values_up_to_date_;
 
   // Write the new descriptor sets.
 
@@ -7058,6 +7210,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   }
   // Vertex shader textures and samplers.
   if (write_vertex_textures) {
+    ++frame_stats_.texture_sets_written;
     VkWriteDescriptorSet* write_textures =
         write_descriptor_sets.data() + write_descriptor_set_count;
     uint32_t texture_descriptor_set_write_count = WriteTransientTextureBindings(
@@ -7075,6 +7228,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
+    ++frame_stats_.texture_sets_written;
     VkWriteDescriptorSet* write_textures =
         write_descriptor_sets.data() + write_descriptor_set_count;
     uint32_t texture_descriptor_set_write_count = WriteTransientTextureBindings(

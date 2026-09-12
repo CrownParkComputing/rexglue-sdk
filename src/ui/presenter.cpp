@@ -29,6 +29,11 @@
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
 
+// Host UI side rails reserve space without changing guest viewports or HUD coordinates.
+REXCVAR_DEFINE_INT32(present_side_panel_percent, 0, "UI/Presenter",
+                    "Reserve this percentage of window width on each side for host panels")
+    .range(0, 30);
+
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
 
@@ -989,6 +994,24 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
         rescale_signed(flow.output_y, host_rt_height, surface_height_in_paint_connection_);
     output_height =
         rescale_unsigned(output_height, host_rt_height, surface_height_in_paint_connection_);
+  }
+
+  // Fit the complete guest picture between host UI rails. This does not modify
+  // the console render target, viewport or safe area, and never crops its HUD.
+  const uint32_t side_percent = uint32_t(std::clamp(REXCVAR_GET(present_side_panel_percent), 0, 30));
+  if (side_percent) {
+    const uint32_t inset = host_rt_width * side_percent / 100;
+    const uint32_t available_width = host_rt_width - inset * 2;
+    output_width = available_width;
+    output_height = rescale_unsigned(output_width, properties.display_aspect_ratio_y,
+                                    properties.display_aspect_ratio_x);
+    if (output_height > host_rt_height) {
+      output_height = host_rt_height;
+      output_width = rescale_unsigned(output_height, properties.display_aspect_ratio_x,
+                                      properties.display_aspect_ratio_y);
+    }
+    flow.output_x = int32_t(host_rt_width - output_width) / 2;
+    flow.output_y = int32_t(host_rt_height - output_height) / 2;
   }
 
   // The out-of-bounds checks are needed for correct letterbox calculations.

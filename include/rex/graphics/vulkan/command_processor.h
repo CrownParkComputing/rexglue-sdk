@@ -572,6 +572,19 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Temporary storage with reusable memory for writing image and sampler
   // descriptors.
   std::vector<VkDescriptorImageInfo> descriptor_write_image_info_;
+  struct CachedTextureDescriptors {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    std::vector<VkDescriptorImageInfo> images;
+  } cached_texture_descriptors_[2];
+  struct FrameStats {
+    double draw_cpu_ms = 0;
+    double fence_wait_ms = 0;
+    uint64_t draws = 0;
+    uint64_t submissions = 0;
+    uint64_t texture_sets_written = 0;
+    uint64_t texture_sets_reused = 0;
+    uint64_t last_swap_us = 0;
+  } frame_stats_;
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
 

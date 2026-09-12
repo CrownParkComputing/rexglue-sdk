@@ -99,6 +99,11 @@ class VulkanPipelineCache {
                                     bool* is_placeholder_out = nullptr) const;
 
  private:
+  void InitializeDriverCache(const std::filesystem::path& root, uint32_t title_id);
+  void SaveDriverCache();
+  VkPipelineCache driver_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path driver_cache_path_;
+  std::atomic<bool> driver_cache_dirty_{false};
   REXPACKEDSTRUCT(ShaderStoredHeader, {
     uint64_t ucode_data_hash;
 
@@ -261,6 +266,8 @@ class VulkanPipelineCache {
   // Description that can be passed from the command processor thread to the
   // creation threads, with everything needed from caches pre-looked-up.
   struct PipelineCreationArguments {
+    bool disable_optimization = false;
+    bool optimize_only = false;
     uint8_t priority = 0;
     std::pair<const PipelineDescription, Pipeline>* pipeline = nullptr;
     const PipelineLayoutProvider* pipeline_layout = nullptr;
@@ -275,6 +282,14 @@ class VulkanPipelineCache {
     // VK_NULL_HANDLE when dynamic rendering is used.
     VkRenderPass render_pass = VK_NULL_HANDLE;
   };
+  struct OptimizedPipeline {
+    Pipeline* destination;
+    VkPipeline pipeline;
+  };
+  std::mutex optimized_ready_lock_;
+  std::vector<OptimizedPipeline> optimized_ready_;
+  void PublishOptimizedPipelines();
+
   struct PipelineCreationArgumentsPriorityComparator {
     bool operator()(const PipelineCreationArguments& a, const PipelineCreationArguments& b) const {
       return a.priority < b.priority;

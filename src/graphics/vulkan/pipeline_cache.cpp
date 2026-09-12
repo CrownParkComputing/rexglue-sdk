@@ -14,6 +14,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -53,6 +55,10 @@ REXCVAR_DEFINE_INT32(
     vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
     "Number of pipeline creation threads for Vulkan async pipeline creation (-1 for auto)")
     .range(-1, 32)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(vulkan_pipeline_background_optimization, false, "GPU/Vulkan",
+    "Create complete first-use pipelines without optimization, then optimize in background")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
@@ -376,6 +382,9 @@ bool VulkanPipelineCache::Initialize() {
       creation_thread_count = std::min(uint32_t(REXCVAR_GET(vulkan_pipeline_creation_threads)),
                                        logical_processor_count);
     }
+    if (REXCVAR_GET(vulkan_pipeline_background_optimization)) {
+      creation_thread_count = std::min(creation_thread_count, size_t(2));
+    }
     for (size_t i = 0; i < creation_thread_count; ++i) {
       std::unique_ptr<rex::thread::Thread> creation_thread =
           rex::thread::Thread::Create({}, [this, i]() { CreationThread(i); });
@@ -388,6 +397,74 @@ bool VulkanPipelineCache::Initialize() {
   return true;
 }
 
+void VulkanPipelineCache::InitializeDriverCache(const std::filesystem::path& root,
+                                               uint32_t title_id) {
+  if (driver_cache_ != VK_NULL_HANDLE) return;
+  const auto* vd = command_processor_.GetVulkanDevice();
+  const auto& props = vd->properties();
+  auto dir = root / "shaders" / "vulkan_driver";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (!ec) {
+    driver_cache_path_ = dir / fmt::format("{:08X}-{:04X}-{:04X}-{:08X}.bin",
+        title_id, props.vendorID, props.deviceID, props.driverVersion);
+  }
+  std::vector<uint8_t> data;
+  std::ifstream input(driver_cache_path_, std::ios::binary | std::ios::ate);
+  const auto size = input ? input.tellg() : std::streampos(-1);
+  if (size >= std::streampos(sizeof(VkPipelineCacheHeaderVersionOne)) &&
+      size <= std::streampos(256 * 1024 * 1024)) {
+    data.resize(size_t(size));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char*>(data.data()), data.size())) data.clear();
+  }
+  if (!data.empty()) {
+    VkPipelineCacheHeaderVersionOne header;
+    std::memcpy(&header, data.data(), sizeof(header));
+    VkPhysicalDeviceProperties physical{};
+    vd->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(vd->physical_device(), &physical);
+    if (header.headerSize != sizeof(header) || header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+        header.vendorID != physical.vendorID || header.deviceID != physical.deviceID ||
+        std::memcmp(header.pipelineCacheUUID, physical.pipelineCacheUUID, VK_UUID_SIZE)) data.clear();
+  }
+  VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  // Default flags give internally synchronized access during parallel prewarm.
+  info.initialDataSize = data.size();
+  info.pInitialData = data.empty() ? nullptr : data.data();
+  auto result = vd->functions().vkCreatePipelineCache(vd->device(), &info, nullptr, &driver_cache_);
+  if (result != VK_SUCCESS && !data.empty()) {
+    info.initialDataSize = 0;
+    info.pInitialData = nullptr;
+    result = vd->functions().vkCreatePipelineCache(vd->device(), &info, nullptr, &driver_cache_);
+  }
+  if (result != VK_SUCCESS) driver_cache_ = VK_NULL_HANDLE;
+  REXGPU_INFO("Vulkan driver pipeline cache: {} bytes loaded, enabled={}", data.size(),
+              driver_cache_ != VK_NULL_HANDLE);
+}
+
+void VulkanPipelineCache::SaveDriverCache() {
+  if (driver_cache_ == VK_NULL_HANDLE || driver_cache_path_.empty() ||
+      !driver_cache_dirty_.exchange(false, std::memory_order_acq_rel)) return;
+  const auto* vd = command_processor_.GetVulkanDevice();
+  size_t size = 0;
+  if (vd->functions().vkGetPipelineCacheData(vd->device(), driver_cache_, &size, nullptr) != VK_SUCCESS ||
+      !size || size > 256 * 1024 * 1024) return;
+  std::vector<uint8_t> data(size);
+  // Concurrent creation can grow the cache; retry at the next flush if needed.
+  if (vd->functions().vkGetPipelineCacheData(vd->device(), driver_cache_, &size, data.data()) != VK_SUCCESS) {
+    driver_cache_dirty_.store(true, std::memory_order_release);
+    return;
+  }
+  auto temporary = driver_cache_path_;
+  temporary += ".tmp";
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(data.data()), size);
+  output.close();
+  std::error_code ec;
+  if (output) std::filesystem::rename(temporary, driver_cache_path_, ec);
+  if (!output || ec) driver_cache_dirty_.store(true, std::memory_order_release);
+}
+
 void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                   uint32_t title_id, bool blocking) {
   ShutdownShaderStorage();
@@ -395,6 +472,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
     std::lock_guard<std::mutex> lock(creation_request_lock_);
     startup_loading_ = false;
   }
+
+  InitializeDriverCache(cache_root, title_id);
 
   auto shader_storage_root = cache_root / "shaders";
   auto shader_storage_shareable_root = shader_storage_root / "shareable";
@@ -759,7 +838,7 @@ void VulkanPipelineCache::EndSubmission() {
     pipeline_storage_file_flush_needed_ = false;
   }
 
-  if (!creation_threads_.empty()) {
+  if (!creation_threads_.empty() && !REXCVAR_GET(vulkan_pipeline_background_optimization)) {
     bool startup_loading = false;
     {
       std::lock_guard<std::mutex> lock(creation_request_lock_);
@@ -788,6 +867,7 @@ void VulkanPipelineCache::EndSubmission() {
     }
   }
 
+  PublishOptimizedPipelines();
   ProcessDeferredPipelineDestructions(false);
 }
 
@@ -821,6 +901,13 @@ void VulkanPipelineCache::Shutdown() {
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  PublishOptimizedPipelines();
+  SaveDriverCache();
+  if (driver_cache_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyPipelineCache(device, driver_cache_, nullptr);
+    driver_cache_ = VK_NULL_HANDLE;
+  }
 
   ProcessDeferredPipelineDestructions(true);
 
@@ -1111,7 +1198,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
     }
   }
 
-  bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+  bool use_async = !REXCVAR_GET(vulkan_pipeline_background_optimization) &&
+                   REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
                    pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
   uint8_t async_priority = pipeline_util::kPriorityLowest;
   if (use_async) {
@@ -1157,6 +1245,20 @@ bool VulkanPipelineCache::ConfigurePipeline(
   }
 
   bool queued_async_creation = false;
+  if (REXCVAR_GET(vulkan_pipeline_background_optimization) && !creation_threads_.empty()) {
+    auto fast_arguments = creation_arguments_real;
+    fast_arguments.disable_optimization = true;
+    if (EnsurePipelineCreated(fast_arguments)) {
+      creation_arguments_real.optimize_only = true;
+      {
+        std::lock_guard<std::mutex> lock(creation_request_lock_);
+        creation_queue_.push(creation_arguments_real);
+      }
+      creation_request_cond_.notify_one();
+      queued_async_creation = true;
+    }
+    // On fast creation failure, fall back to ordinary optimized creation.
+  }
   if (use_async) {
     creation_arguments_real.priority = async_priority;
     PipelineCreationArguments creation_arguments_placeholder;
@@ -1206,6 +1308,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
 }
 
 bool VulkanPipelineCache::IsCreatingPipelines() const {
+  if (REXCVAR_GET(vulkan_pipeline_background_optimization)) return false;
   std::lock_guard<std::mutex> lock(creation_request_lock_);
   if (creation_threads_.empty()) {
     return startup_loading_;
@@ -3014,7 +3117,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
       creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
   bool creating_placeholder = fragment_shader_override != VK_NULL_HANDLE;
   if (existing_pipeline != VK_NULL_HANDLE) {
-    if (!is_placeholder || creating_placeholder) {
+    if ((!is_placeholder || creating_placeholder) && !creation_arguments.optimize_only) {
       return true;
     }
   }
@@ -3455,7 +3558,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   VkGraphicsPipelineCreateInfo pipeline_create_info;
   pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_create_info.pNext = use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
-  pipeline_create_info.flags = 0;
+  pipeline_create_info.flags = creation_arguments.disable_optimization
+      ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
   pipeline_create_info.stageCount = shader_stage_count;
   pipeline_create_info.pStages = shader_stages.data();
   pipeline_create_info.pVertexInputState = &vertex_input_state;
@@ -3480,8 +3584,22 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  VkResult create_result = dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-                                                         &pipeline_create_info, nullptr, &pipeline);
+  const auto creation_start = std::chrono::steady_clock::now();
+  VkResult create_result = VK_PIPELINE_COMPILE_REQUIRED;
+  if (creation_arguments.disable_optimization &&
+      vulkan_device->properties().pipelineCreationCacheControl) {
+    // Prefer a cached optimized pipeline, but never let this probe compile on
+    // the render thread. Older devices retain the complete fast-path fallback.
+    pipeline_create_info.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+    create_result = dfn.vkCreateGraphicsPipelines(device, driver_cache_, 1,
+                                                 &pipeline_create_info, nullptr, &pipeline);
+  }
+  if (create_result == VK_PIPELINE_COMPILE_REQUIRED) {
+    pipeline_create_info.flags = creation_arguments.disable_optimization
+        ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0;
+    create_result = dfn.vkCreateGraphicsPipelines(device, driver_cache_, 1,
+                                                 &pipeline_create_info, nullptr, &pipeline);
+  }
   if (create_result != VK_SUCCESS) {
     uint64_t ps_hash = creation_arguments.pixel_shader
                            ? creation_arguments.pixel_shader->shader().ucode_data_hash()
@@ -3496,6 +3614,20 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
         creation_arguments.tessellation_patch_control_points, description.render_pass_key.key,
         uint32_t(use_dynamic_rendering));
     return false;
+  }
+  if (creation_arguments.disable_optimization || creation_arguments.optimize_only) {
+    REXGPU_INFO("[PIPELINE] mode={} ms={:.2f} vs={:016X} ps={:016X}",
+        creation_arguments.optimize_only ? "background" : "fast",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - creation_start).count(),
+        description.vertex_shader_hash, description.pixel_shader_hash);
+  }
+  driver_cache_dirty_.store(true, std::memory_order_release);
+  if (creation_arguments.optimize_only) {
+    // Publish on the command-processor thread, which owns submission numbering.
+    // The complete fast pipeline stays live until its final GPU use completes.
+    std::lock_guard<std::mutex> lock(optimized_ready_lock_);
+    optimized_ready_.push_back({&creation_arguments.pipeline->second, pipeline});
+    return true;
   }
   bool was_placeholder =
       creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
@@ -3539,7 +3671,7 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
     }
 
     bool created = EnsurePipelineCreated(creation_arguments);
-    if (!created) {
+    if (!created && !creation_arguments.optimize_only) {
       bool has_placeholder =
           creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
       VkPipeline pipeline =
@@ -3573,7 +3705,7 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
       creation_queue_.pop();
     }
     bool created = EnsurePipelineCreated(creation_arguments);
-    if (!created) {
+    if (!created && !creation_arguments.optimize_only) {
       bool has_placeholder =
           creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
       VkPipeline pipeline =
@@ -3584,6 +3716,22 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
                                                            std::memory_order_release);
       }
+    }
+  }
+}
+
+void VulkanPipelineCache::PublishOptimizedPipelines() {
+  std::vector<OptimizedPipeline> ready;
+  {
+    std::lock_guard<std::mutex> lock(optimized_ready_lock_);
+    ready.swap(optimized_ready_);
+  }
+  for (const auto& optimized : ready) {
+    VkPipeline previous = optimized.destination->pipeline.exchange(optimized.pipeline,
+                                                                  std::memory_order_acq_rel);
+    if (previous != VK_NULL_HANDLE) {
+      std::lock_guard<std::mutex> lock(deferred_destroy_lock_);
+      deferred_destroy_pipelines_.emplace_back(command_processor_.GetCurrentSubmission(), previous);
     }
   }
 }
@@ -3650,7 +3798,9 @@ void VulkanPipelineCache::StorageWriteThread() {
     bool write_pipeline = false;
     {
       std::unique_lock<std::mutex> lock(storage_write_request_lock_);
-      if (storage_write_thread_shutdown_) {
+      if (storage_write_thread_shutdown_ && storage_write_shader_queue_.empty() &&
+          storage_write_pipeline_queue_.empty() && !storage_write_flush_shaders_ &&
+          !storage_write_flush_pipelines_) {
         return;
       }
       if (!storage_write_shader_queue_.empty()) {
@@ -3670,7 +3820,14 @@ void VulkanPipelineCache::StorageWriteThread() {
         flush_pipelines = true;
       }
       if (!shader && !write_pipeline) {
-        storage_write_request_cond_.wait(lock);
+        // Flush requests are work too. Waiting here used to leave the newest
+        // pipeline descriptions buffered until another pipeline arrived.
+        if (flush_shaders || flush_pipelines) continue;
+        if (storage_write_request_cond_.wait_for(lock, std::chrono::seconds(2)) ==
+            std::cv_status::timeout) {
+          lock.unlock();
+          SaveDriverCache();
+        }
         continue;
       }
     }

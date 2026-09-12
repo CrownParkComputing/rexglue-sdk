@@ -661,6 +661,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (with_gpu_emulation) {
       XE_UI_VULKAN_FEATURE_2(features_1_3, shaderDemoteToHelperInvocation);
       XE_UI_VULKAN_FEATURE_2(features_1_3, dynamicRendering);
+      XE_UI_VULKAN_FEATURE_2(features_1_3, pipelineCreationCacheControl);
     }
   } else {
     if (ext_1_3_KHR_dynamic_rendering) {

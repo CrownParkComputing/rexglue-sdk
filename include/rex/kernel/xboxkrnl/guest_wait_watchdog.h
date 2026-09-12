@@ -34,7 +34,11 @@ class GuestWaitScope {
  public:
   // signal_target is the object the call signals first, for the
   // signal-and-wait handshake; 0 when the API only waits.
-  GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target = 0);
+  // target is the guest handle (or object pointer for the Ke* APIs).
+  // target_object is the waited object's guest address when the handle form is
+  // used, so a KeSetEvent on that address still matches this wait.
+  GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target = 0,
+                 uint32_t target_object = 0);
   ~GuestWaitScope();
 
   GuestWaitScope(const GuestWaitScope&) = delete;

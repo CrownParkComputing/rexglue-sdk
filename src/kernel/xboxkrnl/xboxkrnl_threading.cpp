@@ -464,6 +464,7 @@ void KeInitializeEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 event_type, u32 
 }
 
 uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
+  RecordGuestSignal(rex::system::kernel_state()->memory()->HostToGuestVirtual(event_ptr));
   auto ev = XObject::GetNativeObject<XEvent>(REX_KERNEL_STATE(), event_ptr);
   if (!ev) {
     assert_always();
@@ -478,6 +479,7 @@ u32 KeSetEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
 }
 
 u32 KePulseEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
+  RecordGuestSignal(event_ptr.guest_address());
   auto ev = XObject::GetNativeObject<XEvent>(REX_KERNEL_STATE(), event_ptr);
   if (!ev) {
     assert_always();
@@ -616,6 +618,7 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment, u
 
 u32 KeReleaseSemaphore_entry(ppc_ptr_t<X_KSEMAPHORE> semaphore_ptr, u32 increment, u32 adjustment,
                              u32 wait) {
+  RecordGuestSignal(semaphore_ptr.guest_address());
   return xeKeReleaseSemaphore(semaphore_ptr, increment, adjustment, wait);
 }
 
@@ -866,7 +869,8 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-    GuestWaitScope wait_scope("NtWaitForSingleObjectEx", object_handle);
+    GuestWaitScope wait_scope("NtWaitForSingleObjectEx", object_handle, 0,
+                              object->guest_object());
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
@@ -948,7 +952,8 @@ u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u
   if (signal_object && wait_object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     RecordGuestSignal(signal_handle);
-    GuestWaitScope wait_scope("NtSignalAndWaitForSingleObjectEx", wait_handle, signal_handle);
+    GuestWaitScope wait_scope("NtSignalAndWaitForSingleObjectEx", wait_handle, signal_handle,
+                              wait_object->guest_object());
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3, 1, alertable,
                                     timeout_ptr ? &timeout : nullptr);
   } else {

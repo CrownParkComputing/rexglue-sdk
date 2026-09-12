@@ -42,6 +42,7 @@ struct WaitRecord {
   const char* api;
   uint32_t target;
   uint32_t signal_target;
+  uint32_t target_object;
   std::chrono::steady_clock::time_point started;
   std::string thread_name;
 };
@@ -90,10 +91,20 @@ void WatchdogMain() {
       double since_signal = -1.0;
       {
         std::lock_guard<std::mutex> lock(g_waits_lock);
-        auto it = g_signals.find(record.target);
-        if (it != g_signals.end()) {
-          signals = it->second.count;
-          since_signal = std::chrono::duration<double>(now - it->second.last).count();
+        // A handle wait can be satisfied by a KeSetEvent on the object itself,
+        // so check both keys before reporting "never signalled".
+        for (uint32_t key : {record.target, record.target_object}) {
+          if (!key) {
+            continue;
+          }
+          auto it = g_signals.find(key);
+          if (it != g_signals.end()) {
+            signals += it->second.count;
+            const double age = std::chrono::duration<double>(now - it->second.last).count();
+            if (since_signal < 0.0 || age < since_signal) {
+              since_signal = age;
+            }
+          }
         }
       }
       // The interesting case is a signal that arrived DURING the wait: the
@@ -127,7 +138,8 @@ void EnsureWatchdog() {
 
 }  // namespace
 
-GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target) {
+GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal_target,
+                               uint32_t target_object) {
   if (REXCVAR_GET(guest_wait_report_seconds) == 0) {
     return;
   }
@@ -148,7 +160,7 @@ GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal
   if (g_waits.find(thread_id) != g_waits.end()) {
     return;
   }
-  g_waits.emplace(thread_id, WaitRecord{api, target, signal_target,
+  g_waits.emplace(thread_id, WaitRecord{api, target, signal_target, target_object,
                                         std::chrono::steady_clock::now(), std::move(name)});
   recorded_ = true;
 }

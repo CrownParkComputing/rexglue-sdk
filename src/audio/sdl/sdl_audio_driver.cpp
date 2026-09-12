@@ -124,6 +124,42 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
 
   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
 
+  // Diagnostic: is the guest handing us the same frame more than once? A
+  // repeated block is what "slow and robotic" audio sounds like, and it matters
+  // whether the repeat is already in the guest's buffer or appears later in
+  // this driver's queue. Off unless REX_AUDIO_REPEAT_STATS=1.
+  {
+    static int enabled = -1;
+    if (enabled < 0) {
+      const char* value = getenv("REX_AUDIO_REPEAT_STATS");
+      enabled = (value && *value == '1') ? 1 : 0;
+    }
+    if (enabled) {
+      static uint64_t history[8] = {};
+      static size_t history_count = 0;
+      static uint64_t submitted = 0, repeats = 0, repeat_at_4 = 0;
+      uint64_t hash = 1469598103934665603ull;
+      const auto* bytes = reinterpret_cast<const unsigned char*>(input_frame);
+      for (size_t i = 0; i < frame_samples_ * sizeof(float); ++i) {
+        hash = (hash ^ bytes[i]) * 1099511628211ull;
+      }
+      for (size_t back = 0; back < 8 && back < history_count; ++back) {
+        if (history[(history_count - 1 - back) % 8] == hash) {
+          ++repeats;
+          if (back == 3) ++repeat_at_4;
+          break;
+        }
+      }
+      history[history_count % 8] = hash;
+      ++history_count;
+      if (++submitted % 188 == 0) {  // ~once a second at 256 samples / 48 kHz
+        REXAPU_INFO("audio repeats: {} of {} submitted frames matched one of the previous 8 "
+                    "({} of them exactly 4 frames back)",
+                    repeats, submitted, repeat_at_4);
+      }
+    }
+  }
+
   static uint32_t sdl_submit_count = 0;
   if (sdl_submit_count < 10) {
     REXAPU_DEBUG("SDLAudioDriver::SubmitFrame: frame_ptr={:08X} queued_count={}", frame_ptr,

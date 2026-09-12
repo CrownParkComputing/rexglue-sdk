@@ -526,6 +526,8 @@ u32 NtCreateEvent_entry(mapped_u32 handle_ptr, ppc_ptr_t<X_OBJECT_ATTRIBUTES> ob
 
   if (handle_ptr) {
     *handle_ptr = ev->handle();
+    RecordGuestObjectCreation("Event", ev->handle(), ev->guest_object(),
+                              event_type ? "synchronization" : "notification");
   }
   return X_STATUS_SUCCESS;
 }
@@ -655,6 +657,7 @@ u32 NtCreateSemaphore_entry(mapped_u32 handle_ptr, mapped_void obj_attributes_pt
 
   if (handle_ptr) {
     *handle_ptr = sem->handle();
+    RecordGuestObjectCreation("Semaphore", sem->handle(), sem->guest_object(), "");
   }
 
   return X_STATUS_SUCCESS;

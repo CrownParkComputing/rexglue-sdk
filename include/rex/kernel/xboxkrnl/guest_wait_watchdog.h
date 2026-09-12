@@ -53,4 +53,10 @@ class GuestWaitScope {
 // the watchdog is enabled.
 void RecordGuestSignal(uint32_t handle);
 
+// Notes a kernel object as the guest creates it, with the guest function that
+// asked for it. When the watchdog then reports a wait on that object, the
+// creator is the first place to look for whoever was meant to signal it.
+void RecordGuestObjectCreation(const char* kind, uint32_t handle, uint32_t guest_object,
+                               const char* detail);
+
 }  // namespace rex::kernel::xboxkrnl

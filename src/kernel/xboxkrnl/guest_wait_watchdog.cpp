@@ -43,6 +43,7 @@ struct WaitRecord {
   uint32_t target;
   uint32_t signal_target;
   uint32_t target_object;
+  uint32_t caller_lr;
   std::chrono::steady_clock::time_point started;
   std::string thread_name;
 };
@@ -112,11 +113,12 @@ void WatchdogMain() {
       // bug rather than a guest handshake nobody completes.
       const bool signalled_during_wait = signals && since_signal >= 0.0 && since_signal < seconds;
       REXLOG_WARN(
-          "[GUESTWAIT]   {:<24} {} on {:#010x}{} for {:.1f} s (signalled {} times{}{})",
+          "[GUESTWAIT]   {:<24} {} on {:#010x}{} from lr {:#010x} for {:.1f} s "
+          "(signalled {} times{}{})",
           record.thread_name.empty() ? "?" : record.thread_name, record.api, record.target,
           record.signal_target ? fmt::format(", signalling {:#010x}", record.signal_target)
                                : std::string(),
-          seconds, signals,
+          record.caller_lr, seconds, signals,
           signals ? fmt::format(", last {:.1f} s ago", since_signal) : std::string(),
           signalled_during_wait ? " <- SIGNALLED WHILE WAITING" : "");
     }
@@ -151,6 +153,13 @@ GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal
   // fall back to the guest name.
   auto* thread = rex::system::XThread::GetCurrentThread();
   std::string name = thread ? thread->name() : std::string();
+  // The guest return address says which recompiled function is doing the
+  // waiting, which is the difference between an address and a place in the
+  // code to read.
+  uint32_t caller_lr = 0;
+  if (thread && thread->thread_state() && thread->thread_state()->context()) {
+    caller_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+  }
   char host_name[32] = {};
   if (pthread_getname_np(pthread_self(), host_name, sizeof(host_name)) == 0 && host_name[0]) {
     name = host_name;
@@ -160,9 +169,23 @@ GuestWaitScope::GuestWaitScope(const char* api, uint32_t target, uint32_t signal
   if (g_waits.find(thread_id) != g_waits.end()) {
     return;
   }
-  g_waits.emplace(thread_id, WaitRecord{api, target, signal_target, target_object,
+  g_waits.emplace(thread_id, WaitRecord{api, target, signal_target, target_object, caller_lr,
                                         std::chrono::steady_clock::now(), std::move(name)});
   recorded_ = true;
+}
+
+void RecordGuestObjectCreation(const char* kind, uint32_t handle, uint32_t guest_object,
+                               const char* detail) {
+  if (REXCVAR_GET(guest_wait_report_seconds) == 0) {
+    return;
+  }
+  auto* thread = rex::system::XThread::GetCurrentThread();
+  uint32_t caller_lr = 0;
+  if (thread && thread->thread_state() && thread->thread_state()->context()) {
+    caller_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+  }
+  REXLOG_WARN("[GUESTWAIT] created {} handle {:#010x} object {:#010x} {} from lr {:#010x}", kind,
+              handle, guest_object, detail, caller_lr);
 }
 
 void RecordGuestSignal(uint32_t handle) {

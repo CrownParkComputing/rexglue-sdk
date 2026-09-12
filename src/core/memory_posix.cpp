@@ -156,34 +156,131 @@ struct LinuxMapEntry {
   char perms[5] = {};
 };
 
-// Parse a line from /proc/self/maps into a LinuxMapEntry
-static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
-  out = LinuxMapEntry{};
-  unsigned long long start = 0, end = 0;
-  char perms[5] = {};
-  const int matched = std::sscanf(line.c_str(), "%llx-%llx %4s", &start, &end, perms);
-  if (matched < 3)
-    return false;
-  out.start = static_cast<uintptr_t>(start);
-  out.end = static_cast<uintptr_t>(end);
-  std::memcpy(out.perms, perms, sizeof(out.perms));
-  return out.start < out.end;
-}
+// Scans /proc/self/maps incrementally. The kernel formats this file as it is
+// read, so reading all of it costs real time in the kernel; entries are parsed
+// out of a small buffer as they arrive and the scan stops at the first answer.
+// No allocation and no sscanf per line: this runs on the memory-fault path,
+// where profiles showed the old getline/sscanf parse costing more than the
+// busiest function in the GPU command processor.
+class ProcMapsScanner {
+ public:
+  ProcMapsScanner() : fd_(open("/proc/self/maps", O_RDONLY | O_CLOEXEC)) {}
+  ~ProcMapsScanner() {
+    if (fd_ >= 0) {
+      close(fd_);
+    }
+  }
+  ProcMapsScanner(const ProcMapsScanner&) = delete;
+  ProcMapsScanner& operator=(const ProcMapsScanner&) = delete;
+
+  bool ok() const { return fd_ >= 0; }
+
+  // Returns the next mapping, or false at end of file. Unparseable lines are
+  // skipped rather than ending the scan.
+  bool Next(LinuxMapEntry& out) {
+    while (true) {
+      const char* line_end = static_cast<const char*>(
+          memchr(buffer_ + begin_, '\n', end_ - begin_));
+      if (!line_end) {
+        if (!Refill()) {
+          return false;
+        }
+        continue;
+      }
+      const size_t line_begin = begin_;
+      const size_t line_length = size_t(line_end - (buffer_ + begin_));
+      begin_ += line_length + 1;
+      if (ParseLine(buffer_ + line_begin, line_length, out)) {
+        return true;
+      }
+    }
+  }
+
+ private:
+  // Moves any partial line to the front and reads more. False at end of file
+  // (a trailing partial line without a newline is discarded, as before).
+  bool Refill() {
+    if (begin_ > 0) {
+      memmove(buffer_, buffer_ + begin_, end_ - begin_);
+      end_ -= begin_;
+      begin_ = 0;
+    }
+    if (end_ == sizeof(buffer_)) {
+      return false;  // a single line longer than the buffer: give up on it
+    }
+    const ssize_t read_bytes = read(fd_, buffer_ + end_, sizeof(buffer_) - end_);
+    if (read_bytes <= 0) {
+      return false;
+    }
+    end_ += size_t(read_bytes);
+    return true;
+  }
+
+  static bool ParseLine(const char* line, size_t length, LinuxMapEntry& out) {
+    size_t i = 0;
+    auto parse_hex = [line, length, &i](uintptr_t& value) {
+      const size_t first = i;
+      value = 0;
+      while (i < length) {
+        const char c = line[i];
+        uintptr_t digit;
+        if (c >= '0' && c <= '9') {
+          digit = uintptr_t(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+          digit = uintptr_t(c - 'a') + 10;
+        } else if (c >= 'A' && c <= 'F') {
+          digit = uintptr_t(c - 'A') + 10;
+        } else {
+          break;
+        }
+        value = (value << 4) | digit;
+        ++i;
+      }
+      return i > first;
+    };
+
+    out = LinuxMapEntry{};
+    uintptr_t start = 0;
+    uintptr_t end = 0;
+    if (!parse_hex(start) || i >= length || line[i] != '-') {
+      return false;
+    }
+    ++i;  // '-'
+    if (!parse_hex(end) || i >= length || line[i] != ' ') {
+      return false;
+    }
+    ++i;  // ' '
+    if (length - i < 4) {
+      return false;
+    }
+    out.start = start;
+    out.end = end;
+    std::memcpy(out.perms, line + i, 4);
+    out.perms[4] = '\0';
+    return out.start < out.end;
+  }
+
+  int fd_;
+  char buffer_[8192];
+  size_t begin_ = 0;
+  size_t end_ = 0;
+};
 
 // Find the mapping entry in /proc/self/maps that contains the given address
 static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
-  std::ifstream maps("/proc/self/maps");
-  if (!maps.is_open())
+  ProcMapsScanner scanner;
+  if (!scanner.ok()) {
     return false;
-  std::string line;
-  while (std::getline(maps, line)) {
-    LinuxMapEntry e;
-    if (!ParseProcMapsLine(line, e))
-      continue;
-    if (addr >= e.start && addr < e.end) {
-      out_entry = e;
+  }
+  LinuxMapEntry entry;
+  while (scanner.Next(entry)) {
+    if (addr >= entry.start && addr < entry.end) {
+      out_entry = entry;
       return true;
+    }
+    if (entry.start > addr) {
+      break;  // /proc/self/maps is ordered by address; we have passed it.
     }
   }
   return false;
@@ -191,8 +288,9 @@ static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
 
 // Check if [base, base+length) is fully covered by existing mappings (no gaps)
 static bool IsRangeFullyMapped(void* base_address, size_t length) {
-  if (!base_address || length == 0)
+  if (!base_address || length == 0) {
     return false;
+  }
 
   const uintptr_t begin = reinterpret_cast<uintptr_t>(base_address);
   const uintptr_t end = begin + length;
@@ -200,25 +298,26 @@ static bool IsRangeFullyMapped(void* base_address, size_t length) {
     return false;
   }
 
-  std::ifstream maps("/proc/self/maps");
-  if (!maps.is_open())
+  ProcMapsScanner scanner;
+  if (!scanner.ok()) {
     return false;
-
-  uintptr_t cursor = begin;
-  std::string line;
-  while (std::getline(maps, line)) {
-    LinuxMapEntry e;
-    if (!ParseProcMapsLine(line, e))
-      continue;
-    if (e.end <= cursor)
-      continue;
-    if (e.start > cursor)
-      return false;  // gap found
-    cursor = e.end;
-    if (cursor >= end)
-      return true;
   }
-  return cursor >= end;
+
+  uintptr_t covered_to = begin;
+  LinuxMapEntry entry;
+  while (scanner.Next(entry)) {
+    if (entry.end <= covered_to) {
+      continue;
+    }
+    if (entry.start > covered_to) {
+      return false;  // gap found
+    }
+    covered_to = entry.end;
+    if (covered_to >= end) {
+      return true;
+    }
+  }
+  return covered_to >= end;
 }
 
 // Convert /proc/self/maps permission chars to PageAccess

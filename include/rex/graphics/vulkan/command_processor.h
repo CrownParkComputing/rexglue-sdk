@@ -579,6 +579,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   struct FrameStats {
     double draw_cpu_ms = 0;
     double fence_wait_ms = 0;
+    double resolve_cpu_ms = 0;
+    double readback_sync_ms = 0;
+    double readback_copy_ms = 0;
+    uint64_t readback_count = 0;
+    uint64_t readback_bytes = 0;
     uint64_t draws = 0;
     uint64_t submissions = 0;
     uint64_t texture_sets_written = 0;

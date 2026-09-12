@@ -20,6 +20,7 @@ add_executable(unit_tests
     codegen/output_partition_test.cpp
     codegen/output_stamp_test.cpp
     graphics/memexport_copy_test.cpp
+    graphics/resolve_readback_test.cpp
 )
 
 target_sources(unit_tests PRIVATE

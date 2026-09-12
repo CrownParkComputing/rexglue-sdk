@@ -45,6 +45,7 @@
 #include <unordered_set>
 #include <filesystem>
 #include <fstream>
+#include <rex/graphics/util/resolve_readback.h>
 
 #include <rex/graphics/vulkan/shared_memory.h>
 #include <rex/graphics/xenos.h>
@@ -62,6 +63,10 @@ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
 
 REXCVAR_DEFINE_BOOL(gpu_log_resolve_readbacks, false, "GPU",
                    "Log resolve readback destinations for CPU texture diagnostics")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(gpu_readback_ss_compositor, false, "GPU",
+                   "Restrict resolve readback to Split/Second CPU compositor surfaces")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(vulkan_readback_memexport, false, "GPU/Vulkan",
@@ -2380,15 +2385,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes\n");
       } else {
-        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu\n", g_draw_trace_swap_count,
+        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu\n", g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
                 (unsigned long long)frame_stats_.draws,
                 (unsigned long long)frame_stats_.submissions,
                 (unsigned long long)frame_stats_.texture_sets_written,
-                (unsigned long long)frame_stats_.texture_sets_reused);
+                (unsigned long long)frame_stats_.texture_sets_reused,
+                frame_stats_.resolve_cpu_ms, frame_stats_.readback_sync_ms,
+                frame_stats_.readback_copy_ms,
+                (unsigned long long)frame_stats_.readback_count,
+                (unsigned long long)frame_stats_.readback_bytes);
       }
       fclose(f);
     }
@@ -4917,6 +4926,8 @@ bool VulkanCommandProcessor::IssueCopy() {
 }
 
 bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+  const bool collect_stats = !REXCVAR_GET(gpu_frame_stats_path).empty();
+  AccumulateCpuTime resolve_timer(collect_stats ? &frame_stats_.resolve_cpu_ms : nullptr);
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
@@ -4929,6 +4940,16 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   if (!written_length) {
     return true;
+  }
+
+  if (REXCVAR_GET(gpu_readback_ss_compositor)) {
+    const auto pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+    const auto info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+    if (!util::IsSplitSecondCompositorResolve(pitch.copy_dest_pitch,
+                                             pitch.copy_dest_height,
+                                             uint32_t(info.copy_dest_format), written_length)) {
+      return true;
+    }
   }
 
   if (REXCVAR_GET(gpu_log_resolve_readbacks)) {
@@ -5175,10 +5196,14 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 
   bool use_delayed_sync =
       readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
+  auto await_readback = [&]() {
+    AccumulateCpuTime sync_timer(collect_stats ? &frame_stats_.readback_sync_ms : nullptr);
+    return AwaitAllQueueOperationsCompletion();
+  };
   uint32_t read_index = write_index;
   if (use_delayed_sync) {
     read_index = 1 - write_index;
-  } else if (!AwaitAllQueueOperationsCompletion()) {
+  } else if (!await_readback()) {
     return true;
   }
 
@@ -5188,7 +5213,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                            readback.mapped_data[read_index] == nullptr)) {
     is_cache_miss = true;
     read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
+    if (!await_readback()) {
       return true;
     }
   }
@@ -5205,7 +5230,12 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 
     uint8_t* destination = memory_->TranslatePhysical(written_address);
     if (destination) {
+      AccumulateCpuTime copy_timer(collect_stats ? &frame_stats_.readback_copy_ms : nullptr);
       std::memcpy(destination, readback.mapped_data[read_index], written_length);
+      if (collect_stats) {
+        ++frame_stats_.readback_count;
+        frame_stats_.readback_bytes += written_length;
+      }
     }
   }
 

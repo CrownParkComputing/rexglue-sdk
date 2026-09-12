@@ -2381,13 +2381,18 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   ++g_draw_trace_swap_count;
   const auto& stats_path = REXCVAR_GET(gpu_frame_stats_path);
   if (!stats_path.empty()) {
+    // First-use pipeline creation happens inside a draw, so it belongs to the
+    // frame that is ending here.
+    pipeline_cache_->TakeDrawTimeCreationStats(frame_stats_.pipelines_created,
+                                               frame_stats_.pipeline_create_ms);
     uint64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms\n");
       } else {
-        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu\n", g_draw_trace_swap_count,
+        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f\n",
+                g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
                 (unsigned long long)frame_stats_.draws,
@@ -2397,7 +2402,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 frame_stats_.resolve_cpu_ms, frame_stats_.readback_sync_ms,
                 frame_stats_.readback_copy_ms,
                 (unsigned long long)frame_stats_.readback_count,
-                (unsigned long long)frame_stats_.readback_bytes);
+                (unsigned long long)frame_stats_.readback_bytes,
+                (unsigned long long)frame_stats_.pipelines_created,
+                frame_stats_.pipeline_create_ms);
       }
       fclose(f);
     }

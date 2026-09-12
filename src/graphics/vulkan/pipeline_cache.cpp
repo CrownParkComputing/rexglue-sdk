@@ -57,6 +57,14 @@ REXCVAR_DEFINE_INT32(
     .range(-1, 32)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(
+    shader_storage_seed_root, "", "GPU",
+    "Directory holding a shader and pipeline cache shipped with the title. Its "
+    "shareable files seed a user cache that does not have them yet, so a fresh "
+    "install starts with pipelines already built instead of compiling them "
+    "during the first frame that needs each one. A relative path is resolved "
+    "against the executable's folder. Empty disables seeding.");
+
 REXCVAR_DEFINE_BOOL(vulkan_pipeline_background_optimization, false, "GPU/Vulkan",
     "Create complete first-use pipelines without optimization, then optimize in background")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -465,6 +473,70 @@ void VulkanPipelineCache::SaveDriverCache() {
   if (!output || ec) driver_cache_dirty_.store(true, std::memory_order_release);
 }
 
+void VulkanPipelineCache::SeedShaderStorage(const std::filesystem::path& shareable_root,
+                                            uint32_t title_id,
+                                            bool edram_fragment_shader_interlock) {
+  const std::string& seed_root_setting = REXCVAR_GET(shader_storage_seed_root);
+  if (seed_root_setting.empty()) {
+    return;
+  }
+  std::filesystem::path seed_root(rex::to_path(seed_root_setting));
+  if (seed_root.is_relative()) {
+    seed_root = rex::filesystem::GetExecutableFolder() / seed_root;
+  }
+  std::error_code error;
+  if (!std::filesystem::is_directory(seed_root, error)) {
+    REXGPU_WARN("VulkanPipelineCache: shader_storage_seed_root is not a directory: {}",
+                rex::path_to_utf8(seed_root));
+    return;
+  }
+
+  // Only ever seed a file the user does not have. Merging into an existing
+  // cache would need duplicate handling in the append-only storage formats, and
+  // a user cache that already exists has the coverage its owner has played.
+  auto seed_file = [&](const std::string& name) {
+    const std::filesystem::path destination = shareable_root / name;
+    if (std::filesystem::exists(destination, error) &&
+        std::filesystem::file_size(destination, error) > 0) {
+      return;
+    }
+    const std::filesystem::path source = seed_root / name;
+    if (!std::filesystem::is_regular_file(source, error)) {
+      return;
+    }
+    if (!std::filesystem::copy_file(source, destination,
+                                    std::filesystem::copy_options::overwrite_existing, error)) {
+      REXGPU_WARN("VulkanPipelineCache: failed to seed {} from {}: {}", name,
+                  rex::path_to_utf8(source), error.message());
+      return;
+    }
+    REXGPU_INFO("VulkanPipelineCache: seeded {} from {}", name, rex::path_to_utf8(seed_root));
+  };
+
+  // The shader microcode and the pipeline descriptions are only useful
+  // together, so seed the pair or neither.
+  const std::string shaders_name = fmt::format("{:08X}.xsh", title_id);
+  const std::string pipelines_name =
+      fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
+  const std::filesystem::path shaders_destination = shareable_root / shaders_name;
+  const std::filesystem::path pipelines_destination = shareable_root / pipelines_name;
+  const bool have_shaders = std::filesystem::exists(shaders_destination, error) &&
+                            std::filesystem::file_size(shaders_destination, error) > 0;
+  const bool have_pipelines = std::filesystem::exists(pipelines_destination, error) &&
+                              std::filesystem::file_size(pipelines_destination, error) > 0;
+  if (have_shaders && have_pipelines) {
+    return;
+  }
+  if (have_shaders != have_pipelines) {
+    REXGPU_INFO(
+        "VulkanPipelineCache: not seeding, the user cache already has one of the two shareable "
+        "files");
+    return;
+  }
+  seed_file(shaders_name);
+  seed_file(pipelines_name);
+}
+
 void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& cache_root,
                                                   uint32_t title_id, bool blocking) {
   ShutdownShaderStorage();
@@ -489,6 +561,8 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
 
   bool edram_fragment_shader_interlock =
       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+
+  SeedShaderStorage(shader_storage_shareable_root, title_id, edram_fragment_shader_interlock);
 
   // Initialize the pipeline storage stream - read pipeline descriptions and
   // collect used shader modifications to translate.
@@ -697,6 +771,7 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
                                    : pipeline_description.depth_write_enable != 0;
     creation_arguments.priority = pipeline_util::CalculatePipelinePriority(
         bound_rts, shader_writes_color_targets, shader_writes_depth);
+    creation_arguments.startup_preload = true;
     pipeline_creations.push_back(creation_arguments);
   }
 
@@ -1305,6 +1380,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
     *pipeline_handle_out = &pipeline.second;
   }
   return pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr;
+}
+
+void VulkanPipelineCache::TakeDrawTimeCreationStats(uint64_t& count_out,
+                                                    double& milliseconds_out) {
+  count_out = draw_time_creation_count_.exchange(0, std::memory_order_relaxed);
+  milliseconds_out =
+      double(draw_time_creation_ns_.exchange(0, std::memory_order_relaxed)) / 1e6;
 }
 
 bool VulkanPipelineCache::IsCreatingPipelines() const {
@@ -3615,10 +3697,17 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
         uint32_t(use_dynamic_rendering));
     return false;
   }
+  const double creation_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - creation_start)
+          .count();
+  if (!creation_arguments.startup_preload && !creation_arguments.optimize_only) {
+    // First use of this pipeline in a frame: this time was spent inside a draw.
+    draw_time_creation_count_.fetch_add(1, std::memory_order_relaxed);
+    draw_time_creation_ns_.fetch_add(uint64_t(creation_ms * 1e6), std::memory_order_relaxed);
+  }
   if (creation_arguments.disable_optimization || creation_arguments.optimize_only) {
     REXGPU_INFO("[PIPELINE] mode={} ms={:.2f} vs={:016X} ps={:016X}",
-        creation_arguments.optimize_only ? "background" : "fast",
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - creation_start).count(),
+        creation_arguments.optimize_only ? "background" : "fast", creation_ms,
         description.vertex_shader_hash, description.pixel_shader_hash);
   }
   driver_cache_dirty_.store(true, std::memory_order_release);

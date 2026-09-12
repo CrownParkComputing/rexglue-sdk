@@ -588,6 +588,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t submissions = 0;
     uint64_t texture_sets_written = 0;
     uint64_t texture_sets_reused = 0;
+    uint64_t pipelines_created = 0;
+    double pipeline_create_ms = 0;
     uint64_t last_swap_us = 0;
   } frame_stats_;
 

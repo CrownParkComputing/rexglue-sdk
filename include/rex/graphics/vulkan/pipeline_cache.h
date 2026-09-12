@@ -94,15 +94,29 @@ class VulkanPipelineCache {
       VulkanRenderTargetCache::RenderPassKey render_pass_key, VkPipeline& pipeline_out,
       const PipelineLayoutProvider*& pipeline_layout_out, void** pipeline_handle_out = nullptr);
   bool IsCreatingPipelines() const;
+
+  // Pipelines created outside the startup preload, i.e. first use during a
+  // frame. Returns the counts accumulated since the previous call and clears
+  // them, so a caller can attribute first-use stalls to the frame they land in.
+  void TakeDrawTimeCreationStats(uint64_t& count_out, double& milliseconds_out);
   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                     const PipelineLayoutProvider*& pipeline_layout_out,
                                     bool* is_placeholder_out = nullptr) const;
 
  private:
+  // Copies the shareable cache shipped with the title into a user cache that
+  // does not have it yet. See the shader_storage_seed_root cvar.
+  void SeedShaderStorage(const std::filesystem::path& shareable_root, uint32_t title_id,
+                         bool edram_fragment_shader_interlock);
   void InitializeDriverCache(const std::filesystem::path& root, uint32_t title_id);
   void SaveDriverCache();
   VkPipelineCache driver_cache_ = VK_NULL_HANDLE;
   std::filesystem::path driver_cache_path_;
+  // First-use (non-preload) pipeline creation, drained per frame by the
+  // command processor for the frame statistics.
+  std::atomic<uint64_t> draw_time_creation_count_{0};
+  std::atomic<uint64_t> draw_time_creation_ns_{0};
+
   std::atomic<bool> driver_cache_dirty_{false};
   REXPACKEDSTRUCT(ShaderStoredHeader, {
     uint64_t ucode_data_hash;
@@ -268,6 +282,9 @@ class VulkanPipelineCache {
   struct PipelineCreationArguments {
     bool disable_optimization = false;
     bool optimize_only = false;
+    // Set for the preload pass at startup, so its cost is not counted as a
+    // first-use stall on the draw path.
+    bool startup_preload = false;
     uint8_t priority = 0;
     std::pair<const PipelineDescription, Pipeline>* pipeline = nullptr;
     const PipelineLayoutProvider* pipeline_layout = nullptr;

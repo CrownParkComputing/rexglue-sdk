@@ -113,6 +113,11 @@ u32 ExCreateThread_entry(mapped_u32 handle_ptr, u32 stack_size, mapped_u32 threa
       "ExCreateThread", "stack={:#x} xapi_startup={:#x} start={:#x} context={:#x} flags={:#x}",
       (uint32_t)stack_size, (uint32_t)xapi_thread_startup, start_address.guest_address(),
       start_context.guest_address(), (uint32_t)creation_flags);
+  // Thread start addresses are the one caller the recompiled code never shows:
+  // nothing in the guest image refers to a thread entry by address, so a
+  // stalled thread's function can look uncalled. Logged with the wait report.
+  RecordGuestObjectCreation("Thread start", 0, start_address.guest_address(), "");
+
   // http://jafile.com/uploads/scoop/main.cpp.txt
   // DWORD
   // LPHANDLE Handle,
@@ -453,6 +458,8 @@ u32 KeTlsSetValue_entry(u32 tls_index, u32 tls_value) {
 }
 
 void KeInitializeEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 event_type, u32 initial_state) {
+  RecordGuestObjectCreation("KEVENT", 0, event_ptr.guest_address(),
+                            event_type ? "synchronization" : "notification");
   event_ptr.Zero();
   event_ptr->header.type = event_type;
   event_ptr->header.signal_state = (uint32_t)initial_state;
@@ -589,6 +596,7 @@ u32 NtClearEvent_entry(u32 handle) {
 
 // https://msdn.microsoft.com/en-us/library/windows/hardware/ff552150(v=vs.85).aspx
 void KeInitializeSemaphore_entry(ppc_ptr_t<X_KSEMAPHORE> semaphore_ptr, u32 count, u32 limit) {
+  RecordGuestObjectCreation("KSEMAPHORE", 0, semaphore_ptr.guest_address(), "");
   semaphore_ptr->header.type = 5;  // SemaphoreObject
   semaphore_ptr->header.signal_state = (uint32_t)count;
   semaphore_ptr->limit = (uint32_t)limit;

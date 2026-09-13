@@ -47,3 +47,9 @@ clear_memory_page_state = false
 # frame's first upload of a hot page. This is the first thing to turn off if
 # geometry flickers or lags a frame.
 gpu_hot_page_frames = 3
+
+# Answer the guest's on-screen keyboard from configuration instead of showing a
+# dialog. Titles use that keyboard for profile and gamertag names, and typing
+# into an ImGui popup while the game owns the keyboard is awkward. Set it to the
+# name the profile should have; empty (the default) shows the dialog.
+# keyboard_text = "PLAYER"

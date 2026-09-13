@@ -17,6 +17,12 @@
 
 #include <imgui.h>
 
+REXCVAR_DEFINE_STRING(
+    keyboard_text, "", "Kernel",
+    "Answer the guest's on-screen keyboard with this text and show no dialog. Titles use that "
+    "keyboard for profile and gamertag names, which otherwise means typing into an ImGui popup "
+    "while the game owns the keyboard. Empty shows the dialog.");
+
 REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
                     "Don't display any UI, using defaults for prompts as needed");
 #include <rex/kernel/xam/private.h>
@@ -434,6 +440,21 @@ u32 XamShowKeyboardUI_entry(u32 user_index, u32 flags, mapped_wstring default_te
   auto buffer_size = static_cast<size_t>(buffer_length) * 2;
 
   X_RESULT result;
+  // A title asking for a profile or gamertag name puts the guest's on-screen
+  // keyboard in the way of getting started, and typing into an ImGui popup
+  // while the game owns the keyboard is awkward at best. With keyboard_text
+  // set, answer from configuration instead: the guest gets the name straight
+  // away and no dialog appears. Empty (the default) keeps the dialog.
+  const std::string configured_text = REXCVAR_GET(keyboard_text);
+  if (!configured_text.empty()) {
+    const std::u16string answer = rex::string::to_utf16(configured_text);
+    auto run = [answer, buffer, buffer_length]() -> X_RESULT {
+      rex::string::copy_and_swap_truncating(buffer, answer, buffer_length);
+      return X_ERROR_SUCCESS;
+    };
+    REXKRNL_INFO("XamShowKeyboardUI: answering with keyboard_text '{}'", configured_text);
+    return xeXamDispatchHeadless(run, overlapped.guest_address());
+  }
   if (REXCVAR_GET(headless)) {
     auto run = [default_text, buffer, buffer_length, buffer_size]() -> X_RESULT {
       // Redirect default_text back into the buffer.

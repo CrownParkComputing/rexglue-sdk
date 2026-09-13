@@ -2385,14 +2385,17 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     // frame that is ending here.
     pipeline_cache_->TakeDrawTimeCreationStats(frame_stats_.pipelines_created,
                                                frame_stats_.pipeline_create_ms);
+    shared_memory_->TakeUploadStats(frame_stats_.upload_events, frame_stats_.upload_pages,
+                                    frame_stats_.upload_ms);
     uint64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms,upload_events,upload_pages,upload_ms\n");
       } else {
         fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f,"
-                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f\n",
+                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,"
+                "%llu,%llu,%.3f\n",
                 g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
@@ -2413,7 +2416,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 (unsigned long long)frame_stats_.full_shared_memory_requests,
                 (unsigned long long)frame_stats_.vfetch_requests,
                 (unsigned long long)frame_stats_.vfetch_skipped, frame_stats_.vfetch_request_ms,
-                frame_stats_.stage_ms[8], frame_stats_.stage_ms[9]);
+                frame_stats_.stage_ms[8], frame_stats_.stage_ms[9],
+                (unsigned long long)frame_stats_.upload_events,
+                (unsigned long long)frame_stats_.upload_pages, frame_stats_.upload_ms);
       }
       fclose(f);
     }

@@ -13,7 +13,40 @@
 
 #include <mutex>
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+
 namespace rex::thread {
+
+namespace detail {
+
+// Who is holding the kernel-wide lock when someone else has to wait for it.
+// The mutex is a single recursive_mutex guarding everything the guest kernel
+// and the memory system touch, so when it becomes the bottleneck the only
+// question that matters is which call site holds it - and that is invisible in
+// a profile, where every waiter just sits in a futex. Recording the last
+// acquirer's return address costs one relaxed store per acquisition and names
+// the holder in the log. Off unless REX_LOCK_STATS=1.
+struct GlobalLockWatch {
+  static bool enabled() {
+    static const bool value = [] {
+      const char* env = getenv("REX_LOCK_STATS");
+      return env && *env == '1';
+    }();
+    return value;
+  }
+  static std::atomic<const void*>& holder() {
+    static std::atomic<const void*> value{nullptr};
+    return value;
+  }
+  // Waits longer than this are attributed to whoever held the lock.
+  static constexpr int64_t kReportMicroseconds = 200;
+  static void Report(const void* blocker, int64_t microseconds);
+};
+
+}  // namespace detail
 
 // The global critical region mutex singleton.
 // This must guard any operation that may suspend threads or be sensitive to
@@ -67,6 +100,20 @@ class global_critical_region {
 
   // Acquires a lock on the global critical section.
   inline std::unique_lock<std::recursive_mutex> Acquire() {
+    if (detail::GlobalLockWatch::enabled()) {
+      const void* blocker = detail::GlobalLockWatch::holder().load(std::memory_order_relaxed);
+      const auto start = std::chrono::steady_clock::now();
+      std::unique_lock<std::recursive_mutex> lock(mutex());
+      const auto waited = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+      detail::GlobalLockWatch::holder().store(__builtin_return_address(0),
+                                              std::memory_order_relaxed);
+      if (waited >= detail::GlobalLockWatch::kReportMicroseconds) {
+        detail::GlobalLockWatch::Report(blocker, waited);
+      }
+      return lock;
+    }
     return std::unique_lock<std::recursive_mutex>(mutex());
   }
 

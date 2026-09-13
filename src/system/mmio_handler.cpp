@@ -407,18 +407,6 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     }
   }
   if (!range) {
-    // Recheck if the pages are still protected (race condition - another thread
-    // clears the watch we just hit).
-    // Do this under the lock so we don't introduce another race condition.
-    auto lock = global_critical_region_.Acquire();
-    memory::PageAccess cur_access;
-    size_t page_length = memory::page_size();
-    memory::QueryProtect(fault_host_address, page_length, cur_access);
-    if (cur_access != memory::PageAccess::kNoAccess &&
-        (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
-      // Another thread has cleared this watch. Abort.
-      return true;
-    }
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     //
@@ -427,6 +415,38 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     // guest code did. Name the recompiled function the first time each faulting
     // instruction is seen: that is the whole difference between "a null deref
     // somewhere" and an address to look at.
+    // The watch callback is authoritative and takes the same lock, so let it
+    // run first: a hit is the overwhelmingly common case, and the old
+    // pre-check asked the OS for the page's protection - which on Linux means
+    // parsing /proc/self/maps - on every guest write to a watched page, while
+    // holding the kernel-wide lock. That made this handler the single biggest
+    // source of lock contention in the process (1.9 s of blocking every 5 s on
+    // a streaming title), stalling the GPU thread that was trying to arm the
+    // next watch.
+    {
+      auto lock = global_critical_region_.Acquire();
+      if (access_violation_callback_ &&
+          access_violation_callback_(std::move(lock), access_violation_callback_context_,
+                                     fault_host_address, is_write)) {
+        return true;
+      }
+    }
+
+    // Not a watch hit. Either another thread cleared the watch between the
+    // fault and now - benign, retry the instruction - or this is a genuine
+    // access violation worth naming. Only here is the OS query worth its cost.
+    {
+      auto lock = global_critical_region_.Acquire();
+      memory::PageAccess cur_access;
+      size_t page_length = memory::page_size();
+      memory::QueryProtect(fault_host_address, page_length, cur_access);
+      if (cur_access != memory::PageAccess::kNoAccess &&
+          (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
+        // Another thread has cleared this watch. Abort.
+        return true;
+      }
+    }
+
     if (!is_write || true) {
       static std::mutex reported_lock;
       static std::set<uintptr_t> reported;
@@ -479,10 +499,6 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
               is_write ? "write" : "read");
         }
       }
-    }
-    if (access_violation_callback_) {
-      return access_violation_callback_(std::move(lock), access_violation_callback_context_,
-                                        fault_host_address, is_write);
     }
     return false;
   }

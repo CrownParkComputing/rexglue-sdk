@@ -686,6 +686,38 @@ void Memory::UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle)
 void Memory::EnablePhysicalMemoryAccessCallbacks(uint32_t physical_address, uint32_t length,
                                                  bool enable_invalidation_notifications,
                                                  bool enable_data_providers) {
+  // The three physical heaps are three views of the same memory, so all three
+  // take the global critical region for the same range - and that lock, which
+  // every guest thread also wants, is what this costs: measured at ~38 us of
+  // waiting per acquisition on a title arming watches thousands of times a
+  // second, against ~2 us for the mprotect it exists to guard. Taking it once
+  // around all three makes it one contended acquisition instead of three (the
+  // region is recursive, so the heaps may still take it themselves).
+  static int outer_stats = -1;
+  if (outer_stats < 0) {
+    const char* value = getenv("REX_WATCH_STATS");
+    outer_stats = (value && *value == '1') ? 1 : 0;
+  }
+  static std::atomic<uint64_t> outer_lock_ns{0}, outer_calls{0}, outer_next_report{0};
+  const auto outer_start =
+      outer_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  auto global_lock = global_critical_region_.Acquire();
+  if (outer_stats) {
+    outer_lock_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - outer_start)
+                                         .count()),
+                            std::memory_order_relaxed);
+    const uint64_t n = outer_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t now_s = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+    uint64_t due = outer_next_report.load(std::memory_order_relaxed);
+    if (now_s >= due && outer_next_report.compare_exchange_strong(due, now_s + 2)) {
+      REXSYS_INFO("[WATCH] outer global lock: {} calls, {:.1f} us waiting each", n,
+                  double(outer_lock_ns.exchange(0)) / 1000.0 / double(n));
+      outer_calls.store(0, std::memory_order_relaxed);
+    }
+  }
   heaps_.vA0000000.EnableAccessCallbacks(physical_address, length,
                                          enable_invalidation_notifications, enable_data_providers);
   heaps_.vC0000000.EnableAccessCallbacks(physical_address, length,
@@ -2116,7 +2148,39 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
                                                : rex::memory::PageAccess::kReadOnly;
   uint8_t* protect_base = membase_ + heap_base_;
   uint32_t protect_system_page_first = UINT32_MAX;
+  // Arming write watches lands on the GPU draw path (once per range of pages
+  // uploaded to the GPU), and it both takes the kernel-wide lock and mprotects.
+  // Which of the two dominates decides how to make it cheaper, so measure both.
+  // Off unless REX_WATCH_STATS=1.
+  static int watch_stats = -1;
+  if (watch_stats < 0) {
+    const char* value = getenv("REX_WATCH_STATS");
+    watch_stats = (value && *value == '1') ? 1 : 0;
+  }
+  static std::atomic<uint64_t> lock_ns{0}, protect_ns{0}, calls{0}, protects{0}, next_report{0};
+  const auto watch_start =
+      watch_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   auto global_lock = global_critical_region_.Acquire();
+  if (watch_stats) {
+    lock_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - watch_start)
+                                   .count()),
+                      std::memory_order_relaxed);
+    calls.fetch_add(1, std::memory_order_relaxed);
+  }
+  auto timed_protect = [&](uint8_t* address, size_t size) {
+    if (!watch_stats) {
+      rex::memory::Protect(address, size, protect_access);
+      return;
+    }
+    const auto protect_start = std::chrono::steady_clock::now();
+    rex::memory::Protect(address, size, protect_access);
+    protect_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - protect_start)
+                                      .count()),
+                         std::memory_order_relaxed);
+    protects.fetch_add(1, std::memory_order_relaxed);
+  };
   for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
     // Check if need to enable callbacks for the page and raise its protection.
     //
@@ -2175,16 +2239,29 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
       }
     } else {
       if (protect_system_page_first != UINT32_MAX) {
-        rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
-                             (i - protect_system_page_first) * system_page_size_, protect_access);
+        timed_protect(protect_base + protect_system_page_first * system_page_size_,
+                      (i - protect_system_page_first) * system_page_size_);
         protect_system_page_first = UINT32_MAX;
       }
     }
   }
   if (protect_system_page_first != UINT32_MAX) {
-    rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
-                         (system_page_last + 1 - protect_system_page_first) * system_page_size_,
-                         protect_access);
+    timed_protect(protect_base + protect_system_page_first * system_page_size_,
+                  (system_page_last + 1 - protect_system_page_first) * system_page_size_);
+  }
+  if (watch_stats) {
+    const uint64_t now_s = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+    uint64_t due = next_report.load(std::memory_order_relaxed);
+    if (now_s >= due && next_report.compare_exchange_strong(due, now_s + 2)) {
+      const uint64_t n = std::max<uint64_t>(calls.exchange(0), 1);
+      const uint64_t p = protects.exchange(0);
+      REXSYS_INFO("[WATCH] EnableAccessCallbacks: {} calls, lock {:.1f} us, protect {:.1f} us "
+                  "({} mprotects)",
+                  n, double(lock_ns.exchange(0)) / 1000.0 / double(n),
+                  double(protect_ns.exchange(0)) / 1000.0 / double(n), p);
+    }
   }
 }
 

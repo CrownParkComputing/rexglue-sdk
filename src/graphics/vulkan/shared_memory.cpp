@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -275,12 +276,64 @@ bool VulkanSharedMemory::UploadRanges(
   }
   // upload_page_ranges are sorted, use them to determine the range for the
   // ordering barrier.
+  // Where an upload's time actually goes: the barrier/render-pass break, the
+  // staging allocation (which can wait on a submission), or the copy itself.
+  // Off unless REX_SHMEM_STATS=1.
+  static int stats = -1;
+  if (stats < 0) {
+    const char* value = getenv("REX_SHMEM_STATS");
+    stats = (value && *value == '1') ? 1 : 0;
+  }
+  static std::atomic<uint64_t> barrier_ns{0}, valid_ns{0}, pool_ns{0}, copy_ns{0}, events{0};
+  static std::atomic<uint64_t> next_report{0};
+  const auto stage_clock = []() { return std::chrono::steady_clock::now(); };
+  auto stage_start = stats ? stage_clock() : std::chrono::steady_clock::time_point{};
+  auto stage_took = [&](std::atomic<uint64_t>& sink) {
+    if (!stats) {
+      return;
+    }
+    const auto now = stage_clock();
+    sink.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - stage_start)
+                                .count()),
+                   std::memory_order_relaxed);
+    stage_start = now;
+  };
+
   Use(Usage::kTransferDestination,
       std::make_pair(upload_page_ranges.front().first << page_size_log2(),
                      (upload_page_ranges.back().first + upload_page_ranges.back().second -
                       upload_page_ranges.front().first)
                          << page_size_log2()));
   command_processor_.SubmitBarriers(true);
+  stage_took(barrier_ns);
+
+  // Mark the whole span valid in one call, before copying rather than per
+  // staging chunk. Marking valid arms the guest write watch, which takes the
+  // kernel-wide lock - measured at ~38 us of waiting per acquisition against
+  // ~2 us for the mprotect it guards - so doing it once per upload instead of
+  // once per chunk is most of this path's cost. Pages inside the span that are
+  // already valid are unaffected, and the ordering against a concurrent guest
+  // write is unchanged: the copy happens outside any lock either way.
+  {
+    // Mark exactly the pages being uploaded valid - never the gaps between the
+    // ranges, which may be pages nobody asked for and nobody is uploading - but
+    // arm the watches for the whole span in ONE call. Arming is the expensive
+    // half (it takes the kernel-wide lock), and arming a page that is not valid
+    // costs at most one extra guest trap later.
+    bool any_new = false;
+    for (const auto& upload_range : upload_page_ranges) {
+      any_new |= MakeRangeValid(upload_range.first << page_size_log2(),
+                                upload_range.second << page_size_log2(), false, false);
+    }
+    if (any_new) {
+      const uint32_t span_first_page = upload_page_ranges.front().first;
+      const uint32_t span_last_page =
+          upload_page_ranges.back().first + upload_page_ranges.back().second - 1;
+      ArmWriteWatches(span_first_page << page_size_log2(),
+                      (span_last_page - span_first_page + 1) << page_size_log2());
+    }
+  }
+  stage_took(valid_ns);
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
   uint64_t submission_current = command_processor_.GetCurrentSubmission();
   bool successful = true;
@@ -295,12 +348,13 @@ bool VulkanSharedMemory::UploadRanges(
       uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
           submission_current, upload_range_length << page_size_log2(),
           size_t(1) << page_size_log2(), upload_buffer, upload_buffer_offset, upload_buffer_size);
+      stage_took(pool_ns);
       if (upload_buffer_mapping == nullptr) {
         REXGPU_ERROR("Shared memory: Failed to get a Vulkan upload buffer");
         successful = false;
         break;
       }
-      MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+
       std::memcpy(upload_buffer_mapping,
                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
                   upload_buffer_size);
@@ -328,6 +382,23 @@ bool VulkanSharedMemory::UploadRanges(
     command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
                                    uint32_t(upload_regions_.size()), upload_regions_.data());
     upload_regions_.clear();
+  }
+  if (stats) {
+    stage_took(copy_ns);
+    events.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t now_s = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+    uint64_t due = next_report.load(std::memory_order_relaxed);
+    if (now_s >= due && next_report.compare_exchange_strong(due, now_s + 2)) {
+      const uint64_t n = std::max<uint64_t>(events.exchange(0), 1);
+      REXGPU_INFO("[SHMEM] upload split per event: barrier {:.1f} us, make-valid {:.1f} us, "
+                  "staging {:.1f} us, copy {:.1f} us",
+                  double(barrier_ns.exchange(0)) / 1000.0 / double(n),
+                  double(valid_ns.exchange(0)) / 1000.0 / double(n),
+                  double(pool_ns.exchange(0)) / 1000.0 / double(n),
+                  double(copy_ns.exchange(0)) / 1000.0 / double(n));
+    }
   }
   return successful;
 }

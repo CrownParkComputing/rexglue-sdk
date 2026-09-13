@@ -56,6 +56,11 @@ class SharedMemory {
   }
   bool FlushDeferredRanges();
   void DiscardDeferredRanges() { deferred_ranges_.clear(); }
+  // Upload work done since the last call, for per-frame statistics: how many
+  // upload events (each one submits barriers and ends the open render pass),
+  // how many pages they moved, and how long they took.
+  void TakeUploadStats(uint64_t& events_out, uint64_t& pages_out, double& milliseconds_out);
+
   // Lock-free residency test for one range.
   bool RangeResident(uint32_t start, uint32_t length) const;
   void SetSystemPageBlocksValidWithGpuDataWritten();
@@ -154,7 +159,15 @@ class SharedMemory {
                                                 uint32_t length_allocations);
 
   // Mark the memory range as updated and protect it.
-  void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu);
+  // Marks the pages of the range valid. Returns whether any of them were not
+  // valid before, which is exactly when the guest write watch needs arming.
+  // With arm_watches false the caller takes that on, so several ranges can be
+  // covered by one arming call - arming is by far the expensive half.
+  bool MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu,
+                      bool arm_watches = true);
+  // Arms the guest write watch over a range. Arming pages that are not valid is
+  // harmless: a guest write to one simply traps once and unprotects it again.
+  void ArmWriteWatches(uint32_t start, uint32_t length);
 
   // Uploads a range of host pages - only called if host GPU sparse memory
   // allocation succeeded if needed. While uploading, MakeRangeValid must be
@@ -170,6 +183,9 @@ class SharedMemory {
  private:
   std::atomic<uint64_t> invalidation_version_{0};
   std::vector<std::pair<uint32_t, uint32_t>> deferred_ranges_;
+  std::atomic<uint64_t> upload_events_{0};
+  std::atomic<uint64_t> upload_pages_{0};
+  std::atomic<uint64_t> upload_ns_{0};
 
   memory::Memory& memory_;
 

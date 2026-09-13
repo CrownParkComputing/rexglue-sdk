@@ -298,9 +298,10 @@ bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
   return false;
 }
 
-void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu) {
+bool SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu,
+                                  bool arm_watches) {
   if (length == 0 || start >= kBufferSize) {
-    return;
+    return false;
   }
   length = std::min(length, kBufferSize - start);
   uint32_t last = start + length - 1;
@@ -311,29 +312,31 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
   bool enable_callbacks = false;
   uint32_t made_valid = 0;
 
-  {
-    auto global_lock = global_critical_region_.Acquire();
-
-    for (uint32_t i = valid_block_first; i <= valid_block_last; ++i) {
-      uint64_t valid_bits = UINT64_MAX;
-      if (i == valid_block_first) {
-        valid_bits &= ~((uint64_t(1) << (valid_page_first & 63)) - 1);
-      }
-      if (i == valid_block_last && (valid_page_last & 63) != 63) {
-        valid_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
-      }
-      // Already-valid pages already have CPU write callbacks armed. Repeated
-      // memexports (for example one AABB per draw into the same pool) need not
-      // walk all three physical heaps again just to re-arm the same pages.
-      const uint64_t previous_valid = system_page_flags_valid_[i].load(std::memory_order_relaxed);
-      enable_callbacks |= (previous_valid & valid_bits) != valid_bits;
-      made_valid += uint32_t(std::popcount(~previous_valid & valid_bits));
-      system_page_flags_valid_[i].store(previous_valid | valid_bits, std::memory_order_release);
-      const uint64_t gpu_written =
-          system_page_flags_valid_and_gpu_written_[i].load(std::memory_order_relaxed);
-      system_page_flags_valid_and_gpu_written_[i].store(
-          written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits),
-          std::memory_order_release);
+  // No lock: every bit change here is a single atomic read-modify-write, and
+  // this runs once per upload on the draw path, where taking the global
+  // critical region - which every guest thread also wants - was the dominant
+  // cost. The window against a concurrent invalidation is the same one the
+  // lock already left open, because the copy into the host buffer happens
+  // outside it either way.
+  for (uint32_t i = valid_block_first; i <= valid_block_last; ++i) {
+    uint64_t valid_bits = UINT64_MAX;
+    if (i == valid_block_first) {
+      valid_bits &= ~((uint64_t(1) << (valid_page_first & 63)) - 1);
+    }
+    if (i == valid_block_last && (valid_page_last & 63) != 63) {
+      valid_bits &= (uint64_t(1) << ((valid_page_last & 63) + 1)) - 1;
+    }
+    // Already-valid pages already have CPU write callbacks armed. Repeated
+    // memexports (for example one AABB per draw into the same pool) need not
+    // walk all three physical heaps again just to re-arm the same pages.
+    const uint64_t previous_valid =
+        system_page_flags_valid_[i].fetch_or(valid_bits, std::memory_order_acq_rel);
+    enable_callbacks |= (previous_valid & valid_bits) != valid_bits;
+    made_valid += uint32_t(std::popcount(~previous_valid & valid_bits));
+    if (written_by_gpu) {
+      system_page_flags_valid_and_gpu_written_[i].fetch_or(valid_bits, std::memory_order_release);
+    } else {
+      system_page_flags_valid_and_gpu_written_[i].fetch_and(~valid_bits, std::memory_order_release);
     }
   }
 
@@ -359,10 +362,49 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
     }
   }
 
-  if (enable_callbacks && memory_invalidation_callback_handle_) {
+  if (enable_callbacks && arm_watches) {
+    ArmWriteWatches(valid_page_first << page_size_log2_,
+                    (valid_page_last - valid_page_first + 1) << page_size_log2_);
+  }
+  return enable_callbacks;
+}
+
+void SharedMemory::ArmWriteWatches(uint32_t start, uint32_t length) {
+  const uint32_t valid_page_first = start >> page_size_log2_;
+  const uint32_t valid_page_last = (start + length - 1) >> page_size_log2_;
+  if (memory_invalidation_callback_handle_) {
+    // Arming the guest write watch is an mprotect across the physical heaps;
+    // measure it, because it lands on the draw path once per page that becomes
+    // valid. Off unless REX_SHMEM_STATS=1.
+    static int arm_stats = -1;
+    if (arm_stats < 0) {
+      const char* value = getenv("REX_SHMEM_STATS");
+      arm_stats = (value && *value == '1') ? 1 : 0;
+    }
+    static std::atomic<uint64_t> arm_ns{0}, arms{0}, next_arm_report{0};
+    const auto arm_start = arm_stats ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+    if (arm_stats) {
+      arms.fetch_add(1, std::memory_order_relaxed);
+    }
     memory().EnablePhysicalMemoryAccessCallbacks(
         valid_page_first << page_size_log2_,
         (valid_page_last - valid_page_first + 1) << page_size_log2_, true, false);
+    if (arm_stats) {
+      arm_ns.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - arm_start)
+                                    .count()),
+                       std::memory_order_relaxed);
+      const uint64_t now_s = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+      uint64_t due = next_arm_report.load(std::memory_order_relaxed);
+      if (now_s >= due && next_arm_report.compare_exchange_strong(due, now_s + 2)) {
+        const uint64_t n = std::max<uint64_t>(arms.exchange(0), 1);
+        REXLOG_INFO("[SHMEM] arming write watches: {} calls, {:.1f} us each", n,
+                    double(arm_ns.exchange(0)) / 1000.0 / double(n));
+      }
+    }
   }
 }
 
@@ -455,7 +497,12 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     upload_ranges_.emplace_back(page_start, page_count);
   };
   {
-    auto global_lock = global_critical_region_.Acquire();
+    // No lock while working out what to upload: the bitmap is atomic, only this
+    // thread uploads, and a page invalidated concurrently is either seen here
+    // (uploaded now) or on the next request - the same guarantee holding the
+    // global critical region gave, since it was released before the upload
+    // anyway. Holding it here cost ~40 us per draw on a title issuing thousands
+    // of draws, because every guest thread wants the same lock.
     for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
       uint32_t page_first = range.first >> page_size_log2_;
       uint32_t page_last = (range.first + range.second - 1) >> page_size_log2_;
@@ -556,7 +603,19 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     }
   }
 
-  return UploadRanges(upload_ranges_);
+  uint64_t uploaded_pages = 0;
+  for (const auto& range : upload_ranges_) {
+    uploaded_pages += range.second;
+  }
+  const auto upload_start = std::chrono::steady_clock::now();
+  const bool uploaded = UploadRanges(upload_ranges_);
+  upload_events_.fetch_add(1, std::memory_order_relaxed);
+  upload_pages_.fetch_add(uploaded_pages, std::memory_order_relaxed);
+  upload_ns_.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - upload_start)
+                                    .count()),
+                       std::memory_order_relaxed);
+  return uploaded;
 }
 
 bool SharedMemory::FlushDeferredRanges() {
@@ -583,6 +642,13 @@ bool SharedMemory::FlushDeferredRanges() {
   }
   deferred_ranges_.clear();
   return result;
+}
+
+void SharedMemory::TakeUploadStats(uint64_t& events_out, uint64_t& pages_out,
+                                   double& milliseconds_out) {
+  events_out = upload_events_.exchange(0, std::memory_order_relaxed);
+  pages_out = upload_pages_.exchange(0, std::memory_order_relaxed);
+  milliseconds_out = double(upload_ns_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
 }
 
 bool SharedMemory::RangeResident(uint32_t start, uint32_t length) const {

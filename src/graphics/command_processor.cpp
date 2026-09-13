@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -995,6 +996,31 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
     last_frame_tick = now;
   }
 #endif
+
+  // Swap rate, without the perf-counter build or a debug-level log flood: a
+  // headless bring-up otherwise has no way to say whether a title runs at 30 FPS
+  // or at 5. Off unless REX_FPS_LOG=1.
+  {
+    static int fps_log = -1;
+    if (fps_log < 0) {
+      const char* value = getenv("REX_FPS_LOG");
+      fps_log = (value && *value == '1') ? 1 : 0;
+    }
+    if (fps_log) {
+      static uint64_t swaps = 0;
+      static auto window_start = std::chrono::steady_clock::now();
+      ++swaps;
+      const auto now = std::chrono::steady_clock::now();
+      const double elapsed = std::chrono::duration<double>(now - window_start).count();
+      if (elapsed >= 2.0) {
+        REXLOG_INFO("[FPS] {:.1f} swaps/s ({} swaps in {:.1f} s)", double(swaps) / elapsed, swaps,
+                    elapsed);
+        swaps = 0;
+        window_start = now;
+      }
+    }
+  }
+
   rex::perf::Profiler::Flip();
 
   // Xenia-specific VdSwap hook.

@@ -10,11 +10,16 @@
  */
 
 #include <algorithm>
+#include <bit>
+#include <chrono>
+#include <mutex>
+#include <set>
 #include <cstring>
 #include <utility>
 
 #include <rex/assert.h>
 #include <rex/bit.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/graphics/shared_memory.h>
 #include <rex/math.h>
@@ -32,8 +37,13 @@ SharedMemory::~SharedMemory() {
 
 void SharedMemory::InitializeCommon() {
   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
-  system_page_flags_valid_.assign(num_system_page_flags_, 0);
-  system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
+  system_page_flags_valid_ = std::vector<std::atomic<uint64_t>>(num_system_page_flags_);
+  system_page_flags_valid_and_gpu_written_ =
+      std::vector<std::atomic<uint64_t>>(num_system_page_flags_);
+  for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
+    system_page_flags_valid_[i].store(0, std::memory_order_relaxed);
+    system_page_flags_valid_and_gpu_written_[i].store(0, std::memory_order_relaxed);
+  }
 
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
@@ -82,6 +92,7 @@ void SharedMemory::ShutdownCommon() {
   host_gpu_memory_sparse_allocated_.shrink_to_fit();
   host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
 
+  invalidation_version_.fetch_add(1, std::memory_order_release);
   system_page_flags_valid_.clear();
   system_page_flags_valid_.shrink_to_fit();
   system_page_flags_valid_and_gpu_written_.clear();
@@ -92,9 +103,11 @@ void SharedMemory::ShutdownCommon() {
 void SharedMemory::InvalidateAllPages() {
   auto global_lock = global_critical_region_.Acquire();
 
-  std::fill(system_page_flags_valid_.begin(), system_page_flags_valid_.end(), uint64_t(0));
-  std::fill(system_page_flags_valid_and_gpu_written_.begin(),
-            system_page_flags_valid_and_gpu_written_.end(), uint64_t(0));
+  invalidation_version_.fetch_add(1, std::memory_order_release);
+  for (size_t i = 0; i < system_page_flags_valid_.size(); ++i) {
+    system_page_flags_valid_[i].store(0, std::memory_order_release);
+    system_page_flags_valid_and_gpu_written_[i].store(0, std::memory_order_release);
+  }
 }
 
 void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
@@ -102,7 +115,11 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
 
   // Pages that are valid only because the CPU uploaded them lose their valid
   // bit here, so the next frame re-reads them from guest memory.
-  system_page_flags_valid_ = system_page_flags_valid_and_gpu_written_;
+  for (size_t i = 0; i < system_page_flags_valid_.size(); ++i) {
+    system_page_flags_valid_[i].store(
+        system_page_flags_valid_and_gpu_written_[i].load(std::memory_order_relaxed),
+        std::memory_order_release);
+  }
 }
 
 void SharedMemory::ClearCache() {
@@ -291,6 +308,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
   uint32_t valid_block_first = valid_page_first >> 6;
   uint32_t valid_block_last = valid_page_last >> 6;
   bool enable_callbacks = false;
+  uint32_t made_valid = 0;
 
   {
     auto global_lock = global_critical_region_.Acquire();
@@ -306,10 +324,37 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
       // Already-valid pages already have CPU write callbacks armed. Repeated
       // memexports (for example one AABB per draw into the same pool) need not
       // walk all three physical heaps again just to re-arm the same pages.
-      enable_callbacks |= (system_page_flags_valid_[i] & valid_bits) != valid_bits;
-      system_page_flags_valid_[i] |= valid_bits;
-      uint64_t& gpu_written = system_page_flags_valid_and_gpu_written_[i];
-      gpu_written = written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits);
+      const uint64_t previous_valid = system_page_flags_valid_[i].load(std::memory_order_relaxed);
+      enable_callbacks |= (previous_valid & valid_bits) != valid_bits;
+      made_valid += uint32_t(std::popcount(~previous_valid & valid_bits));
+      system_page_flags_valid_[i].store(previous_valid | valid_bits, std::memory_order_release);
+      const uint64_t gpu_written =
+          system_page_flags_valid_and_gpu_written_[i].load(std::memory_order_relaxed);
+      system_page_flags_valid_and_gpu_written_[i].store(
+          written_by_gpu ? (gpu_written | valid_bits) : (gpu_written & ~valid_bits),
+          std::memory_order_release);
+    }
+  }
+
+  {
+    static int stats = -1;
+    if (stats < 0) {
+      const char* value = getenv("REX_SHMEM_STATS");
+      stats = (value && *value == '1') ? 1 : 0;
+    }
+    if (stats) {
+      static std::atomic<uint64_t> calls{0}, pages{0};
+      static std::atomic<uint64_t> next_report{0};
+      calls.fetch_add(1, std::memory_order_relaxed);
+      pages.fetch_add(made_valid, std::memory_order_relaxed);
+      const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+      uint64_t due = next_report.load(std::memory_order_relaxed);
+      if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
+        REXGPU_INFO("[SHMEM] MakeRangeValid: {} calls, {} pages invalid->valid",
+                    calls.exchange(0), pages.exchange(0));
+      }
     }
   }
 
@@ -417,7 +462,7 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
       uint32_t block_last = page_last >> 6;
       uint32_t range_start = UINT32_MAX;
       for (uint32_t i = block_first; i <= block_last; ++i) {
-        uint64_t block_valid = system_page_flags_valid_[i];
+        uint64_t block_valid = system_page_flags_valid_[i].load(std::memory_order_relaxed);
         // Consider pages in the block outside the requested range valid.
         if (i == block_first) {
           uint64_t block_before = (uint64_t(1) << (page_first & 63)) - 1;
@@ -470,7 +515,97 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     return true;
   }
 
+  {
+    static int stats = -1;
+    if (stats < 0) {
+      const char* value = getenv("REX_SHMEM_STATS");
+      stats = (value && *value == '1') ? 1 : 0;
+    }
+    if (stats) {
+      static std::atomic<uint64_t> uploads{0}, upload_pages{0};
+      static std::atomic<uint64_t> next_report{0};
+      uint64_t pages = 0;
+      static std::mutex unique_lock;
+      static std::set<uint32_t> unique_pages;
+      for (const auto& range : upload_ranges_) {
+        pages += range.second;
+        std::lock_guard<std::mutex> guard(unique_lock);
+        for (uint32_t page = range.first; page < range.first + range.second; ++page) {
+          unique_pages.insert(page);
+        }
+      }
+      uploads.fetch_add(upload_ranges_.size(), std::memory_order_relaxed);
+      upload_pages.fetch_add(pages, std::memory_order_relaxed);
+      const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+      uint64_t due = next_report.load(std::memory_order_relaxed);
+      if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
+        const uint64_t page_count = upload_pages.exchange(0);
+        size_t unique_count;
+        {
+          std::lock_guard<std::mutex> guard(unique_lock);
+          unique_count = unique_pages.size();
+          unique_pages.clear();
+        }
+        REXGPU_INFO("[SHMEM] uploads: {} regions, {} pages ({} MB), {} distinct pages",
+                    uploads.exchange(0), page_count, (page_count << page_size_log2_) >> 20,
+                    unique_count);
+      }
+    }
+  }
+
   return UploadRanges(upload_ranges_);
+}
+
+bool SharedMemory::FlushDeferredRanges() {
+  if (deferred_ranges_.empty()) {
+    return true;
+  }
+  // Ranges that are already resident cost only the lock-free bitmap check and
+  // the sparse-allocation check; only the rest go through the sorting,
+  // merging, locking upload path - and they go through it together, so their
+  // uploads share one barrier.
+  bool result = true;
+  size_t needs_upload = 0;
+  for (const std::pair<uint32_t, uint32_t>& range : deferred_ranges_) {
+    if (RangeResident(range.first, range.second)) {
+      if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
+        result = false;
+      }
+      continue;
+    }
+    deferred_ranges_[needs_upload++] = range;
+  }
+  if (needs_upload) {
+    result = RequestRanges(deferred_ranges_.data(), needs_upload) && result;
+  }
+  deferred_ranges_.clear();
+  return result;
+}
+
+bool SharedMemory::RangeResident(uint32_t start, uint32_t length) const {
+  if (!length) {
+    return true;
+  }
+  if (start >= kBufferSize || length > kBufferSize - start) {
+    return false;
+  }
+  const uint32_t first_page = start >> page_size_log2_;
+  const uint32_t last_page = (start + length - 1) >> page_size_log2_;
+  // No lock: the bitmap is atomic, and this check is taken thousands of times
+  // per frame by the draw path while guest threads hold the global critical
+  // region for their own memory work. Taking it here made residency checking
+  // the single most expensive thing in the draw path.
+  for (uint32_t block = first_page >> 6; block <= (last_page >> 6); ++block) {
+    uint64_t mask = UINT64_MAX;
+    if (block == (first_page >> 6)) mask &= UINT64_MAX << (first_page & 63);
+    if (block == (last_page >> 6)) mask &= UINT64_MAX >> (63 - (last_page & 63));
+    if ((system_page_flags_valid_[block].load(std::memory_order_acquire) & mask) != mask) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
@@ -482,16 +617,41 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (start >= kBufferSize || length > kBufferSize - start) return false;
   uint32_t first_page = start >> page_size_log2_;
   uint32_t last_page = (start + length - 1) >> page_size_log2_;
+  // No lock: the bitmap is atomic, and this check is taken thousands of times
+  // per frame by the draw path while guest threads hold the global critical
+  // region for their own memory work. Taking it here made residency checking
+  // the single most expensive thing in the draw path.
   bool valid = true;
+  for (uint32_t block = first_page >> 6; block <= (last_page >> 6); ++block) {
+    uint64_t mask = UINT64_MAX;
+    if (block == (first_page >> 6)) mask &= UINT64_MAX << (first_page & 63);
+    if (block == (last_page >> 6)) mask &= UINT64_MAX >> (63 - (last_page & 63));
+    if ((system_page_flags_valid_[block].load(std::memory_order_acquire) & mask) != mask) {
+      valid = false;
+      break;
+    }
+  }
+  // Which half of this costs what: a resident range that only needs the
+  // allocation check is cheap; a range that has to go through RequestRanges
+  // uploads. Off unless REX_SHMEM_STATS=1.
   {
-    auto global_lock = global_critical_region_.Acquire();
-    for (uint32_t block = first_page >> 6; block <= (last_page >> 6); ++block) {
-      uint64_t mask = UINT64_MAX;
-      if (block == (first_page >> 6)) mask &= UINT64_MAX << (first_page & 63);
-      if (block == (last_page >> 6)) mask &= UINT64_MAX >> (63 - (last_page & 63));
-      if ((system_page_flags_valid_[block] & mask) != mask) {
-        valid = false;
-        break;
+    static int stats = -1;
+    if (stats < 0) {
+      const char* value = getenv("REX_SHMEM_STATS");
+      stats = (value && *value == '1') ? 1 : 0;
+    }
+    if (stats) {
+      static std::atomic<uint64_t> fast{0}, slow{0}, pages{0};
+      static std::atomic<uint64_t> next_report{0};
+      (valid ? fast : slow).fetch_add(1, std::memory_order_relaxed);
+      pages.fetch_add(last_page - first_page + 1, std::memory_order_relaxed);
+      const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+      uint64_t due = next_report.load(std::memory_order_relaxed);
+      if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
+        REXGPU_INFO("[SHMEM] RequestRange: {} resident, {} needing upload, {} pages scanned",
+                    fast.exchange(0), slow.exchange(0), pages.exchange(0));
       }
     }
   }
@@ -499,6 +659,12 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   std::pair<uint32_t, uint32_t> range(start, length);
   return RequestRanges(&range, 1);
 }
+
+REXCVAR_DEFINE_UINT32(
+    gpu_invalidation_widening_pages, 64, "GPU",
+    "How many extra shared-memory pages either side of a guest write may be invalidated with it. "
+    "Larger means fewer guest access-violation traps but more re-uploading; 64 (the block) is the "
+    "legacy behaviour, 0 invalidates only what the guest actually wrote.");
 
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
     void* context_ptr, uint32_t physical_address_start, uint32_t length, bool exact_range) {
@@ -531,18 +697,36 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     // the CPU game code takes 3 ms to run per frame, but with 256 KB, it's
     // 0.7 ms.
     if (page_first & 63) {
-      uint64_t gpu_written_start = system_page_flags_valid_and_gpu_written_[block_first];
+      uint64_t gpu_written_start =
+          system_page_flags_valid_and_gpu_written_[block_first].load(std::memory_order_relaxed);
       gpu_written_start &= (uint64_t(1) << (page_first & 63)) - 1;
       page_first = (page_first & ~uint32_t(63)) + (64 - rex::lzcnt(gpu_written_start));
     }
     if ((page_last & 63) != 63) {
-      uint64_t gpu_written_end = system_page_flags_valid_and_gpu_written_[block_last];
+      uint64_t gpu_written_end =
+          system_page_flags_valid_and_gpu_written_[block_last].load(std::memory_order_relaxed);
       gpu_written_end &= ~((uint64_t(1) << ((page_last & 63) + 1)) - 1);
       page_last =
           (page_last & ~uint32_t(63)) + (std::max(rex::tzcnt(gpu_written_end), uint8_t(1)) - 1);
     }
+    // Widening trades upload bandwidth for guest access-violation traps, and
+    // the default trade (out to the 64-page block, i.e. 256 KB) is only right
+    // when the invalidated data is small or rarely re-read. A title that
+    // streams geometry pays it as pure amplification: Midnight Club LA dirties
+    // ~1 page per callback and re-uploads 64, turning 1.7 MB/s of guest writes
+    // into 110 MB/s of shared-memory uploads. Clamp how far the range may grow.
+    const uint32_t widening_limit = REXCVAR_GET(gpu_invalidation_widening_pages);
+    if (widening_limit < 64) {
+      const uint32_t requested_first = physical_address_start >> page_size_log2_;
+      const uint32_t requested_last = physical_address_last >> page_size_log2_;
+      page_first = std::max(page_first, requested_first > widening_limit
+                                            ? requested_first - widening_limit
+                                            : uint32_t(0));
+      page_last = std::min(page_last, requested_last + widening_limit);
+    }
   }
 
+  uint32_t transitions = 0;
   for (uint32_t i = block_first; i <= block_last; ++i) {
     uint64_t invalidate_bits = UINT64_MAX;
     if (i == block_first) {
@@ -551,8 +735,40 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     if (i == block_last && (page_last & 63) != 63) {
       invalidate_bits &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
     }
-    system_page_flags_valid_[i] &= ~invalidate_bits;
-    system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+    const uint64_t previous_valid = system_page_flags_valid_[i].load(std::memory_order_relaxed);
+    transitions += uint32_t(std::popcount(previous_valid & invalidate_bits));
+    system_page_flags_valid_[i].store(previous_valid & ~invalidate_bits, std::memory_order_release);
+    system_page_flags_valid_and_gpu_written_[i].store(
+        system_page_flags_valid_and_gpu_written_[i].load(std::memory_order_relaxed) &
+            ~invalidate_bits,
+        std::memory_order_release);
+  }
+  invalidation_version_.fetch_add(1, std::memory_order_release);
+
+  {
+    static int stats = -1;
+    if (stats < 0) {
+      const char* value = getenv("REX_SHMEM_STATS");
+      stats = (value && *value == '1') ? 1 : 0;
+    }
+    if (stats) {
+      static std::atomic<uint64_t> calls{0}, asked{0}, widened{0}, flips{0};
+      static std::atomic<uint64_t> next_report{0};
+      calls.fetch_add(1, std::memory_order_relaxed);
+      asked.fetch_add((length + (uint32_t(1) << page_size_log2_) - 1) >> page_size_log2_,
+                      std::memory_order_relaxed);
+      widened.fetch_add(page_last - page_first + 1, std::memory_order_relaxed);
+      flips.fetch_add(transitions, std::memory_order_relaxed);
+      const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+      uint64_t due = next_report.load(std::memory_order_relaxed);
+      if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
+        REXGPU_INFO(
+            "[SHMEM] invalidations: {} calls, {} pages asked, {} pages in range, {} valid->invalid",
+            calls.exchange(0), asked.exchange(0), widened.exchange(0), flips.exchange(0));
+      }
+    }
   }
 
   FireWatches(page_first, page_last, false);

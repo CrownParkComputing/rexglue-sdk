@@ -2524,6 +2524,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
     }
   }
 
+  // The primitive processor defers its index-buffer residency request so it can
+  // be uploaded together with this draw's vertex streams - flush it here.
+  if (!shared_memory_->FlushDeferredRanges()) {
+    REXGPU_ERROR("Failed to make this draw's shared memory ranges resident");
+    return false;
+  }
+
   // Gather memexport ranges and ensure the heaps for them are resident, and
   // also load the data surrounding the export and to fill the regions that
   // won't be modified by the shaders.

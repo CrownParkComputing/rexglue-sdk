@@ -1,4 +1,6 @@
 #pragma once
+
+#include <atomic>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -31,6 +33,31 @@ class SharedMemory {
   virtual ~SharedMemory();
   // Call in the implementation-specific ClearCache.
   virtual void ClearCache();
+
+  // Bumped whenever any page's valid bit is cleared - a guest write, a cache
+  // clear, an explicit invalidation. A caller that requested a range and
+  // remembers this value knows the range is still resident while the value is
+  // unchanged, which turns a per-draw bitmap scan under the global lock into an
+  // integer compare. Never skips an upload: an invalidation always bumps it.
+  uint64_t invalidation_version() const {
+    return invalidation_version_.load(std::memory_order_acquire);
+  }
+
+  // Residency requests that a draw needs but that need not happen one at a
+  // time. Every upload triggered by a request submits barriers and ends the
+  // open render pass, so a draw that requests its index buffer and three vertex
+  // streams separately can break the render pass four times. Defer them and
+  // flush once: same uploads, one barrier set.
+  void DeferRange(uint32_t start, uint32_t length) {
+    if (!length) {
+      return;
+    }
+    deferred_ranges_.emplace_back(start, length);
+  }
+  bool FlushDeferredRanges();
+  void DiscardDeferredRanges() { deferred_ranges_.clear(); }
+  // Lock-free residency test for one range.
+  bool RangeResident(uint32_t start, uint32_t length) const;
   void SetSystemPageBlocksValidWithGpuDataWritten();
   void InvalidateAllPages();
 
@@ -141,6 +168,9 @@ class SharedMemory {
       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
 
  private:
+  std::atomic<uint64_t> invalidation_version_{0};
+  std::vector<std::pair<uint32_t, uint32_t>> deferred_ranges_;
+
   memory::Memory& memory_;
 
   // Log2 of invalidation granularity (the system page size, but the dependency
@@ -171,9 +201,14 @@ class SharedMemory {
   // ***************************************************************************
 
   // Pages whose contents in the buffer are in sync with guest memory.
-  std::vector<uint64_t> system_page_flags_valid_;
+  // Atomic so the hot residency check (RequestRange) can read the bitmap
+  // without entering the global critical region, which every guest thread also
+  // takes. Writes still happen under the lock; a reader racing an invalidation
+  // sees one side or the other, which is the same guarantee taking the lock
+  // gave (the range could be invalidated the instant the lock was released).
+  std::vector<std::atomic<uint64_t>> system_page_flags_valid_;
   // Subset of valid pages containing data written by the GPU.
-  std::vector<uint64_t> system_page_flags_valid_and_gpu_written_;
+  std::vector<std::atomic<uint64_t>> system_page_flags_valid_and_gpu_written_;
   uint32_t num_system_page_flags_ = 0;
 
   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(

@@ -591,7 +591,30 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t pipelines_created = 0;
     double pipeline_create_ms = 0;
     uint64_t last_swap_us = 0;
+    // Per-stage CPU time inside IssueDraw, so "the draw path is the cost" can
+    // be narrowed to which part of it. Indexed by DrawStage.
+    double stage_ms[10] = {};
+    uint64_t memexport_draws = 0;
+    uint64_t full_shared_memory_requests = 0;
+    uint64_t vfetch_requests = 0;
+    uint64_t vfetch_skipped = 0;
+    double vfetch_request_ms = 0;
   } frame_stats_;
+
+  // Stages of IssueDraw timed into FrameStats::stage_ms. Order matches the
+  // sequence of work in the function.
+  enum DrawStage {
+    kDrawStageAnalysisAndTranslation = 0,
+    kDrawStagePrimitiveAndSamplerSetup,
+    kDrawStageTextureUpload,
+    kDrawStagePipelineCompile,
+    kDrawStageBindings,
+    kDrawStageVertexBuffers,
+    kDrawStageSubmit,
+    kDrawStageOwnershipAndReadback,
+    kDrawStagePrimitiveProcessing,
+    kDrawStageShaderTranslation,
+  };
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> uniform_buffer_pool_;
 
@@ -770,6 +793,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;
+    // Shared-memory invalidation version at which this exact range was last
+    // made resident. While it still matches, the range is still resident and
+    // the request can be skipped outright.
+    uint64_t resident_version = UINT64_MAX;
   };
   std::array<VertexBufferState, 96> vertex_buffer_states_{};
   uint64_t vertex_buffers_in_sync_[2] = {};

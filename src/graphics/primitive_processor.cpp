@@ -925,15 +925,10 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
   // there on the GPU.
   if (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA ||
       cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA) {
-    // Request the index buffer memory.
-    // TODO(Triang3l): Shared memory request cache.
-    if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {
-      REXGPU_ERROR(
-          "PrimitiveProcessor: Failed to request index buffer 0x{:08X}, 0x{:X} "
-          "bytes needed, in the shared memory",
-          guest_index_base, guest_index_buffer_needed_bytes);
-      return false;
-    }
+    // Deferred, not immediate: the caller flushes this together with the
+    // draw's vertex streams, so the upload they may trigger costs one barrier
+    // and one render pass break instead of one per buffer.
+    shared_memory_.DeferRange(guest_index_base, guest_index_buffer_needed_bytes);
   }
 
   result_out.guest_primitive_type = guest_primitive_type;

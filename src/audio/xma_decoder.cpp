@@ -10,6 +10,8 @@
  */
 
 #include <rex/audio/xma/context.h>
+#include <chrono>
+
 #include <rex/audio/xma/decoder.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
@@ -138,6 +140,14 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
+  // A title whose audio repeats is either being starved of decoded PCM or is
+  // mixing stale data; these counters say which, without a debugger. Off unless
+  // REX_XMA_STATS=1.
+  const char* stats_env = getenv("REX_XMA_STATS");
+  const bool stats_enabled = stats_env && *stats_env == '1';
+  uint64_t stat_iterations = 0, stat_worked = 0;
+  auto stat_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
@@ -154,6 +164,22 @@ void XmaDecoder::WorkerThreadMain() {
     if (paused_) {
       pause_fence_.Signal();
       resume_fence_.Wait();
+    }
+
+    if (stats_enabled) {
+      ++stat_iterations;
+      stat_worked += did_work ? 1 : 0;
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= stat_next) {
+        stat_next = now + std::chrono::seconds(2);
+        uint32_t allocated = 0, enabled = 0;
+        for (uint32_t n = 0; n < kContextCount; ++n) {
+          allocated += contexts_[n].is_allocated() ? 1 : 0;
+          enabled += contexts_[n].is_enabled() ? 1 : 0;
+        }
+        REXAPU_INFO("[XMASTATS] {} loops, {} with work; {} contexts allocated, {} enabled now",
+                    stat_iterations, stat_worked, allocated, enabled);
+      }
     }
 
     if (did_work) {
@@ -286,6 +312,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     // The context ID is a bit in the range of the entire context array.
     uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
     uint32_t kicked_value = value;
+    uint32_t stat_contexts_kicked = 0, stat_contexts_worked = 0;
     for (int i = 0; value && i < 32; ++i, value >>= 1) {
       if (value & 1) {
         uint32_t context_id = base_context_id + i;
@@ -299,8 +326,37 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
       if (kicked_value & 1) {
         uint32_t context_id = base_context_id + i;
         auto& context = contexts_[context_id];
+        ++stat_contexts_kicked;
         if (context.Work()) {
+          ++stat_contexts_worked;
           context.SignalWorkDone();
+        }
+      }
+    }
+    // A title with repeating audio is either starved of decoded PCM or mixing
+    // stale data. Counting kicks and the decodes they actually complete says
+    // which. Off unless REX_XMA_STATS=1.
+    {
+      static int enabled = -1;
+      if (enabled < 0) {
+        const char* value_env = getenv("REX_XMA_STATS");
+        enabled = (value_env && *value_env == '1') ? 1 : 0;
+      }
+      if (enabled) {
+        static uint64_t kicks = 0, contexts_kicked = 0, worked = 0;
+        static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        ++kicks;
+        contexts_kicked += stat_contexts_kicked;
+        worked += stat_contexts_worked;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next) {
+          next = now + std::chrono::seconds(2);
+          uint32_t allocated = 0;
+          for (uint32_t n = 0; n < kContextCount; ++n) {
+            allocated += contexts_[n].is_allocated() ? 1 : 0;
+          }
+          REXAPU_INFO("[XMASTATS] {} kicks, {} context kicks, {} decoded; {} contexts allocated",
+                      kicks, contexts_kicked, worked, allocated);
         }
       }
     }

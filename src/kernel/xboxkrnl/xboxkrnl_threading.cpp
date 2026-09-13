@@ -15,6 +15,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <map>
+#include <mutex>
+#include <string>
 #include <memory>
 #include <vector>
 
@@ -918,9 +921,61 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  // A producer/consumer handshake that returns instantly every time is not a
+  // handshake: the consumer is reading whatever the producer last left behind.
+  // These counters time the wait per call site so a stale-data bug is
+  // distinguishable from a slow producer. Off unless REX_WAIT_STATS=1.
+  static int stats_enabled = -1;
+  if (stats_enabled < 0) {
+    const char* value = getenv("REX_WAIT_STATS");
+    stats_enabled = (value && *value == '1') ? 1 : 0;
+  }
+  const auto stat_start =
+      stats_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
       processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
+
+  if (stats_enabled) {
+    struct CallSite {
+      uint64_t calls = 0;
+      double total_ms = 0.0;
+      uint64_t instant = 0;  // returned in under 10 us: nothing was waited for
+      std::map<uint32_t, uint64_t> results;
+    };
+    static std::mutex lock;
+    static std::map<uint32_t, CallSite> sites;
+    static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stat_start)
+            .count();
+    uint32_t caller_lr = 0;
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_state() && thread->thread_state()->context()) {
+      caller_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+    }
+    std::lock_guard<std::mutex> guard(lock);
+    auto& site = sites[caller_lr];
+    ++site.calls;
+    site.total_ms += ms;
+    site.instant += ms < 0.01 ? 1 : 0;
+    ++site.results[result];
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next) {
+      next = now + std::chrono::seconds(2);
+      for (const auto& [lr, entry] : sites) {
+        std::string results;
+        for (const auto& [value, count] : entry.results) {
+          results += fmt::format(" {:#x}x{}", value, count);
+        }
+        REXLOG_INFO("[WAITSTATS] KeWaitForMultipleObjects lr {:#010x}: {} calls, {:.3f} ms avg, "
+                    "{} instant, results{}",
+                    lr, entry.calls, entry.total_ms / double(entry.calls), entry.instant, results);
+      }
+    }
+  }
+
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
   }

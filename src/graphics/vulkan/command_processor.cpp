@@ -2389,9 +2389,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms\n");
       } else {
-        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f\n",
+        fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f,"
+                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f\n",
                 g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
@@ -2404,7 +2405,15 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 (unsigned long long)frame_stats_.readback_count,
                 (unsigned long long)frame_stats_.readback_bytes,
                 (unsigned long long)frame_stats_.pipelines_created,
-                frame_stats_.pipeline_create_ms);
+                frame_stats_.pipeline_create_ms, frame_stats_.stage_ms[0],
+                frame_stats_.stage_ms[1], frame_stats_.stage_ms[2], frame_stats_.stage_ms[3],
+                frame_stats_.stage_ms[4], frame_stats_.stage_ms[5], frame_stats_.stage_ms[6],
+                frame_stats_.stage_ms[7],
+                (unsigned long long)frame_stats_.memexport_draws,
+                (unsigned long long)frame_stats_.full_shared_memory_requests,
+                (unsigned long long)frame_stats_.vfetch_requests,
+                (unsigned long long)frame_stats_.vfetch_skipped, frame_stats_.vfetch_request_ms,
+                frame_stats_.stage_ms[8], frame_stats_.stage_ms[9]);
       }
       fclose(f);
     }
@@ -3836,13 +3845,20 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                    ? nullptr : &frame_stats_.draw_cpu_ms);
   ++frame_stats_.draws;
   uint32_t slow_draw_ms = REXCVAR_GET(gpu_log_slow_draw_ms);
-  auto stage_start = slow_draw_ms ? std::chrono::steady_clock::now()
-                                 : std::chrono::steady_clock::time_point{};
-  auto log_slow_stage = [&](const char* stage) {
-    if (!slow_draw_ms) return;
+  // The stage timer does double duty: it reports a single slow draw, and - when
+  // the frame-stats CSV is on - accumulates per-stage CPU time for the frame, so
+  // a title that is draw-path bound says which part of the path it is bound on.
+  const bool accumulate_stages = !REXCVAR_GET(gpu_frame_stats_path).empty();
+  auto stage_start = (slow_draw_ms || accumulate_stages) ? std::chrono::steady_clock::now()
+                                                         : std::chrono::steady_clock::time_point{};
+  auto log_slow_stage = [&](const char* stage, DrawStage stage_index) {
+    if (!slow_draw_ms && !accumulate_stages) return;
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double, std::milli>(now - stage_start).count();
-    if (elapsed >= slow_draw_ms) {
+    if (accumulate_stages) {
+      frame_stats_.stage_ms[stage_index] += elapsed;
+    }
+    if (slow_draw_ms && elapsed >= slow_draw_ms) {
       REXGPU_WARN("[SLOWDRAW] swap={} stage={} ms={:.2f} vs={:016X} ps={:016X} count={}",
                   g_draw_trace_swap_count, stage, elapsed,
                   active_vertex_shader() ? active_vertex_shader()->ucode_data_hash() : 0,
@@ -3971,6 +3987,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   VulkanShader::VulkanTranslation* vertex_shader_translation;
   VulkanShader::VulkanTranslation* pixel_shader_translation;
   bool memexport_writes_possible = memexport_used_vertex || memexport_used_pixel;
+  frame_stats_.memexport_draws += memexport_writes_possible ? 1 : 0;
 
   // Two iterations because a submission (even the current one - in which case
   // it needs to be ended, and a new one must be started) may need to be awaited
@@ -3987,6 +4004,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     if (!primitive_processor_->Process(primitive_processing_result)) {
       return draw_fail("primitive_processing");
     }
+    log_slow_stage("primitive_processing", kDrawStagePrimitiveProcessing);
     if (!primitive_processing_result.host_draw_vertex_count) {
       // Nothing to draw.
       return true;
@@ -4033,7 +4051,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                                   pixel_shader_translation)) {
       return draw_fail("shader_translation");
     }
-    log_slow_stage("analysis_and_translation");
+    log_slow_stage("analysis_and_translation", kDrawStageAnalysisAndTranslation);
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
@@ -4112,9 +4130,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
-  log_slow_stage("primitive_and_sampler_setup");
+  log_slow_stage("primitive_and_sampler_setup", kDrawStagePrimitiveAndSamplerSetup);
   texture_cache_->RequestTextures(used_texture_mask);
-  log_slow_stage("texture_upload");
+  log_slow_stage("texture_upload", kDrawStageTextureUpload);
 
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
   // Set up the render targets - this may perform dispatches and draws.
@@ -4140,7 +4158,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // may happen between pipeline configuration and binding.
   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
                                                 &pipeline_is_placeholder);
-  log_slow_stage("pipeline_compile");
+  log_slow_stage("pipeline_compile", kDrawStagePipelineCompile);
   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
     frame_used_async_placeholder_pipeline_ = true;
     return true;
@@ -4258,7 +4276,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (!UpdateBindings(vertex_shader, pixel_shader)) {
     return draw_fail("update_bindings");
   }
-  log_slow_stage("bindings");
+  log_slow_stage("bindings", kDrawStageBindings);
 
   // Ensure vertex buffers are resident.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
@@ -4294,15 +4312,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           return false;
       }
       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
-        REXGPU_ERROR(
-            "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
-            "memory",
-            vfetch_constant.address << 2, vfetch_constant.size << 2);
-        return false;
+      // The request itself is the single most expensive thing in the draw path
+      // for a title issuing thousands of draws: it takes the global critical
+      // region and scans the page-validity bitmap, per fetch, per draw. Nothing
+      // can have changed while the fetch constant is the same range AND shared
+      // memory has not invalidated anything since it was made resident, so in
+      // that case skip it. An invalidation - including a CPU rewrite of a
+      // scratch vertex pool - bumps the version and forces the request again.
+      const uint64_t shared_memory_version = shared_memory_->invalidation_version();
+      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size &&
+          state.resident_version == shared_memory_version) {
+        ++frame_stats_.vfetch_skipped;
+        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+        continue;
       }
+      ++frame_stats_.vfetch_requests;
+      shared_memory_->DeferRange(vfetch_constant.address << 2, vfetch_constant.size << 2);
       state.address = vfetch_constant.address;
       state.size = vfetch_constant.size;
+      state.resident_version = shared_memory_version;
       vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
     }
   }
@@ -4565,6 +4593,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
   }
   if (memexport_writes_possible && memexport_ranges_.empty()) {
+    // Whole-buffer residency for a single draw is the most expensive thing this
+    // path can do, so count it: a title doing it per draw is bound on it.
+    ++frame_stats_.full_shared_memory_requests;
     if (!shared_memory_->RequestRange(0, SharedMemory::kBufferSize)) {
       REXGPU_ERROR(
           "Failed to request full shared memory residency for unresolved "
@@ -4573,7 +4604,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
-  log_slow_stage("buffer_upload");
+  // One residency request for everything this draw reads out of shared memory
+  // (its index buffer and every vertex stream), so at most one upload barrier
+  // and one render pass break per draw rather than one per buffer.
+  {
+    AccumulateCpuTime vfetch_timer(accumulate_stages ? &frame_stats_.vfetch_request_ms : nullptr);
+    if (!shared_memory_->FlushDeferredRanges()) {
+      REXGPU_ERROR("Failed to make this draw's shared memory ranges resident");
+      return false;
+    }
+  }
+
+  log_slow_stage("buffer_upload", kDrawStageVertexBuffers);
   ScratchBufferAcquisition guest_dma_index_scratch_buffer;
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
@@ -4676,7 +4718,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                               0, 0, 0);
   }
 
-  log_slow_stage("draw_submission");
+  log_slow_stage("draw_submission", kDrawStageSubmit);
   // Invalidate textures in memexported memory and watch for changes.
   if (!memexport_ranges_.empty()) {
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
@@ -4712,7 +4754,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
-  log_slow_stage("ownership_and_readback");
+  log_slow_stage("ownership_and_readback", kDrawStageOwnershipAndReadback);
   return true;
 }
 

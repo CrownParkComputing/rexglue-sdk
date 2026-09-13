@@ -60,6 +60,14 @@ class SharedMemory {
   // inert unless gpu_hot_page_frames is set.
   void OnFrameEnd();
 
+  // Uploads, in one batch, the hot pages this title re-dirties every frame.
+  // Every upload during the frame ends the open render pass, and a streaming
+  // title was ending it hundreds of times a frame for pages it was always going
+  // to need; hot pages are already defined as "dirty every frame, uploaded once
+  // per frame", so doing them together at the frame's start costs one break
+  // instead of hundreds. Does nothing unless gpu_hot_page_frames is set.
+  void UploadHotPages();
+
   // Upload work done since the last call, for per-frame statistics: how many
   // upload events (each one submits barriers and ends the open render pass),
   // how many pages they moved, and how long they took.
@@ -205,8 +213,19 @@ class SharedMemory {
   std::vector<uint8_t> block_uploaded_this_frame_;
   std::vector<uint8_t> block_hot_;
   bool AreBlocksHot(uint32_t page_first, uint32_t page_last) const;
+  // Pages actually uploaded this frame, so the hot set can be re-uploaded as a
+  // batch next frame rather than a page at a time on demand.
+  std::vector<uint64_t> page_uploaded_this_frame_;
+  std::vector<std::pair<uint32_t, uint32_t>> hot_upload_ranges_;
+  void AppendHotRange(uint32_t page_first, uint32_t page_count);
   void NoteBlocksDirtied(uint32_t page_first, uint32_t page_last);
   void NoteBlocksUploaded(uint32_t page_first, uint32_t page_last);
+
+ protected:
+  // Called by the backend when it uploads pages, to build the hot set.
+  void NotePagesUploaded(uint32_t page_first, uint32_t page_last);
+
+ private:
 
   std::atomic<uint64_t> upload_events_{0};
   std::atomic<uint64_t> upload_pages_{0};

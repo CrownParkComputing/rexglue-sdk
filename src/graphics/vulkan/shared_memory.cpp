@@ -327,6 +327,7 @@ bool VulkanSharedMemory::UploadRanges(
       // last of them: arming walks every system page of the range in each of
       // the three physical heaps, so a span that reaches across untouched
       // memory costs far more than the handful of ranges inside it.
+      NotePagesUploaded(upload_range.first, upload_range.first + upload_range.second - 1);
       if (MakeRangeValid(range_start, range_length, false, false)) {
         ArmWriteWatches(range_start, range_length);
       }

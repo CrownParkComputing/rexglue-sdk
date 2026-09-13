@@ -602,6 +602,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t upload_events = 0;
     uint64_t upload_pages = 0;
     double upload_ms = 0;
+    uint64_t render_passes = 0;
   } frame_stats_;
 
   // Stages of IssueDraw timed into FrameStats::stage_ms. Order matches the

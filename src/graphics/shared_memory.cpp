@@ -57,6 +57,7 @@ void SharedMemory::InitializeCommon() {
   block_dirtied_this_frame_.assign(num_system_page_flags_, 0);
   block_uploaded_this_frame_.assign(num_system_page_flags_, 0);
   block_hot_.assign(num_system_page_flags_, 0);
+  page_uploaded_this_frame_.assign(num_system_page_flags_, 0);
 
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
@@ -704,11 +705,39 @@ void SharedMemory::NoteBlocksUploaded(uint32_t page_first, uint32_t page_last) {
   }
 }
 
+
+void SharedMemory::NotePagesUploaded(uint32_t page_first, uint32_t page_last) {
+  if (page_uploaded_this_frame_.empty()) {
+    return;
+  }
+  for (uint32_t block = page_first >> 6; block <= (page_last >> 6); ++block) {
+    if (block >= page_uploaded_this_frame_.size()) {
+      break;
+    }
+    uint64_t bits = UINT64_MAX;
+    if (block == (page_first >> 6)) {
+      bits &= UINT64_MAX << (page_first & 63);
+    }
+    if (block == (page_last >> 6)) {
+      bits &= UINT64_MAX >> (63 - (page_last & 63));
+    }
+    page_uploaded_this_frame_[block] |= bits;
+  }
+}
+
+void SharedMemory::UploadHotPages() {
+  if (hot_upload_ranges_.empty()) {
+    return;
+  }
+  RequestRanges(hot_upload_ranges_.data(), hot_upload_ranges_.size());
+}
+
 void SharedMemory::OnFrameEnd() {
   const uint32_t hot_after_frames = REXCVAR_GET(gpu_hot_page_frames);
   if (!hot_after_frames || block_hot_.empty()) {
     return;
   }
+  hot_upload_ranges_.clear();
   // A block counts as still hot while it keeps being uploaded: once its watch
   // is unarmed it can no longer be "dirtied", so upload activity is the only
   // evidence left that the guest is still writing it.
@@ -727,14 +756,46 @@ void SharedMemory::OnFrameEnd() {
     const bool hot = block_dirty_streak_[block] >= hot_after_frames;
     block_hot_[block] = hot ? 1 : 0;
     if (hot) {
-      // Hot blocks are simply dirty every frame: drop their valid bits so the
-      // first draw that needs them uploads them once. No mprotect is involved -
-      // they are not armed.
+      // Hot blocks are simply dirty every frame: drop their valid bits so they
+      // are uploaded once next frame. No mprotect is involved - they are not
+      // armed. What was uploaded this frame becomes next frame's batch.
+      const uint64_t uploaded = page_uploaded_this_frame_[block];
       system_page_flags_valid_[block].store(0, std::memory_order_release);
       system_page_flags_valid_and_gpu_written_[block].store(0, std::memory_order_release);
       invalidation_version_.fetch_add(1, std::memory_order_release);
+      if (uploaded) {
+        // Turn the block's uploaded-page bits into ranges, merging with the
+        // previous range when they are adjacent.
+        uint32_t run_first = UINT32_MAX;
+        for (uint32_t bit = 0; bit < 64; ++bit) {
+          const bool set = (uploaded >> bit) & 1;
+          if (set && run_first == UINT32_MAX) {
+            run_first = uint32_t(block) * 64 + bit;
+          } else if (!set && run_first != UINT32_MAX) {
+            AppendHotRange(run_first, uint32_t(block) * 64 + bit - run_first);
+            run_first = UINT32_MAX;
+          }
+        }
+        if (run_first != UINT32_MAX) {
+          AppendHotRange(run_first, uint32_t(block + 1) * 64 - run_first);
+        }
+      }
+    }
+    page_uploaded_this_frame_[block] = 0;
+  }
+}
+
+void SharedMemory::AppendHotRange(uint32_t page_first, uint32_t page_count) {
+  const uint32_t start = page_first << page_size_log2_;
+  const uint32_t length = page_count << page_size_log2_;
+  if (!hot_upload_ranges_.empty()) {
+    auto& last = hot_upload_ranges_.back();
+    if (last.first + last.second == start) {
+      last.second += length;
+      return;
     }
   }
+  hot_upload_ranges_.emplace_back(start, length);
 }
 
 bool SharedMemory::RangeResident(uint32_t start, uint32_t length) const {

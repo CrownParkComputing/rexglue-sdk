@@ -62,7 +62,7 @@ sed -i "s|$PROJECT_ROOT/assets|assets|g" "$PROJECT_ROOT/${NAME}_manifest.toml"
 
 echo "==> config, tooling and scripts"
 cp "$SDK/tools/port_profile.toml" "$PROJECT_ROOT/config/$NAME.toml"
-cp "$SDK/tools/content_zip.sh" "$SDK/tools/content_ensure.sh" "$PROJECT_ROOT/tools/"
+cp "$SDK/tools/content_zip.sh" "$PROJECT_ROOT/tools/"
 for script in headless_play measure; do
   sed "s|@TITLE@|$NAME|g" "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
   chmod +x "$PROJECT_ROOT/tools/$script.sh"
@@ -77,9 +77,28 @@ BUILD="\$ROOT/out/build/linux"
 GAME="\${${NAME^^}_GAME_DATA:-\$ROOT/assets}"
 SDK_LIB="$SDK/out/install/linux-amd64/lib"
 
-if [ ! -f "\$GAME/$XEX_NAME" ]; then
-  echo "game content missing; importing content/*.zip" >&2
-  "\$ROOT/tools/content_zip.sh" restore
+# The disc content is not in the repository, and importing it is not part of
+# the build: a rebuild should not depend on having the game to hand. If assets/
+# is missing or does not match content/content.sha256, ask for the archive -
+# once - and import it.
+if ! "\$ROOT/tools/content_zip.sh" verify >/dev/null 2>&1; then
+  ZIP="\${${NAME^^}_CONTENT_ZIP:-}"
+  DEFAULT="\$ROOT/content/$NAME-content.zip"
+  if [ -z "\$ZIP" ] && [ -f "\$DEFAULT" ]; then
+    ZIP="\$DEFAULT"
+  fi
+  if [ -z "\$ZIP" ]; then
+    if [ -t 0 ]; then
+      echo "Game content for $NAME is not installed."
+      read -r -p "Path to the content zip: " ZIP
+    else
+      echo "game content missing; set ${NAME^^}_CONTENT_ZIP to the archive" >&2
+      exit 1
+    fi
+  fi
+  ZIP="\${ZIP/#\\~/\$HOME}"
+  [ -f "\$ZIP" ] || { echo "no archive at \$ZIP" >&2; exit 1; }
+  "\$ROOT/tools/content_zip.sh" restore "\$ZIP"
 fi
 [ -x "\$BUILD/$NAME" ] || { echo "build first: cmake --build out/build/linux" >&2; exit 1; }
 
@@ -107,29 +126,6 @@ assets/
 content/*.zip
 IGNORE
 
-python3 - "$PROJECT_ROOT" "$NAME" <<'PATCH'
-import sys
-from pathlib import Path
-root, name = Path(sys.argv[1]), sys.argv[2]
-path = root / 'CMakeLists.txt'
-text = path.read_text()
-anchor = 'include(generated/rexglue.cmake)'
-block = f'''# The disc content is not in Git. It lives as one zip under content/, imported
-# into assets/ before code generation so a rebuild is a single step, with
-# content/content.sha256 - which IS in Git - recording the archive checksum and
-# every file's. Already-correct assets cost one checksum pass.
-find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
-add_custom_target({name}_content
-    COMMAND ${{CMAKE_COMMAND}} -E env bash
-        ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/content_ensure.sh
-    COMMENT "Checking game content (importing content/*.zip if needed)"
-    VERBATIM)
-
-{anchor}
-
-add_dependencies({name}_codegen {name}_content)'''
-path.write_text(text.replace(anchor, block, 1))
-PATCH
 
 cat > "$PROJECT_ROOT/README.md" <<README
 # $NAME
@@ -151,10 +147,15 @@ cmake --build out/build/linux -j\$(nproc)
 
 ## Content
 
-\`assets/\` holds the disc files and is not in Git. \`tools/content_zip.sh\`
-packs it into one zip under \`content/\` and imports it back, with
-\`content/content.sha256\` (committed) recording the archive checksum and every
-file's; the build imports automatically when assets/ is missing or wrong.
+\`assets/\` holds the disc files and is never in Git. \`tools/content_zip.sh
+pack\` packs it into one stored zip under \`content/\` - also never committed -
+with \`content/content.sha256\` (which IS committed) recording the archive
+checksum and every file's.
+
+Importing the content is not part of the build: a rebuild must not depend on
+having the game to hand. \`./run.sh\` checks \`assets/\` against those checksums
+and, only when they do not match, asks where the archive is - or takes
+\`${NAME^^}_CONTENT_ZIP=/path/to/$NAME-content.zip\`.
 
 ## Testing without a display
 

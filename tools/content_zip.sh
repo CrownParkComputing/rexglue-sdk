@@ -2,7 +2,7 @@
 # Pack the game content into one zip, and restore it.
 #
 #   tools/content_zip.sh pack      assets/ -> content/<title>-content.zip
-#   tools/content_zip.sh restore   content/<title>-content.zip -> assets/
+#   tools/content_zip.sh restore [zip]   <zip> -> assets/  (default content/*.zip)
 #   tools/content_zip.sh verify    check assets/ against the recorded checksums
 #
 # One archive, not a tree of loose disc files: it imports in a single step when
@@ -18,6 +18,9 @@ TITLE="$(basename "$ROOT" | sed 's/-recomp$//')"
 ZIP="$ROOT/content/${TITLE}-content.zip"
 SUMS="$ROOT/content/content.sha256"
 ACTION="${1:-}"
+# restore may be pointed at an archive anywhere - the copy kept beside the
+# project is only the default.
+[ "${2:-}" ] && ZIP="$2"
 
 case "$ACTION" in
   pack)
@@ -37,10 +40,14 @@ case "$ACTION" in
     echo "checksums -> $SUMS"
     ;;
   restore)
-    [ -f "$ZIP" ] || { echo "no archive at $ZIP - copy it in first" >&2; exit 1; }
+    [ -f "$ZIP" ] || { echo "no archive at $ZIP" >&2; exit 1; }
     if [ -f "$SUMS" ]; then
+      # By hash, not by name: the archive may live anywhere, so the recorded
+      # filename means nothing - only the digest does.
       echo "verifying archive"
-      (cd "$ROOT/content" && grep -A1 '^# archive$' "$SUMS" | tail -1 | sha256sum -c -) || {
+      want="$(grep -A1 '^# archive$' "$SUMS" | tail -1 | cut -d' ' -f1)"
+      got="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+      [ "$want" = "$got" ] || {
         echo "archive checksum does not match content.sha256" >&2; exit 1; }
     fi
     mkdir -p "$ROOT/assets"
@@ -54,7 +61,7 @@ case "$ACTION" in
       && echo "game content verified"
     ;;
   *)
-    echo "usage: $(basename "$0") pack|restore|verify" >&2
+    echo "usage: $(basename "$0") pack|restore [zip]|verify" >&2
     exit 2
     ;;
 esac

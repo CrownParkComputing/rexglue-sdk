@@ -30,6 +30,15 @@
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+REXCVAR_DEFINE_INT32(
+    audio_channels, 0, "Audio",
+    "Channels to open the output device with: 0 (the default) follows whatever the device "
+    "reports, 2 does our own BS.775 stereo fold, 6 forces 5.1 passthrough.\n"
+    "UNTESTED HYPOTHESIS, kept as a flag rather than a default until it is: an HDMI endpoint "
+    "wired to stereo speakers still advertises 5.1, so following the device passes the guest's "
+    "5.1 through for the host to fold - LFE at unity and full band - which is not a mix anyone "
+    "authored. If that is what makes music sound hollow and metallic, 2 should fix it by folding "
+    "here, centre and surrounds at -3 dB and LFE dropped.");
 REXCVAR_DEFINE_STRING(
     audio_dump_wav, "", "Audio",
     "Write everything the guest submits to this WAV file (32-bit float, 6 channels, 48 kHz, "
@@ -89,8 +98,13 @@ bool SDLAudioDriver::Initialize() {
   SDL_AudioSpec obtained_spec = {};
   desired_spec.freq = frame_frequency_;
   desired_spec.format = SDL_AUDIO_F32LE;
-  desired_spec.channels = frame_channels_;
-  sdl_device_channels_ = frame_channels_;
+  const int32_t forced_channels = REXCVAR_GET(audio_channels);
+  const uint8_t open_channels =
+      (forced_channels == 2 || forced_channels == 6)
+          ? static_cast<uint8_t>(forced_channels)
+          : static_cast<uint8_t>(frame_channels_);
+  desired_spec.channels = open_channels;
+  sdl_device_channels_ = open_channels;
   sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
                                           SDLCallback, this);
   if (!sdl_stream_) {
@@ -111,7 +125,7 @@ bool SDLAudioDriver::Initialize() {
 
   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
   // Handing it a 6ch stream instead would use SDL's own downmix.
-  if (obtained_spec.channels <= 2) {
+  if (forced_channels != 2 && forced_channels != 6 && obtained_spec.channels <= 2) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
     desired_spec.channels = 2;
@@ -133,9 +147,10 @@ bool SDLAudioDriver::Initialize() {
   // first thing worth knowing when a report says the balance is wrong on one
   // speaker setup and right on another.
   const char* device_name = SDL_GetAudioDeviceName(sdl_device);
-  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
+  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch{}",
               device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
-              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_),
+              (forced_channels == 2 || forced_channels == 6) ? " (forced by --audio_channels)" : "");
 
   if (!SDL_ResumeAudioDevice(sdl_device)) {
     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());

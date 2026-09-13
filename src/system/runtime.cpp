@@ -336,6 +336,36 @@ bool Runtime::SetupVfs() {
     }
   }
 
+  // Mount a real, writable cache partition as cache:.
+  //
+  // Titles that stage data into the 360's cache partition dismount it, remount
+  // it and write through cache:. Without the device those opens simply fail,
+  // and a title that depends on staging never reaches its own front end - Shift
+  // 2 loops its attract movie forever, asking for cache:\online_cache on every
+  // pass. The NullDevice below answers RAW \Cache0/\Cache1 accesses, which is
+  // a different thing entirely: it cannot serve a path.
+  //
+  // Backed by user data, not the game tree: it is scratch the title rewrites,
+  // and it must be writable even when the game root is read-only.
+  {
+    auto cache_root = std::filesystem::absolute(user_data_root_) / "cache_partition";
+    std::error_code ec;
+    std::filesystem::create_directories(cache_root, ec);
+    if (ec) {
+      REXSYS_WARN("Runtime::SetupVfs: could not create {}: {}", cache_root.string(), ec.message());
+    } else {
+      auto cache_mount = "\\Device\\Harddisk0\\PartitionCache";
+      auto cache_device =
+          std::make_unique<rex::filesystem::HostPathDevice>(cache_mount, cache_root, false);
+      if (cache_device->Initialize() && file_system_->RegisterDevice(std::move(cache_device))) {
+        file_system_->RegisterSymbolicLink("cache:", cache_mount);
+        REXSYS_DEBUG("  Mounted {} at cache:", cache_root.string());
+      } else {
+        REXSYS_WARN("Runtime::SetupVfs: failed to mount the cache partition");
+      }
+    }
+  }
+
   // Setup NullDevice for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
   // Using a NullDevice returns success to all IO requests, allowing games

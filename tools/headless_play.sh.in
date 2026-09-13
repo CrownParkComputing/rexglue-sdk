@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Run the title headlessly, capture frames, and drive the menus - no display and
+# nobody at the keyboard. This is how every performance measurement and visual
+# check on a port is made.
+#
+#   tools/headless_play.sh <seconds> "<t:key[:hold] ...>"
+#   tools/headless_play.sh 150 "25:Return 100:e:35"   # start, then accelerate
+#
+# GAME_ARGS passes extra flags; HEADLESS_OUT moves the output directory.
+#
+# Three things about this are not obvious and each cost an hour:
+#
+#  - gamescope --backend headless publishes its composited output on PipeWire
+#    and nothing else. grim does not work (gamescope has no wlr-screencopy) and
+#    an X11 grab of its Xwayland is black, because the game presents through
+#    Vulkan straight to the compositor. The node ID is in gamescope's stdout.
+#  - xdotool must use XTEST (no --window): SDL ignores synthetic XSendEvent
+#    keys, so the window has to be focused and the key delivered as a real one.
+#  - Keys must be HELD. A default xdotool tap is ~12 ms and falls between the
+#    guest's 30 Hz input polls, so it is simply never seen.
+#
+# mnk_mode keys: Return = Start, Space = A, Z/Tab = Back, W/A/S/D = left stick,
+# E = right trigger (accelerate), Q = left trigger, F3 = debug overlay.
+set -u
+SECS="${1:-60}"; SCRIPT="${2:-}"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="${HEADLESS_OUT:-$ROOT/out/headless}"
+mkdir -p "$OUT/shots"; rm -f "$OUT/shots"/*.png
+cd "$ROOT/out/build/linux"
+
+gamescope --backend headless -W 1280 -H 720 -- env LD_LIBRARY_PATH=. SDL_VIDEODRIVER=x11 \
+  ${GAME_ENV:-} ./@TITLE@ --game_data_root="$ROOT/assets" --gpu_plugin xenos \
+  --user_data_root="$ROOT/user-data" --license_mask=1 --mnk_mode ${GAME_ARGS:-} \
+  >"$OUT/run.log" 2>&1 &
+GS=$!
+
+NODE=""; XDISP=""
+for i in $(seq 1 40); do
+  sleep 1
+  NODE=$(grep -oE "stream available on node ID: [0-9]+" "$OUT/run.log" | tail -1 | grep -oE "[0-9]+$")
+  XDISP=$(grep -oE "Starting Xwayland on :[0-9]+" "$OUT/run.log" | tail -1 | grep -oE ":[0-9]+$")
+  [ -n "$NODE" ] && [ -n "$XDISP" ] && break
+done
+echo "pipewire node ${NODE:-none}, xwayland ${XDISP:-none}"
+
+START=$SECONDS
+declare -A DONE
+while [ $((SECONDS - START)) -lt "$SECS" ]; do
+  T=$((SECONDS - START))
+  for step in $SCRIPT; do
+    WHEN=${step%%:*}; REST=${step#*:}; KEY=${REST%%:*}; HOLD=${REST#*:}
+    [ "$HOLD" = "$KEY" ] && HOLD=0.4
+    if [ "$T" -ge "$WHEN" ] && [ -z "${DONE[$step]:-}" ]; then
+      DONE[$step]=1
+      W=$(DISPLAY="$XDISP" xdotool search --onlyvisible --name . 2>/dev/null | tail -1)
+      [ -n "$W" ] && DISPLAY="$XDISP" xdotool windowactivate --sync "$W" 2>/dev/null
+      DISPLAY="$XDISP" xdotool keydown --clearmodifiers "$KEY" 2>/dev/null
+      sleep "$HOLD"
+      DISPLAY="$XDISP" xdotool keyup --clearmodifiers "$KEY" 2>/dev/null
+      echo "t=$T sent $KEY"
+    fi
+  done
+  if [ -n "$NODE" ] && [ $((T % 5)) -eq 0 ]; then
+    gst-launch-1.0 -q pipewiresrc path="$NODE" num-buffers=4 ! videoconvert ! pngenc \
+      ! multifilesink location="$OUT/shots/t$(printf %03d $T)_%d.png" >/dev/null 2>&1
+  fi
+  sleep 1
+done
+
+pkill -x @TITLE@ 2>/dev/null
+sleep 3
+kill $GS 2>/dev/null
+wait 2>/dev/null
+echo "frames in $OUT/shots"

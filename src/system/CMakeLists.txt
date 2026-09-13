@@ -38,6 +38,7 @@ set(REXSYSTEM_SOURCES
     entry_table.cpp
     export_resolver.cpp
     lzx.cpp
+    guest_memory_watch.cpp
     mmio_handler.cpp
     map_parser.cpp
     module.cpp

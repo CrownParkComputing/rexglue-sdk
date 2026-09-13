@@ -23,6 +23,7 @@
 #include <rex/memory.h>
 #include <rex/platform.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/system/guest_memory_watch.h>
 #include <rex/system/xthread.h>
 #include <rex/types.h>
 
@@ -423,6 +424,24 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     // source of lock contention in the process (1.9 s of blocking every 5 s on
     // a streaming title), stalling the GPU thread that was trying to arm the
     // next watch.
+    // A --guest_watch range is armed read-only on purpose, so its faults are
+    // diagnostics, not violations: name the writer, let the write through, and
+    // do not fall into the reporting path below, which would leave the page
+    // protected and the instruction retrying forever. Costs one relaxed atomic
+    // read when no watch is armed, which is the normal case.
+    if (rex::system::GuestMemoryWatchActive()) {
+      uint32_t guest_lr = 0;
+      if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+        if (thread->thread_state() && thread->thread_state()->context()) {
+          guest_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+        }
+      }
+      if (rex::system::ReportGuestWatchFault(fault_host_address, fault_guest_virtual_address,
+                                             is_write, guest_lr)) {
+        return true;
+      }
+    }
+
     {
       auto lock = global_critical_region_.Acquire();
       if (access_violation_callback_ &&

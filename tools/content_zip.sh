@@ -56,7 +56,19 @@ case "$ACTION" in
     "$0" verify
     ;;
   verify)
-    [ -f "$SUMS" ] || { echo "no $SUMS to verify against" >&2; exit 1; }
+    # No checksum file is not the same as no content. content.sha256 is a
+    # PROOF that assets/ is the right tree; a project packed later, or one
+    # scaffolded with --no-pack, has the game in place and nothing to check it
+    # against. Treating that as "content missing" sends run.sh asking for an
+    # archive that is not needed.
+    if [ ! -f "$SUMS" ]; then
+      if [ -n "$(find "$ROOT/assets" -maxdepth 1 -iname '*.xex' -print -quit 2>/dev/null)" ]; then
+        echo "game content present, unverified - run tools/content_zip.sh pack to record checksums"
+        exit 0
+      fi
+      echo "no $SUMS to verify against" >&2
+      exit 1
+    fi
     (cd "$ROOT/assets" && sed -n '/^# files$/,$p' "$SUMS" | tail -n +2 | sha256sum -c --quiet -) \
       && echo "game content verified"
     ;;

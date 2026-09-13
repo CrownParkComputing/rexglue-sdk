@@ -38,6 +38,7 @@
 #include <rex/system/user_module.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xmodule.h>
+#include <rex/system/guest_memory_watch.h>
 #include <rex/system/xmutant.h>
 #include <rex/system/xnotifylistener.h>
 #include <rex/system/xobject.h>
@@ -81,6 +82,11 @@ KernelState::KernelState(Runtime* emulator)
     rex::FatalError("Double initialization of KernelState");
   }
   shared_kernel_state_ = this;
+
+  // Diagnostic, off unless --guest_watch names a range. Started here because
+  // it is the first point at which guest memory exists and the title has not
+  // yet run a single instruction, so the sampler sees the whole boot.
+  StartGuestMemoryWatch(memory_);
 
   // Allocate KernelGuestGlobals early so xboxkrnl module can wire exports.
   kernel_guest_globals_ = memory_->SystemHeapAlloc(sizeof(KernelGuestGlobals));

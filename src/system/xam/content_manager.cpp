@@ -156,6 +156,20 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
   // content_root/xuid/title_id/type_name/*
   auto package_root = ResolvePackageRoot(xuid, content_type, title_id);
   auto file_infos = rex::filesystem::ListFiles(package_root);
+  {
+    // Where the enumeration actually looked, against where creation actually
+    // wrote: a title that cannot see the file it just made is looking in a
+    // different directory, and only the two paths side by side say so.
+    static const bool trace = [] {
+      const char* value = getenv("REX_XAM_TRACE");
+      return value && *value == '1';
+    }();
+    if (trace) {
+      REXLOG_INFO("[XAM] ListContent type={:#x} scanned '{}' -> {} entries",
+                  static_cast<uint32_t>(content_type), rex::path_to_utf8(package_root),
+                  file_infos.size());
+    }
+  }
   for (const auto& file_info : file_infos) {
     if (file_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
       // Not an extracted-content directory. It may be a raw STFS package file

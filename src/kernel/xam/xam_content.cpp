@@ -120,6 +120,10 @@ u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_
   }
 
   REXKRNL_DEBUG("XamContentCreateEnumerator: added {} items to enumerator", e->item_count());
+  if (XamTraceEnabled()) {
+    REXLOG_INFO("[XAM] CreateEnumerator handle={:#x} holds {} items", e->handle(),
+                e->item_count());
+  }
 
   *handle_out = e->handle();
   return X_ERROR_SUCCESS;
@@ -150,9 +154,12 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
   auto content_manager = REX_KERNEL_STATE()->content_manager();
 
   if (XamTraceEnabled()) {
-    REXLOG_INFO("[XAM] ContentCreate user={} root='{}' type={:#x} flags={:#x} overlapped={}",
-                user_index, root_name.value(), static_cast<uint32_t>(content_data.content_type.get()), flags,
-                bool(overlapped_ptr));
+    REXLOG_INFO(
+        "[XAM] ContentCreate user={} root='{}' device={:#x} type={:#x} file='{}' flags={:#x} "
+        "overlapped={}",
+        user_index, root_name.value(), static_cast<uint32_t>(content_data.device_id.get()),
+        static_cast<uint32_t>(content_data.content_type.get()), content_data.file_name(), flags,
+        bool(overlapped_ptr));
   }
 
   if (overlapped_ptr && disposition_ptr) {

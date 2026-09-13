@@ -10,6 +10,12 @@ set(REXSDK_DIR "" CACHE PATH "Path to rexglue-sdk source tree")
 if(REXSDK_DIR)
     add_subdirectory("{{ cmake_var("REXSDK_DIR") }}" rexglue-sdk)
     message(STATUS "Using ReXGlue SDK from source tree: {{ cmake_var("REXSDK_DIR") }}")
+    # Headers the installed SDK layout provides but a source tree does not: the
+    # runtime's public headers include <imgui.h>, which in an install sits in
+    # the SDK's own include directory and in a source tree only under
+    # thirdparty/. Without this a vendored build fails compiling the project's
+    # own recompiled sources, not the SDK's.
+    include_directories("{{ cmake_var("REXSDK_DIR") }}/thirdparty/imgui")
 else()
     if(REXSDK_VERSION)
         find_package(rexglue {{ cmake_var("REXSDK_VERSION") }} EXACT QUIET CONFIG)

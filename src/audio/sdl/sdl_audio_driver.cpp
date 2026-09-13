@@ -11,6 +11,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdio>
+#include <mutex>
+#include <string>
 #include <cstring>
 
 #include <rex/assert.h>
@@ -22,11 +26,43 @@
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
+#include <rex/types.h>
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+REXCVAR_DEFINE_STRING(
+    audio_dump_wav, "", "Audio",
+    "Write everything the guest submits to this WAV file (32-bit float, 6 channels, 48 kHz, "
+    "de-swapped to host order). What reaches the driver is the guest's own decoded audio, so a "
+    "dump that already sounds wrong puts the fault in the title or the XMA decoder rather than in "
+    "delivery. The header is finished on shutdown; a killed process leaves sizes of 0 which most "
+    "players still handle.");
 
 namespace rex::audio::sdl {
+
+namespace {
+// Diagnostics, off unless REX_AUDIO_STATS=1 (REX_AUDIO_REPEAT_STATS is kept
+// working as the old name). "Slow and robotic" output has two very different
+// causes and these separate them: the guest handing us the same block again,
+// or the callback finding nothing queued and playing silence between good
+// frames. The second is a gap every time the guest thread is scheduled late,
+// and at the callback rate it sounds exactly like a buzz.
+bool AudioStatsEnabled() {
+  static const int enabled = [] {
+    const char* value = getenv("REX_AUDIO_STATS");
+    if (!value) {
+      value = getenv("REX_AUDIO_REPEAT_STATS");
+    }
+    return (value && *value == '1') ? 1 : 0;
+  }();
+  return enabled != 0;
+}
+
+std::atomic<uint64_t> g_callbacks{0};
+std::atomic<uint64_t> g_underruns{0};
+std::atomic<uint64_t> g_depth_sum{0};
+std::atomic<uint64_t> g_depth_min{~uint64_t(0)};
+}  // namespace
 
 SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
     : AudioDriver(memory), semaphore_(semaphore) {}
@@ -109,8 +145,80 @@ bool SDLAudioDriver::Initialize() {
   return true;
 }
 
+namespace {
+// Minimal WAVE_FORMAT_IEEE_FLOAT header; sizes are patched on close.
+void WriteWavHeader(std::FILE* file, uint16_t channels, uint32_t rate) {
+  const uint16_t bits = 32;
+  const uint32_t byte_rate = rate * channels * (bits / 8);
+  const uint16_t block_align = static_cast<uint16_t>(channels * (bits / 8));
+  const uint16_t format = 3;  // IEEE float
+  const uint32_t fmt_size = 16;
+  const uint32_t zero = 0;
+  std::fwrite("RIFF", 1, 4, file);
+  std::fwrite(&zero, 4, 1, file);  // patched: RIFF size
+  std::fwrite("WAVEfmt ", 1, 8, file);
+  std::fwrite(&fmt_size, 4, 1, file);
+  std::fwrite(&format, 2, 1, file);
+  std::fwrite(&channels, 2, 1, file);
+  std::fwrite(&rate, 4, 1, file);
+  std::fwrite(&byte_rate, 4, 1, file);
+  std::fwrite(&block_align, 2, 1, file);
+  std::fwrite(&bits, 2, 1, file);
+  std::fwrite("data", 1, 4, file);
+  std::fwrite(&zero, 4, 1, file);  // patched: data size
+}
+
+void PatchWavSizes(std::FILE* file) {
+  const long end = std::ftell(file);
+  if (end < 44) {
+    return;
+  }
+  const uint32_t data_size = static_cast<uint32_t>(end - 44);
+  const uint32_t riff_size = static_cast<uint32_t>(end - 8);
+  std::fseek(file, 4, SEEK_SET);
+  std::fwrite(&riff_size, 4, 1, file);
+  std::fseek(file, 40, SEEK_SET);
+  std::fwrite(&data_size, 4, 1, file);
+}
+
+std::mutex g_dump_lock;
+std::FILE* g_dump_file = nullptr;
+bool g_dump_tried = false;
+}  // namespace
+
 void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
+
+  if (!REXCVAR_GET(audio_dump_wav).empty()) {
+    std::lock_guard<std::mutex> guard(g_dump_lock);
+    if (!g_dump_tried) {
+      g_dump_tried = true;
+      const std::string path = REXCVAR_GET(audio_dump_wav);
+      g_dump_file = std::fopen(path.c_str(), "wb");
+      if (g_dump_file) {
+        WriteWavHeader(g_dump_file, frame_channels_, frame_frequency_);
+        REXAPU_INFO("dumping submitted audio to {}", path);
+      } else {
+        REXAPU_ERROR("could not open {} for the audio dump", path);
+      }
+    }
+    if (g_dump_file) {
+      // The guest's frame is channel-SEQUENTIAL big-endian - 256 samples of
+      // channel 0, then 256 of channel 1, and so on - while WAV is
+      // interleaved. Writing it through unchanged produces a file that sounds
+      // like noise no matter how good the audio was, which would send anyone
+      // listening to it chasing the wrong fault entirely.
+      std::array<float, frame_channels_> interleaved{};
+      for (size_t sample = 0; sample < channel_samples_; ++sample) {
+        for (size_t channel = 0; channel < frame_channels_; ++channel) {
+          interleaved[channel] =
+              rex::byte_swap(input_frame[channel * channel_samples_ + sample]);
+        }
+        std::fwrite(interleaved.data(), sizeof(float), interleaved.size(), g_dump_file);
+      }
+    }
+  }
+
   float* output_frame;
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
@@ -129,12 +237,7 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   // whether the repeat is already in the guest's buffer or appears later in
   // this driver's queue. Off unless REX_AUDIO_REPEAT_STATS=1.
   {
-    static int enabled = -1;
-    if (enabled < 0) {
-      const char* value = getenv("REX_AUDIO_REPEAT_STATS");
-      enabled = (value && *value == '1') ? 1 : 0;
-    }
-    if (enabled) {
+    if (AudioStatsEnabled()) {
       static uint64_t history[8] = {};
       static size_t history_count = 0;
       static uint64_t submitted = 0, repeats = 0, repeat_at_4 = 0;
@@ -142,6 +245,24 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
       const auto* bytes = reinterpret_cast<const unsigned char*>(input_frame);
       for (size_t i = 0; i < frame_samples_ * sizeof(float); ++i) {
         hash = (hash ^ bytes[i]) * 1099511628211ull;
+      }
+      // A repeated SILENT block and a repeated LOUD one sound nothing alike:
+      // the first is a gap, the second is the buzz that gets reported as
+      // "robotic". The repeat count alone cannot tell them apart.
+      static double peak_sum = 0.0;
+      static uint64_t silent_frames = 0;
+      float peak = 0.0f;
+      for (size_t i = 0; i < frame_samples_; ++i) {
+        // Guest samples are big-endian floats; only the magnitude matters here.
+        const float sample = rex::byte_swap(input_frame[i]);
+        const float magnitude = sample < 0.0f ? -sample : sample;
+        if (magnitude > peak) {
+          peak = magnitude;
+        }
+      }
+      peak_sum += double(peak);
+      if (peak < 1e-6f) {
+        ++silent_frames;
       }
       for (size_t back = 0; back < 8 && back < history_count; ++back) {
         if (history[(history_count - 1 - back) % 8] == hash) {
@@ -153,9 +274,23 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
       history[history_count % 8] = hash;
       ++history_count;
       if (++submitted % 188 == 0) {  // ~once a second at 256 samples / 48 kHz
+        const uint64_t callbacks = g_callbacks.exchange(0);
+        const uint64_t underruns = g_underruns.exchange(0);
+        const uint64_t depth_sum = g_depth_sum.exchange(0);
+        const uint64_t depth_min = g_depth_min.exchange(~uint64_t(0));
         REXAPU_INFO("audio repeats: {} of {} submitted frames matched one of the previous 8 "
                     "({} of them exactly 4 frames back)",
                     repeats, submitted, repeat_at_4);
+        REXAPU_INFO("audio level: peak avg {:.4f} over the last second, {} of {} frames silent",
+                    peak_sum / 188.0, silent_frames, submitted);
+        peak_sum = 0.0;
+        silent_frames = 0;
+        REXAPU_INFO("audio queue: {} callbacks, {} played silence ({:.1f}%), depth avg {:.2f} "
+                    "min {}",
+                    callbacks, underruns,
+                    callbacks ? 100.0 * double(underruns) / double(callbacks) : 0.0,
+                    callbacks ? double(depth_sum) / double(callbacks) : 0.0,
+                    depth_min == ~uint64_t(0) ? 0 : depth_min);
       }
     }
   }
@@ -175,6 +310,15 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
 }
 
 void SDLAudioDriver::Shutdown() {
+  {
+    std::lock_guard<std::mutex> guard(g_dump_lock);
+    if (g_dump_file) {
+      PatchWavSizes(g_dump_file);
+      std::fclose(g_dump_file);
+      g_dump_file = nullptr;
+    }
+  }
+
   if (sdl_stream_) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
@@ -217,6 +361,18 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
+    if (AudioStatsEnabled()) {
+      const uint64_t depth = driver->frames_queued_.size();
+      g_callbacks.fetch_add(1, std::memory_order_relaxed);
+      g_depth_sum.fetch_add(depth, std::memory_order_relaxed);
+      uint64_t previous = g_depth_min.load(std::memory_order_relaxed);
+      while (depth < previous &&
+             !g_depth_min.compare_exchange_weak(previous, depth, std::memory_order_relaxed)) {
+      }
+      if (!depth) {
+        g_underruns.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     if (driver->frames_queued_.empty()) {
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");

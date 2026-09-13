@@ -45,6 +45,7 @@ set(REXGPU_XENOS_SPIRV_SOURCES
 set(REXGPU_XENOS_VULKAN_SOURCES
     vulkan/graphics_system.cpp
     vulkan/deferred_command_buffer.cpp
+    vulkan/geometry_shader_builder.cpp
     vulkan/command_processor.cpp
     vulkan/pipeline_cache.cpp
     vulkan/primitive_processor.cpp
@@ -156,5 +157,91 @@ if(REXGLUE_USE_D3D12)
         d3d12
         dxgi
         dxguid
+    )
+endif()
+
+#==============================================================================
+# rexgpu-native: game-agnostic NATIVE GPU renderer plugin
+#
+# Selected at runtime with --gpu_plugin native (loads librexgpu-native.so).
+# Shares the backend-agnostic PM4 command processor and Xenos base with
+# rexgpu-xenos and replaces the backend draw/resolve/present seams with native
+# GPU command translation - no EDRAM, tiling or resolve emulation. Independent
+# of rexgpu-xenos: it links none of it and compiles its own copies of the
+# shared sources.
+#==============================================================================
+if(REXGLUE_USE_VULKAN)
+    set(REXGPU_NATIVE_SOURCES
+        native/plugin_main.cpp
+        native/graphics_system.cpp
+        native/command_processor.cpp
+        native/native_shared_memory.cpp
+        native/texture_cache.cpp
+
+        # Geometry-shader SPIR-V construction, split out of
+        # vulkan/pipeline_cache.cpp so it can be compiled here without the rest
+        # of VulkanPipelineCache.
+        vulkan/geometry_shader_builder.cpp
+
+        # Shared, game-agnostic PM4 + Xenos base.
+        flags.cpp
+        register_file.cpp
+        registers.cpp
+        pipeline/shader/shader.cpp
+        format/ucode.cpp
+        sampler_info.cpp
+        graphics_system.cpp
+        command_processor.cpp
+        util/draw_extent_estimator.cpp
+        util/draw.cpp
+        packet_disassembler.cpp
+        primitive_processor.cpp
+        pipeline/render_target/cache.cpp
+        shared_memory.cpp
+        pipeline/texture/cache.cpp
+        pipeline/shader/interpreter.cpp
+        pipeline/shader/translator.cpp
+        pipeline/shader/translator_disasm.cpp
+
+        # Xenos microcode -> SPIR-V, reused verbatim: the native backend
+        # translates guest shaders instead of emulating the Xenos ALU.
+        pipeline/shader/spirv_builder.cpp
+        pipeline/shader/spirv.cpp
+        pipeline/shader/spirv_translator.cpp
+        pipeline/shader/spirv_translator_alu.cpp
+        pipeline/shader/spirv_translator_fetch.cpp
+        pipeline/shader/spirv_translator_memexport.cpp
+        pipeline/shader/spirv_translator_rb.cpp
+    )
+
+    add_library(rexgpu-native SHARED ${REXGPU_NATIVE_SOURCES})
+    add_library(rex::gpu-native ALIAS rexgpu-native)
+
+    set_target_properties(rexgpu-native PROPERTIES
+        EXPORT_NAME gpu-native
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+
+    target_include_directories(rexgpu-native PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${REXGLUE_ROOT}/thirdparty/renderdoc
+        ${REXGLUE_ROOT}
+    )
+
+    target_compile_options(rexgpu-native PRIVATE -Wno-unused-variable)
+
+    target_link_libraries(rexgpu-native PRIVATE
+        rexruntime
+        xxHash::xxhash
+        snappy
+        Vulkan::Headers
+        GPUOpen::VulkanMemoryAllocator
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
     )
 endif()

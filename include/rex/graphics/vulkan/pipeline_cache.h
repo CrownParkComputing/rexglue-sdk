@@ -103,6 +103,51 @@ class VulkanPipelineCache {
                                     const PipelineLayoutProvider*& pipeline_layout_out,
                                     bool* is_placeholder_out = nullptr) const;
 
+  // Geometry shaders for the Xenos primitive types Vulkan has no topology for.
+  // Public because the native GPU backend (graphics/native) builds them
+  // directly, with its own cache, rather than going through this class.
+  enum class PipelineGeometryShader : uint32_t {
+    kNone,
+    kPointList,
+    kRectangleList,
+    kQuadList,
+  };
+
+  union GeometryShaderKey {
+    uint32_t key;
+    struct {
+      PipelineGeometryShader type : 2;
+      uint32_t interpolator_count : 5;
+      uint32_t user_clip_plane_count : 3;
+      uint32_t user_clip_plane_cull : 1;
+      uint32_t has_vertex_kill_and : 1;
+      uint32_t has_point_size : 1;
+      uint32_t has_point_coordinates : 1;
+      // PA_CL_CLIP_CNTL::ps_ucp_mode for point primitives.
+      uint32_t point_ps_ucp_mode : 2;
+    };
+
+    GeometryShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+
+    struct Hasher {
+      size_t operator()(const GeometryShaderKey& key) const {
+        return std::hash<uint32_t>{}(key.key);
+      }
+    };
+    bool operator==(const GeometryShaderKey& other_key) const { return key == other_key.key; }
+    bool operator!=(const GeometryShaderKey& other_key) const { return !(*this == other_key); }
+  };
+
+  static bool GetGeometryShaderKey(PipelineGeometryShader geometry_shader_type,
+                                   SpirvShaderTranslator::Modification vertex_shader_modification,
+                                   SpirvShaderTranslator::Modification pixel_shader_modification,
+                                   GeometryShaderKey& key_out);
+
+  // Builds the module for a key. Defined in geometry_shader_builder.cpp so the
+  // native backend can compile it without the rest of this cache.
+  static VkShaderModule BuildGeometryShaderModule(const ui::vulkan::VulkanDevice& device,
+                                                  GeometryShaderKey key);
+
  private:
   // Copies the shareable cache shipped with the title into a user cache that
   // does not have it yet. See the shader_storage_seed_root cvar.
@@ -127,12 +172,6 @@ class VulkanPipelineCache {
     static constexpr uint32_t kVersion = 0x20201219;
   });
 
-  enum class PipelineGeometryShader : uint32_t {
-    kNone,
-    kPointList,
-    kRectangleList,
-    kQuadList,
-  };
 
   enum class PipelinePrimitiveTopology : uint32_t {
     kPointList,
@@ -332,30 +371,6 @@ class VulkanPipelineCache {
     }
   };
 
-  union GeometryShaderKey {
-    uint32_t key;
-    struct {
-      PipelineGeometryShader type : 2;
-      uint32_t interpolator_count : 5;
-      uint32_t user_clip_plane_count : 3;
-      uint32_t user_clip_plane_cull : 1;
-      uint32_t has_vertex_kill_and : 1;
-      uint32_t has_point_size : 1;
-      uint32_t has_point_coordinates : 1;
-      // PA_CL_CLIP_CNTL::ps_ucp_mode for point primitives.
-      uint32_t point_ps_ucp_mode : 2;
-    };
-
-    GeometryShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
-
-    struct Hasher {
-      size_t operator()(const GeometryShaderKey& key) const {
-        return std::hash<uint32_t>{}(key.key);
-      }
-    };
-    bool operator==(const GeometryShaderKey& other_key) const { return key == other_key.key; }
-    bool operator!=(const GeometryShaderKey& other_key) const { return !(*this == other_key); }
-  };
 
   VulkanShader* LoadShader(xenos::ShaderType shader_type, const uint32_t* host_address,
                            uint32_t dword_count, uint64_t data_hash);
@@ -377,10 +392,6 @@ class VulkanPipelineCache {
   // Whether the pipeline for the given description is supported by the device.
   bool ArePipelineRequirementsMet(const PipelineDescription& description) const;
 
-  static bool GetGeometryShaderKey(PipelineGeometryShader geometry_shader_type,
-                                   SpirvShaderTranslator::Modification vertex_shader_modification,
-                                   SpirvShaderTranslator::Modification pixel_shader_modification,
-                                   GeometryShaderKey& key_out);
   static uint32_t GetTessellationPatchControlPointCount(
       Shader::HostVertexShaderType host_vertex_shader_type,
       xenos::TessellationMode tessellation_mode);

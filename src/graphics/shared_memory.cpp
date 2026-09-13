@@ -22,6 +22,7 @@
 #include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/graphics/shared_memory.h>
+#include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory.h>
 
@@ -352,7 +353,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
                                         .count());
       uint64_t due = next_report.load(std::memory_order_relaxed);
       if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
-        REXGPU_INFO("[SHMEM] MakeRangeValid: {} calls, {} pages invalid->valid",
+        REXLOG_INFO("[SHMEM] MakeRangeValid: {} calls, {} pages invalid->valid",
                     calls.exchange(0), pages.exchange(0));
       }
     }
@@ -548,7 +549,7 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
           unique_count = unique_pages.size();
           unique_pages.clear();
         }
-        REXGPU_INFO("[SHMEM] uploads: {} regions, {} pages ({} MB), {} distinct pages",
+        REXLOG_INFO("[SHMEM] uploads: {} regions, {} pages ({} MB), {} distinct pages",
                     uploads.exchange(0), page_count, (page_count << page_size_log2_) >> 20,
                     unique_count);
       }
@@ -650,7 +651,7 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
                                         .count());
       uint64_t due = next_report.load(std::memory_order_relaxed);
       if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
-        REXGPU_INFO("[SHMEM] RequestRange: {} resident, {} needing upload, {} pages scanned",
+        REXLOG_INFO("[SHMEM] RequestRange: {} resident, {} needing upload, {} pages scanned",
                     fast.exchange(0), slow.exchange(0), pages.exchange(0));
       }
     }
@@ -764,7 +765,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
                                         .count());
       uint64_t due = next_report.load(std::memory_order_relaxed);
       if (now >= due && next_report.compare_exchange_strong(due, now + 2)) {
-        REXGPU_INFO(
+        REXLOG_INFO(
             "[SHMEM] invalidations: {} calls, {} pages asked, {} pages in range, {} valid->invalid",
             calls.exchange(0), asked.exchange(0), widened.exchange(0), flips.exchange(0));
       }

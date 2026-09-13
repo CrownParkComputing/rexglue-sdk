@@ -72,6 +72,21 @@ std::string ComputeInputFingerprint(std::span<const std::filesystem::path> input
   accumulator += sdkVersion;
   accumulator += '\n';
 
+  // The generator itself is an input. The SDK version string only moves with a
+  // commit, so a tool rebuilt from a working tree - which is every iteration
+  // while fixing codegen - produced a fingerprint that said "up to date" and
+  // left the previous, wrong output in place. Hashing the executable costs a
+  // few tens of milliseconds once per run and removes a whole class of
+  // "my fix changed nothing" confusion.
+  std::error_code toolEc;
+  const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", toolEc);
+  if (!toolEc) {
+    const std::string toolDigest = rex::hash_file(self);
+    if (!toolDigest.empty()) {
+      accumulator += fmt::format("tool={}\n", toolDigest);
+    }
+  }
+
   for (const auto& flag : flagValues) {
     accumulator += "flag=";
     accumulator += flag;

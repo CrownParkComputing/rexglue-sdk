@@ -836,27 +836,48 @@ bool FunctionGraph::removeFunction(uint32_t entryPoint) {
   return true;
 }
 
-FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) {
-  // O(log f) lookup via sorted base index: find last function with base <= addr
-  auto it = functionsByBase_.upper_bound(addr);
-  if (it != functionsByBase_.begin()) {
-    --it;
-    if (it->second->containsAddress(addr)) {
+namespace {
+
+// Walking back a few entries covers a function whose blocks reach past a later
+// function's base - out-of-line blocks land there - without scanning the whole
+// table on every query.
+constexpr int kOwnerSearchDepth = 4;
+
+template <typename Iterator, typename Map>
+auto FindOwner(Map& byBase, uint32_t addr) -> decltype(byBase.begin()->second) {
+  Iterator it = byBase.upper_bound(addr);
+  if (it == byBase.begin()) {
+    return nullptr;
+  }
+  --it;
+  if (it->second->containsAddress(addr)) {
+    return it->second;
+  }
+  // The declared size is not the body. A block discovered past a mid-function
+  // blr sits outside it, and until this fell back to the blocks, every branch
+  // whose SITE was in such a block had no owning function, so its target could
+  // not be recognised as a local label and became a REX_FATAL that aborted the
+  // title the first time that path ran.
+  for (int depth = 0; depth < kOwnerSearchDepth; ++depth) {
+    if (it->second->blocksContain(addr)) {
       return it->second;
     }
+    if (it == byBase.begin()) {
+      break;
+    }
+    --it;
   }
   return nullptr;
 }
 
+}  // namespace
+
+FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) {
+  return FindOwner<decltype(functionsByBase_)::iterator>(functionsByBase_, addr);
+}
+
 const FunctionNode* FunctionGraph::getFunctionContaining(uint32_t addr) const {
-  auto it = functionsByBase_.upper_bound(addr);
-  if (it != functionsByBase_.begin()) {
-    --it;
-    if (it->second->containsAddress(addr)) {
-      return it->second;
-    }
-  }
-  return nullptr;
+  return FindOwner<decltype(functionsByBase_)::const_iterator>(functionsByBase_, addr);
 }
 
 bool FunctionGraph::isEntryPoint(uint32_t addr) const {
@@ -1314,7 +1335,16 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
   // always valid, so classify it InternalLabel rather than Unknown (which
   // would emit a spurious REX_FATAL on a live intra-function branch - observed
   // in Split/Second's engine at 0x88CF5268).
-  if (callerFn && (callerFn->containsAddress(target) || callerFn->isLabel(target))) {
+  //
+  // isBlockStart() covers the remaining case, and it is the common one: a block
+  // discovered past a mid-function blr sits outside the function's DECLARED
+  // size, so containsAddress() rejects it on the bounds test before it ever
+  // looks at the blocks. The emitter still writes its loc_XXXX label, so the
+  // branch was being turned into a REX_FATAL that aborts the title the first
+  // time that path runs - 326 of them in Burnout Revenge, which died on the
+  // first one during boot.
+  if (callerFn && (callerFn->containsAddress(target) || callerFn->isLabel(target) ||
+                   callerFn->isBlockStart(target))) {
     return TargetKind::InternalLabel;
   }
 

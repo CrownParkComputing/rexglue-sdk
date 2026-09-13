@@ -117,6 +117,32 @@ class FunctionNode {
   const std::set<uint32_t>& labels() const { return labels_; }
   bool isLabel(uint32_t addr) const { return labels_.contains(addr); }
 
+  // Whether a block of this function starts here. The emitter writes a
+  // "loc_XXXX:" label for every block start, so a branch to one is always a
+  // valid goto - even when the address falls outside the function's declared
+  // size, which is how a block discovered past a mid-function blr ends up
+  // unreachable to containsAddress().
+  // Whether any block of this function covers the address, ignoring the
+  // declared size. The emitter works from the blocks, so this is the honest
+  // answer to "is this address part of this function's body".
+  bool blocksContain(uint32_t addr) const {
+    for (const auto& block : blocks_) {
+      if (block.contains(addr)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool isBlockStart(uint32_t addr) const {
+    for (const auto& block : blocks_) {
+      if (block.base == addr) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Resolved calls (bl instructions)
   const std::vector<CallEdge>& calls() const { return calls_; }
 

@@ -61,8 +61,11 @@ while [ $((SECONDS - START)) -lt "$SECS" ]; do
     fi
   done
   if [ -n "$NODE" ] && [ $((T % 5)) -eq 0 ]; then
-    gst-launch-1.0 -q pipewiresrc path="$NODE" num-buffers=4 ! videoconvert ! pngenc \
-      ! multifilesink location="$OUT/shots/t$(printf %03d $T)_%d.png" >/dev/null 2>&1
+    # Bounded: pipewiresrc blocks until the buffers arrive, so a title that has
+    # stopped presenting would otherwise hang the whole loop - including the
+    # input script, which is how a run ends up doing nothing at all.
+    timeout 10 gst-launch-1.0 -q pipewiresrc path="$NODE" num-buffers=4 ! videoconvert ! pngenc \
+      ! multifilesink location="$OUT/shots/t$(printf %03d $T)_%d.png" >/dev/null 2>&1 || true
   fi
   sleep 1
 done

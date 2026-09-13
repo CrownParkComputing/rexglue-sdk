@@ -59,4 +59,8 @@ void RecordGuestSignal(uint32_t handle);
 void RecordGuestObjectCreation(const char* kind, uint32_t handle, uint32_t guest_object,
                                const char* detail);
 
+// Notes a guest busy-wait primitive, reporting each distinct call site once
+// with how often it has been reached. A spinning guest is otherwise invisible.
+void RecordGuestSpin(const char* api);
+
 }  // namespace rex::kernel::xboxkrnl

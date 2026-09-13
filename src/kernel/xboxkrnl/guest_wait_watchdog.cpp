@@ -27,6 +27,8 @@
 #include <pthread.h>
 
 #include <rex/thread.h>
+#include <rex/memory.h>
+#include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
 
 REXCVAR_DEFINE_UINT32(
@@ -184,8 +186,55 @@ void RecordGuestObjectCreation(const char* kind, uint32_t handle, uint32_t guest
   if (thread && thread->thread_state() && thread->thread_state()->context()) {
     caller_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
   }
-  REXLOG_WARN("[GUESTWAIT] created {} handle {:#010x} object {:#010x} {} from lr {:#010x}", kind,
-              handle, guest_object, detail, caller_lr);
+  // One frame is rarely enough: the immediate caller is usually a thin wrapper
+  // shared by the whole title. PowerPC keeps a back chain at [r1] with the
+  // caller's saved LR at +4, so a second frame costs two loads and names the
+  // subsystem that actually wanted the object.
+  uint32_t caller_caller_lr = 0;
+  if (thread && thread->thread_state() && thread->thread_state()->context()) {
+    auto* context = thread->thread_state()->context();
+    auto* memory = rex::system::kernel_state()->memory();
+    const uint32_t sp = static_cast<uint32_t>(context->r1.u32);
+    if (sp) {
+      const uint32_t back_chain = rex::byte_swap(*memory->TranslateVirtual<uint32_t*>(sp));
+      if (back_chain && back_chain != sp) {
+        caller_caller_lr =
+            rex::byte_swap(*memory->TranslateVirtual<uint32_t*>(back_chain + 4));
+      }
+    }
+  }
+  REXLOG_WARN("[GUESTWAIT] created {} handle {:#010x} object {:#010x} {} from lr {:#010x} <- {:#010x}",
+              kind, handle, guest_object, detail, caller_lr, caller_caller_lr);
+}
+
+void RecordGuestSpin(const char* api) {
+  if (REXCVAR_GET(guest_wait_report_seconds) == 0) {
+    return;
+  }
+  auto* thread = rex::system::XThread::GetCurrentThread();
+  uint32_t caller_lr = 0;
+  if (thread && thread->thread_state() && thread->thread_state()->context()) {
+    caller_lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+  }
+  static std::mutex lock;
+  static std::map<uint32_t, uint64_t> sites;
+  uint64_t count = 0;
+  bool first = false;
+  {
+    std::lock_guard<std::mutex> guard(lock);
+    auto& hits = sites[caller_lr];
+    first = hits == 0 && sites.size() <= 32;
+    count = ++hits;
+    // Report the first hit, then on a coarse ramp, so a hot spin is obvious
+    // without the log becoming the bottleneck.
+    if (!first && (count % 1000000)) {
+      return;
+    }
+  }
+  char host_name[32] = {};
+  pthread_getname_np(pthread_self(), host_name, sizeof(host_name));
+  REXLOG_WARN("[GUESTSPIN] {} from lr {:#010x} on '{}' ({} times)", api, caller_lr,
+              host_name[0] ? host_name : "?", count);
 }
 
 void RecordGuestSignal(uint32_t handle) {

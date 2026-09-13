@@ -396,6 +396,10 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
 }
 
 u32 NtYieldExecution_entry() {
+  // A guest spin-wait shows up as a thread burning a core almost entirely in
+  // the kernel with nothing to show for it. Naming the callers, once each,
+  // turns "something is spinning" into an address. Shares the watchdog's cvar.
+  RecordGuestSpin("NtYieldExecution");
   rex::thread::MaybeYield();
   return X_STATUS_SUCCESS;
 }

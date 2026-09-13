@@ -386,7 +386,13 @@ class PosixConditionBase {
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
-    auto predicate = [this] { return this->signaled(); };
+    // Take a place in the queue before waiting. An auto-reset event releases
+    // exactly one waiter, and which one matters: the guest's synchronisation is
+    // written for the console's first-in-first-out wake, so handing the signal
+    // to an arbitrary waiter loses it whenever that waiter's own predicate is
+    // not satisfied and it goes straight back to sleep. See signaled_for().
+    const uint64_t ticket = next_ticket_++;
+    auto predicate = [this, ticket] { return this->signaled_for(ticket); };
 #if REX_PLATFORM_LINUX
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
     int lock_result = pthread_mutex_lock(native_mutex);
@@ -399,6 +405,19 @@ class PosixConditionBase {
 #else
     std::unique_lock<std::mutex> lock(mutex_);
 #endif
+    wait_queue_.push_back(ticket);
+    // However this ends, leave the queue and let the new head re-test.
+    struct QueueExit {
+      PosixConditionBase* self;
+      uint64_t ticket;
+      ~QueueExit() {
+        auto it = std::find(self->wait_queue_.begin(), self->wait_queue_.end(), ticket);
+        if (it != self->wait_queue_.end()) {
+          self->wait_queue_.erase(it);
+        }
+        self->cond_.notify_all();
+      }
+    } queue_exit{this, ticket};
     if (predicate()) {
       executed = true;
     } else {
@@ -566,6 +585,10 @@ class PosixConditionBase {
     return const_cast<std::condition_variable&>(cond_).native_handle();
   }
 
+  // Per-waiter view of "is this handle ready for ME". The default matches the
+  // plain state; an auto-reset event narrows it to the longest-waiting thread.
+  virtual bool signaled_for(uint64_t) const { return signaled(); }
+
  protected:
   // Called with mutex_ held by every signalling path. Takes only the waiter
   // registry lock and then each waiter's own lock, so the order is always
@@ -584,6 +607,9 @@ class PosixConditionBase {
   inline virtual void post_execution() = 0;
   std::condition_variable cond_;
   std::mutex mutex_;
+  // Arrival order of the threads waiting on this handle, oldest first.
+  std::deque<uint64_t> wait_queue_;
+  uint64_t next_ticket_ = 1;
   std::mutex multi_waiters_mutex_;
   std::vector<MultiWaiter*> multi_waiters_;
   std::atomic<size_t> multi_waiter_count_{0};
@@ -617,6 +643,19 @@ class PosixCondition<Event> : public PosixConditionBase {
 
  private:
   inline bool signaled() const override { return signal_; }
+  // A notification (manual-reset) event releases everyone. A synchronization
+  // (auto-reset) event releases one, and it has to be the thread that has
+  // waited longest, or a waiter whose predicate is already satisfied can have
+  // its wake-up eaten by one whose predicate is not.
+  inline bool signaled_for(uint64_t ticket) const override {
+    if (!signal_) {
+      return false;
+    }
+    if (manual_reset_) {
+      return true;
+    }
+    return wait_queue_.empty() || wait_queue_.front() == ticket;
+  }
   inline void post_execution() override {
     if (!manual_reset_) {
       signal_ = false;

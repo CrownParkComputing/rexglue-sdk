@@ -10,7 +10,7 @@
 #   --content      directory holding the extracted disc (must contain the XEX)
 #   --project-root where to create it (default ~/<name>-recomp)
 #   --move         move the content instead of copying it (saves a disc-sized copy)
-#   --no-pack      skip building content/parts (do it later with content_parts.py)
+#   --no-pack      skip building the content zip (do it later with content_zip.sh pack)
 #
 # Deliberately stops before configure and build, and prints the two commands:
 # code generation on a big title is minutes of CPU and should be a decision,
@@ -62,10 +62,7 @@ sed -i "s|$PROJECT_ROOT/assets|assets|g" "$PROJECT_ROOT/${NAME}_manifest.toml"
 
 echo "==> config, tooling and scripts"
 cp "$SDK/tools/port_profile.toml" "$PROJECT_ROOT/config/$NAME.toml"
-cp "$SDK/tools/content_parts.py" "$PROJECT_ROOT/tools/"
-[ -f "$SDK/tools/test_content_parts.py" ] && cp "$SDK/tools/test_content_parts.py" "$PROJECT_ROOT/tools/"
-sed -i "s|CrownParkComputing/PROJECT-recomp|CrownParkComputing/$NAME-recomp|" \
-  "$PROJECT_ROOT/tools/content_parts.py"
+cp "$SDK/tools/content_zip.sh" "$SDK/tools/content_ensure.sh" "$PROJECT_ROOT/tools/"
 for script in headless_play measure; do
   sed "s|@TITLE@|$NAME|g" "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
   chmod +x "$PROJECT_ROOT/tools/$script.sh"
@@ -81,8 +78,8 @@ GAME="\${${NAME^^}_GAME_DATA:-\$ROOT/assets}"
 SDK_LIB="$SDK/out/install/linux-amd64/lib"
 
 if [ ! -f "\$GAME/$XEX_NAME" ]; then
-  echo "game content missing; restoring from the content parts" >&2
-  python3 "\$ROOT/tools/content_parts.py" restore --download
+  echo "game content missing; importing content/*.zip" >&2
+  "\$ROOT/tools/content_zip.sh" restore
 fi
 [ -x "\$BUILD/$NAME" ] || { echo "build first: cmake --build out/build/linux" >&2; exit 1; }
 
@@ -104,10 +101,10 @@ cat > "$PROJECT_ROOT/.gitignore" <<'IGNORE'
 out/
 user-data/
 generated/
-# The disc content is never committed: assets/ is restored from content/parts,
-# and the parts themselves belong on a private release, not in Git.
+# The disc content is never committed: assets/ is imported from the zip under
+# content/, and content.sha256 proves a restored tree is the right content.
 assets/
-content/parts/
+content/*.zip
 IGNORE
 
 python3 - "$PROJECT_ROOT" "$NAME" <<'PATCH'
@@ -117,15 +114,15 @@ root, name = Path(sys.argv[1]), sys.argv[2]
 path = root / 'CMakeLists.txt'
 text = path.read_text()
 anchor = 'include(generated/rexglue.cmake)'
-block = f'''# The disc content is not in Git. It lives as numbered parts under content/,
-# with content/manifest.json naming and checksumming every file, and is restored
-# into assets/ before code generation so a fresh clone builds and runs. The
-# restore is a no-op once assets/ matches the manifest.
+block = f'''# The disc content is not in Git. It lives as one zip under content/, imported
+# into assets/ before code generation so a rebuild is a single step, with
+# content/content.sha256 - which IS in Git - recording the archive checksum and
+# every file's. Already-correct assets cost one checksum pass.
 find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
 add_custom_target({name}_content
-    COMMAND ${{Python3_EXECUTABLE}} ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/content_parts.py
-        restore --download
-    COMMENT "Checking game content (restoring parts if missing)"
+    COMMAND ${{CMAKE_COMMAND}} -E env bash
+        ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/content_ensure.sh
+    COMMENT "Checking game content (importing content/*.zip if needed)"
     VERBATIM)
 
 {anchor}
@@ -154,9 +151,10 @@ cmake --build out/build/linux -j\$(nproc)
 
 ## Content
 
-\`assets/\` holds the disc files and is not in Git. \`tools/content_parts.py\`
-packs it into fixed-size parts under \`content/\` with a manifest that checksums
-every file, and restores it the other way; the build does that automatically.
+\`assets/\` holds the disc files and is not in Git. \`tools/content_zip.sh\`
+packs it into one zip under \`content/\` and imports it back, with
+\`content/content.sha256\` (committed) recording the archive checksum and every
+file's; the build imports automatically when assets/ is missing or wrong.
 
 ## Testing without a display
 
@@ -182,8 +180,8 @@ echo "==> generating guest code"
 (cd "$PROJECT_ROOT" && "$REXGLUE" codegen | tail -2)
 
 if [ "$PACK" = 1 ]; then
-  echo "==> packing content into parts"
-  (cd "$PROJECT_ROOT" && python3 tools/content_parts.py pack --part-size $((256 * 1024 * 1024)))
+  echo "==> packing content into one zip"
+  (cd "$PROJECT_ROOT" && tools/content_zip.sh pack)
 fi
 
 (cd "$PROJECT_ROOT" && git init -q && git add -A && \

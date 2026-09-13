@@ -297,6 +297,21 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     buttons |= X_INPUT_GAMEPAD_START;
   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
     buttons |= X_INPUT_GAMEPAD_GUIDE;
+
+  // What the keyboard actually produced, against what the guest then reads.
+  // "the guest never saw A" and "the driver never made an A" look identical
+  // from the title's side. Off unless REX_MNK_TRACE=1.
+  {
+    static const bool trace = [] {
+      const char* value = getenv("REX_MNK_TRACE");
+      return value && *value == '1';
+    }();
+    static uint16_t last_buttons = 0;
+    if (trace && buttons != last_buttons) {
+      last_buttons = buttons;
+      REXLOG_INFO("[MNK] buttons={:#06x}", buttons);
+    }
+  }
   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))

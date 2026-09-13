@@ -21,6 +21,17 @@
 #include <rex/system/xenumerator.h>
 #include <rex/system/xtypes.h>
 
+namespace {
+// See the note in xam_content_device.cpp: off unless REX_XAM_TRACE=1.
+bool XamTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = getenv("REX_XAM_TRACE");
+    return value && *value == '1';
+  }();
+  return enabled;
+}
+}  // namespace
+
 REXCVAR_DEFINE_UINT32(license_mask, 0, "Kernel", "Set license mask for activated content");
 
 namespace rex {
@@ -61,6 +72,7 @@ u32 XamContentResolve_entry(u32 user_index, mapped_void content_data_ptr, mapped
 u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_type,
                                      u32 content_flags, u32 items_per_enumerate,
                                      mapped_u32 buffer_size_ptr, mapped_u32 handle_out) {
+  if (XamTraceEnabled()) REXLOG_INFO("[XAM] CreateEnumerator user={} device={:#x} type={:#x}", user_index, device_id, content_type);
   assert_not_null(handle_out);
 
   auto device_info = device_id == 0 ? nullptr : GetDummyDeviceInfo(device_id);

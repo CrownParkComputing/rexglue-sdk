@@ -25,6 +25,17 @@
 
 #include <fmt/format.h>
 
+namespace {
+// See the note in xam_content_device.cpp: off unless REX_XAM_TRACE=1.
+bool XamTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = getenv("REX_XAM_TRACE");
+    return value && *value == '1';
+  }();
+  return enabled;
+}
+}  // namespace
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -73,12 +84,18 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, mapped_void buffer_ptr,
 
 u32 XamEnumerate_entry(u32 handle, u32 flags, mapped_void buffer, u32 buffer_length,
                        mapped_u32 items_returned, ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
+  if (XamTraceEnabled()) REXLOG_INFO("[XAM] Enumerate handle={:#x} buffer_length={}", handle, buffer_length);
   uint32_t dummy;
   auto result =
       xeXamEnumerate(handle, flags, buffer, buffer_length,
                      !overlapped.guest_address() ? &dummy : nullptr, overlapped.guest_address());
   if (!overlapped && items_returned) {
     *items_returned = dummy;
+  }
+  // The answer is what the front-end acts on: an enumeration that returns
+  // nothing is why a save screen refuses to move on.
+  if (XamTraceEnabled()) {
+    REXLOG_INFO("[XAM] Enumerate handle={:#x} -> result={:#x} items={}", handle, result, dummy);
   }
   return result;
 }

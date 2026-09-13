@@ -1233,6 +1233,17 @@ void KernelState::CompleteOverlappedDeferredEx(
     std::function<X_RESULT(uint32_t&, uint32_t&)> completion_callback, uint32_t overlapped_ptr,
     std::function<void()> pre_callback, std::function<void()> post_callback) {
   REXSYS_DEBUG("CompleteOverlappedDeferredEx: queuing for overlapped {:08X}", overlapped_ptr);
+  // A deferred completion that never runs leaves the guest waiting forever on
+  // an operation it thinks is in flight - a front-end in that state draws its
+  // dialog and stops reading the pad, which looks exactly like broken input.
+  // Off unless REX_XAM_TRACE=1.
+  static const bool overlapped_trace = [] {
+    const char* value = getenv("REX_XAM_TRACE");
+    return value && *value == '1';
+  }();
+  if (overlapped_trace) {
+    REXLOG_INFO("[XAM] deferred overlapped {:#010x} queued", overlapped_ptr);
+  }
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
   XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
@@ -1252,6 +1263,10 @@ void KernelState::CompleteOverlappedDeferredEx(
         REXSYS_DEBUG("Deferred overlapped {:08X}: completing with result {:08X}", overlapped_ptr,
                      result);
         CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+        if (overlapped_trace) {
+          REXLOG_INFO("[XAM] deferred overlapped {:#010x} completed result={:#x}", overlapped_ptr,
+                      result);
+        }
         if (post_callback) {
           REXSYS_DEBUG("Deferred overlapped {:08X}: running post_callback", overlapped_ptr);
           post_callback();

@@ -114,13 +114,24 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
   auto* is = input_system();
   u32 result = is->GetState(actual_user_index, input_state);
 
-  // Log the first few nonzero pad states, so "are button presses reaching the
-  // guest at all" is answerable from a normal log.
+  // Log nonzero pad states, so "are button presses reaching the guest at all"
+  // is answerable from a normal log. The first eight always go out; after that
+  // it needs REX_XAM_TRACE=1, because an eight-line cap reads as "the guest
+  // never saw that button" when it only means the budget ran out earlier in the
+  // run - which is exactly how this cost an hour on Burnout Revenge.
   if (result == X_ERROR_SUCCESS && input_state) {
     uint16_t buttons = uint16_t(input_state->gamepad.buttons);
     if (buttons) {
+      static const bool trace_all = [] {
+        const char* value = getenv("REX_XAM_TRACE");
+        return value && *value == '1';
+      }();
       static std::atomic<int> nonzero_logged{0};
-      if (nonzero_logged.fetch_add(1) < 8) {
+      static std::atomic<uint16_t> last_logged{0};
+      const bool within_budget = nonzero_logged.fetch_add(1) < 8;
+      // Under tracing, report every change rather than every poll: a held
+      // button is thousands of identical lines otherwise.
+      if (within_budget || (trace_all && last_logged.exchange(buttons) != buttons)) {
         REXKRNL_INFO("[XAM] XamInputGetState: user={} buttons=0x{:04X}", actual_user_index,
                      buttons);
       }

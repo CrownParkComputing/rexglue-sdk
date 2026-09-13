@@ -19,6 +19,20 @@
 #include <rex/system/xenumerator.h>
 #include <rex/system/xtypes.h>
 
+namespace {
+// What the title asks of the content/storage APIs, and what we tell it. A
+// front-end that will not leave its save/storage screen is asking one of these
+// questions and disliking the answer, and that is invisible otherwise. Off
+// unless REX_XAM_TRACE=1.
+bool XamTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = getenv("REX_XAM_TRACE");
+    return value && *value == '1';
+  }();
+  return enabled;
+}
+}  // namespace
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -64,6 +78,7 @@ const DummyDeviceInfo* GetDummyDeviceInfo(uint32_t device_id) {
 }
 
 u32 XamContentGetDeviceName_entry(u32 device_id, mapped_wstring name_buffer, u32 name_capacity) {
+  if (XamTraceEnabled()) REXLOG_INFO("[XAM] GetDeviceName device={:#x}", device_id);
   auto device_info = GetDummyDeviceInfo(device_id);
   if (device_info == nullptr) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -77,6 +92,7 @@ u32 XamContentGetDeviceName_entry(u32 device_id, mapped_wstring name_buffer, u32
 }
 
 u32 XamContentGetDeviceState_entry(u32 device_id, mapped_void overlapped_ptr) {
+  if (XamTraceEnabled()) REXLOG_INFO("[XAM] GetDeviceState device={:#x} overlapped={}", device_id, bool(overlapped_ptr));
   auto device_info = GetDummyDeviceInfo(device_id);
   if (device_info == nullptr) {
     if (overlapped_ptr) {
@@ -109,6 +125,7 @@ typedef struct {
 static_assert_size(X_CONTENT_DEVICE_DATA, 0x50);
 
 u32 XamContentGetDeviceData_entry(u32 device_id, ppc_ptr_t<X_CONTENT_DEVICE_DATA> device_data) {
+  if (XamTraceEnabled()) REXLOG_INFO("[XAM] GetDeviceData device={:#x}", device_id);
   auto device_info = GetDummyDeviceInfo(device_id);
   if (device_info == nullptr) {
     return X_ERROR_DEVICE_NOT_CONNECTED;

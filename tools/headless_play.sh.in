@@ -54,9 +54,15 @@ while [ $((SECONDS - START)) -lt "$SECS" ]; do
       DONE[$step]=1
       W=$(DISPLAY="$XDISP" xdotool search --onlyvisible --name . 2>/dev/null | tail -1)
       [ -n "$W" ] && DISPLAY="$XDISP" xdotool windowactivate --sync "$W" 2>/dev/null
-      DISPLAY="$XDISP" xdotool keydown --clearmodifiers "$KEY" 2>/dev/null
+      # No --clearmodifiers: it clears the active modifiers and RESTORES them
+      # afterwards, and the restore is delivered to the focused window as a
+      # modifier press with no matching release. The runtime's keybinds require
+      # an exact modifier match, so one latched modifier silently kills every
+      # unmodified binding for the rest of the run - the first key works and
+      # nothing after it does.
+      DISPLAY="$XDISP" xdotool keydown "$KEY" 2>/dev/null
       sleep "$HOLD"
-      DISPLAY="$XDISP" xdotool keyup --clearmodifiers "$KEY" 2>/dev/null
+      DISPLAY="$XDISP" xdotool keyup "$KEY" 2>/dev/null
       echo "t=$T sent $KEY"
     fi
   done

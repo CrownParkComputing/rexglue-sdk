@@ -23,6 +23,7 @@
 #include <rex/memory.h>
 #include <rex/platform.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/system/xthread.h>
 #include <rex/types.h>
 
 using namespace rex::arch;
@@ -436,6 +437,27 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
         first = reported.size() < 64 && reported.insert(pc).second;
       }
       if (first) {
+        // The host symbol names the recompiled function; the guest registers
+        // say why it faulted. lr is the guest return address of whoever called
+        // it, which is usually the code that passed the null.
+        uint32_t guest_lr = 0, guest_r3 = 0, guest_r4 = 0, guest_r5 = 0, guest_r10 = 0,
+                 guest_r11 = 0;
+        if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+          if (thread->thread_state() && thread->thread_state()->context()) {
+            auto* context = thread->thread_state()->context();
+            guest_lr = static_cast<uint32_t>(context->lr);
+            guest_r3 = context->r3.u32;
+            guest_r4 = context->r4.u32;
+            guest_r5 = context->r5.u32;
+            guest_r10 = context->r10.u32;
+            guest_r11 = context->r11.u32;
+          }
+        }
+        REXLOG_ERROR(
+            "  guest context: lr {:#010x} r3 {:#010x} r4 {:#010x} r5 {:#010x} r10 {:#010x} "
+            "r11 {:#010x}",
+            guest_lr, guest_r3, guest_r4, guest_r5, guest_r10, guest_r11);
+
         Dl_info info{};
         if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname) {
           REXLOG_ERROR(

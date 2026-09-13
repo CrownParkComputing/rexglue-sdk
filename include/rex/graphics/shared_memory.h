@@ -56,6 +56,10 @@ class SharedMemory {
   }
   bool FlushDeferredRanges();
   void DiscardDeferredRanges() { deferred_ranges_.clear(); }
+  // End-of-frame bookkeeping for the hot-page heuristic below. Cheap and
+  // inert unless gpu_hot_page_frames is set.
+  void OnFrameEnd();
+
   // Upload work done since the last call, for per-frame statistics: how many
   // upload events (each one submits barriers and ends the open render pass),
   // how many pages they moved, and how long they took.
@@ -183,6 +187,27 @@ class SharedMemory {
  private:
   std::atomic<uint64_t> invalidation_version_{0};
   std::vector<std::pair<uint32_t, uint32_t>> deferred_ranges_;
+  // Pages the guest rewrites every frame - a streaming vertex or index pool -
+  // cost more in watch bookkeeping than they could ever save: each frame the
+  // guest traps writing to them, we upload them, and we arm the watch again so
+  // it can all happen next frame. Once a 64-page block has been dirtied for
+  // gpu_hot_page_frames frames running it is declared hot: its watch is no
+  // longer armed (so the guest writes freely) and its pages are simply marked
+  // invalid at every frame end, so the first draw that wants them re-uploads
+  // them once. A block stays hot while it keeps being uploaded, and falls back
+  // to the watched path as soon as it stops.
+  //
+  // The trade, stated plainly: within a frame the guest's later writes to a hot
+  // page are not seen, so draws late in a frame can read data from that frame's
+  // first upload rather than the guest's newest. Off unless the cvar is set.
+  std::vector<uint8_t> block_dirty_streak_;
+  std::vector<uint8_t> block_dirtied_this_frame_;
+  std::vector<uint8_t> block_uploaded_this_frame_;
+  std::vector<uint8_t> block_hot_;
+  bool AreBlocksHot(uint32_t page_first, uint32_t page_last) const;
+  void NoteBlocksDirtied(uint32_t page_first, uint32_t page_last);
+  void NoteBlocksUploaded(uint32_t page_first, uint32_t page_last);
+
   std::atomic<uint64_t> upload_events_{0};
   std::atomic<uint64_t> upload_pages_{0};
   std::atomic<uint64_t> upload_ns_{0};

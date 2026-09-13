@@ -28,6 +28,14 @@
 
 namespace rex::graphics {
 
+REXCVAR_DEFINE_UINT32(
+    gpu_hot_page_frames, 0, "GPU",
+    "Treat a 256 KB shared-memory block dirtied this many frames running as permanently dirty: "
+    "stop arming its guest write watch and re-upload it once per frame instead. Cuts the watch "
+    "traffic for streaming vertex pools, at the cost of draws late in a frame not seeing writes "
+    "made after that frame's first upload. 0 disables.");
+
+
 SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
   page_size_log2_ = rex::log2_ceil(uint32_t(rex::memory::page_size()));
 }
@@ -45,6 +53,10 @@ void SharedMemory::InitializeCommon() {
     system_page_flags_valid_[i].store(0, std::memory_order_relaxed);
     system_page_flags_valid_and_gpu_written_[i].store(0, std::memory_order_relaxed);
   }
+  block_dirty_streak_.assign(num_system_page_flags_, 0);
+  block_dirtied_this_frame_.assign(num_system_page_flags_, 0);
+  block_uploaded_this_frame_.assign(num_system_page_flags_, 0);
+  block_hot_.assign(num_system_page_flags_, 0);
 
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
@@ -372,6 +384,12 @@ bool SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
 void SharedMemory::ArmWriteWatches(uint32_t start, uint32_t length) {
   const uint32_t valid_page_first = start >> page_size_log2_;
   const uint32_t valid_page_last = (start + length - 1) >> page_size_log2_;
+  NoteBlocksUploaded(valid_page_first, valid_page_last);
+  if (AreBlocksHot(valid_page_first, valid_page_last)) {
+    // Known to be rewritten every frame - arming the watch would only buy a
+    // trap and another arm next frame.
+    return;
+  }
   if (memory_invalidation_callback_handle_) {
     // Arming the guest write watch is an mprotect across the physical heaps;
     // measure it, because it lands on the draw path once per page that becomes
@@ -651,6 +669,74 @@ void SharedMemory::TakeUploadStats(uint64_t& events_out, uint64_t& pages_out,
   milliseconds_out = double(upload_ns_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
 }
 
+
+bool SharedMemory::AreBlocksHot(uint32_t page_first, uint32_t page_last) const {
+  if (block_hot_.empty()) {
+    return false;
+  }
+  for (uint32_t block = page_first >> 6; block <= (page_last >> 6); ++block) {
+    if (block >= block_hot_.size() || !block_hot_[block]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void SharedMemory::NoteBlocksDirtied(uint32_t page_first, uint32_t page_last) {
+  if (block_dirtied_this_frame_.empty()) {
+    return;
+  }
+  for (uint32_t block = page_first >> 6; block <= (page_last >> 6); ++block) {
+    if (block < block_dirtied_this_frame_.size()) {
+      block_dirtied_this_frame_[block] = 1;
+    }
+  }
+}
+
+void SharedMemory::NoteBlocksUploaded(uint32_t page_first, uint32_t page_last) {
+  if (block_uploaded_this_frame_.empty()) {
+    return;
+  }
+  for (uint32_t block = page_first >> 6; block <= (page_last >> 6); ++block) {
+    if (block < block_uploaded_this_frame_.size()) {
+      block_uploaded_this_frame_[block] = 1;
+    }
+  }
+}
+
+void SharedMemory::OnFrameEnd() {
+  const uint32_t hot_after_frames = REXCVAR_GET(gpu_hot_page_frames);
+  if (!hot_after_frames || block_hot_.empty()) {
+    return;
+  }
+  // A block counts as still hot while it keeps being uploaded: once its watch
+  // is unarmed it can no longer be "dirtied", so upload activity is the only
+  // evidence left that the guest is still writing it.
+  for (size_t block = 0; block < block_hot_.size(); ++block) {
+    const bool active = block_dirtied_this_frame_[block] ||
+                        (block_hot_[block] && block_uploaded_this_frame_[block]);
+    if (active) {
+      if (block_dirty_streak_[block] < 255) {
+        ++block_dirty_streak_[block];
+      }
+    } else {
+      block_dirty_streak_[block] = 0;
+    }
+    block_dirtied_this_frame_[block] = 0;
+    block_uploaded_this_frame_[block] = 0;
+    const bool hot = block_dirty_streak_[block] >= hot_after_frames;
+    block_hot_[block] = hot ? 1 : 0;
+    if (hot) {
+      // Hot blocks are simply dirty every frame: drop their valid bits so the
+      // first draw that needs them uploads them once. No mprotect is involved -
+      // they are not armed.
+      system_page_flags_valid_[block].store(0, std::memory_order_release);
+      system_page_flags_valid_and_gpu_written_[block].store(0, std::memory_order_release);
+      invalidation_version_.fetch_add(1, std::memory_order_release);
+    }
+  }
+}
+
 bool SharedMemory::RangeResident(uint32_t start, uint32_t length) const {
   if (!length) {
     return true;
@@ -837,6 +923,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
       }
     }
   }
+
+  NoteBlocksDirtied(page_first, page_last);
 
   FireWatches(page_first, page_last, false);
 

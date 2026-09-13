@@ -149,6 +149,12 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
 
   auto content_manager = REX_KERNEL_STATE()->content_manager();
 
+  if (XamTraceEnabled()) {
+    REXLOG_INFO("[XAM] ContentCreate user={} root='{}' type={:#x} flags={:#x} overlapped={}",
+                user_index, root_name.value(), static_cast<uint32_t>(content_data.content_type.get()), flags,
+                bool(overlapped_ptr));
+  }
+
   if (overlapped_ptr && disposition_ptr) {
     *disposition_ptr = 0;
   }
@@ -158,6 +164,14 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
               license_mask_ptr](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
     X_RESULT result = X_ERROR_INVALID_PARAMETER;
     kDispositionState disposition = kDispositionState::Unknown;
+    struct TraceResult {
+      const X_RESULT& result;
+      ~TraceResult() {
+        if (XamTraceEnabled()) {
+          REXLOG_INFO("[XAM] ContentCreate -> result={:#x}", uint32_t(result));
+        }
+      }
+    } trace_result{result};
     switch (flags & 0xF) {
       case 1:  // CREATE_NEW
                // Fail if exists.

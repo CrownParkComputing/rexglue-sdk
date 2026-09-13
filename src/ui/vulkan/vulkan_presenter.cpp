@@ -1587,8 +1587,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       // Not an error, reporting just as info (may normally occur while resizing
       // on some platforms).
       REXLOG_INFO(
-          "VulkanPresenter: Presentation to the swapchain image has been "
-          "dropped as the swapchain or the surface has become outdated");
+          "VulkanPresenter: Presentation dropped at image acquisition - the "
+          "swapchain or the surface has become outdated ({})",
+          int(acquire_result));
       return PaintResult::kNotPresentedConnectionOutdated;
     default:
       REXLOG_ERROR("VulkanPresenter: Failed to acquire the swapchain image");
@@ -2208,7 +2209,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       }
     }
     if (submit_result != VK_SUCCESS) {
-      REXLOG_ERROR("VulkanPresenter: Failed to submit command buffers");
+      // The code matters: DEVICE_LOST means something already recorded is
+      // invalid, OUT_OF_DATE only means the window changed under us.
+      REXLOG_ERROR("VulkanPresenter: Failed to submit command buffers ({})", int(submit_result));
       fence_acqusition.SubmissionFailedOrDropped();
       ui_fence_acquisition.SubmissionFailedOrDropped();
       if (ui_setup_command_buffer_index != SIZE_MAX) {
@@ -2258,8 +2261,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
       // Not an error, reporting just as info (may normally occur while resizing
       // on some platforms).
       REXLOG_INFO(
-          "VulkanPresenter: Presentation to the swapchain image has been "
-          "dropped as the swapchain or the surface has become outdated");
+          "VulkanPresenter: Presentation dropped at present - the swapchain or "
+          "the surface has become outdated ({})",
+          int(present_result));
       // Note that the semaphore wait (followed by reset) has been enqueued,
       // however, this should have no effect on anything here likely.
       return PaintResult::kNotPresentedConnectionOutdated;

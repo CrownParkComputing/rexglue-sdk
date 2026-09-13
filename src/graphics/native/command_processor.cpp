@@ -3909,9 +3909,11 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         {
           const ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
               vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
-          if (dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, clear_fence_) !=
-              VK_SUCCESS) {
-            REXLOG_ERROR("rexgpu-native: vkQueueSubmit failed for guest draw present");
+          const VkResult submit_result =
+              dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, clear_fence_);
+          if (submit_result != VK_SUCCESS) {
+            REXLOG_ERROR("rexgpu-native: vkQueueSubmit failed for guest draw present ({})",
+                         int(submit_result));
             return false;
           }
         }

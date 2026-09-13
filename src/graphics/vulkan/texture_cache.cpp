@@ -160,17 +160,15 @@ const VulkanTextureCache::HostFormatPair VulkanTextureCache::kBestHostFormats[64
     // VK_FORMAT_G8B8G8R8_422_UNORM (added in
     // VK_KHR_sampler_ycbcr_conversion and promoted to Vulkan 1.1) is
     // optional.
-    // Signed variant is unsupported on D3D12.
     {{kLoadShaderIndex32bpb, VK_FORMAT_G8B8G8R8_422_UNORM, true},
-     {kLoadShaderIndexUnknown},
+     {kLoadShaderIndexGBGR8ToRGB8, VK_FORMAT_R8G8B8A8_SNORM},
      xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB},
     // k_Y1_Cr_Y0_Cb_REP
     // VK_FORMAT_B8G8R8G8_422_UNORM (added in
     // VK_KHR_sampler_ycbcr_conversion and promoted to Vulkan 1.1) is
     // optional.
-    // Signed variant is unsupported on D3D12.
     {{kLoadShaderIndex32bpb, VK_FORMAT_B8G8R8G8_422_UNORM, true},
-     {kLoadShaderIndexUnknown},
+     {kLoadShaderIndexBGRG8ToRGB8, VK_FORMAT_R8G8B8A8_SNORM},
      xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB},
     // k_16_16_EDRAM
     // Not usable as a texture, also has -32...32 range.
@@ -2388,26 +2386,32 @@ bool VulkanTextureCache::Initialize() {
   HostFormatPair& host_format_gbgr =
       host_formats_[uint32_t(xenos::TextureFormat::k_Cr_Y1_Cb_Y0_REP)];
   assert_true(host_format_gbgr.format_unsigned.format == VK_FORMAT_G8B8G8R8_422_UNORM_KHR);
-  assert_true(host_format_gbgr.format_signed.format == VK_FORMAT_UNDEFINED);
+  assert_true(host_format_gbgr.format_signed.format == VK_FORMAT_R8G8B8A8_SNORM);
   ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_G8B8G8R8_422_UNORM_KHR,
                                           &format_properties);
   if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
     host_format_gbgr.format_unsigned.load_shader = kLoadShaderIndexGBGR8ToRGB8;
     host_format_gbgr.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
     host_format_gbgr.format_unsigned.block_compressed = false;
-    host_format_gbgr.unsigned_signed_compatible = false;
+    // Both variants are now plain RGBA8, so one image can serve either
+    // signedness - which is what these video textures need, because the guest
+    // fetches their chroma signed and does the YUV arithmetic itself.
+    host_format_gbgr.unsigned_signed_compatible = true;
   }
   HostFormatPair& host_format_bgrg =
       host_formats_[uint32_t(xenos::TextureFormat::k_Y1_Cr_Y0_Cb_REP)];
   assert_true(host_format_bgrg.format_unsigned.format == VK_FORMAT_B8G8R8G8_422_UNORM_KHR);
-  assert_true(host_format_bgrg.format_signed.format == VK_FORMAT_UNDEFINED);
+  assert_true(host_format_bgrg.format_signed.format == VK_FORMAT_R8G8B8A8_SNORM);
   ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_B8G8R8G8_422_UNORM_KHR,
                                           &format_properties);
   if ((format_properties.optimalTilingFeatures & kLinearFilterFeatures) != kLinearFilterFeatures) {
     host_format_bgrg.format_unsigned.load_shader = kLoadShaderIndexBGRG8ToRGB8;
     host_format_bgrg.format_unsigned.format = VK_FORMAT_R8G8B8A8_UNORM;
     host_format_bgrg.format_unsigned.block_compressed = false;
-    host_format_bgrg.unsigned_signed_compatible = false;
+    // Both variants are now plain RGBA8, so one image can serve either
+    // signedness - which is what these video textures need, because the guest
+    // fetches their chroma signed and does the YUV arithmetic itself.
+    host_format_bgrg.unsigned_signed_compatible = true;
   }
   // Expand R5G6B5 while loading if the native packed format can't be sampled.
   HostFormatPair& host_format_r5g6b5 = host_formats_[uint32_t(xenos::TextureFormat::k_5_6_5)];

@@ -60,6 +60,44 @@ while [ $((SECONDS - START)) -lt "$SECS" ]; do
       echo "t=$T sent $KEY"
     fi
   done
+  # PROFILE_AT=<seconds> samples per-thread CPU from /proc for PROFILE_SECONDS,
+  # which answers "is the guest busy or waiting?" - the first question whenever
+  # a title stops making progress. Cheap: no ptrace, nothing stopped.
+  if [ -n "${PROFILE_AT:-}" ] && [ "$T" -ge "$PROFILE_AT" ] && [ -z "${DONE[profile]:-}" ]; then
+    DONE[profile]=1
+    PID=$(pgrep -x @TITLE@ | head -1)
+    ( python3 - "$PID" "${PROFILE_SECONDS:-20}" > "$OUT/threads.txt" 2>&1 <<'PROFILE'
+import collections, os, sys, time
+pid, seconds = sys.argv[1], float(sys.argv[2])
+ticks = os.sysconf('SC_CLK_TCK')
+def sample():
+    out = {}
+    task = f'/proc/{pid}/task'
+    try:
+        for tid in os.listdir(task):
+            try:
+                fields = open(f'{task}/{tid}/stat').read().rsplit(') ', 1)[1].split()
+                name = open(f'{task}/{tid}/comm').read().strip()
+                out[tid] = (name, int(fields[11]) + int(fields[12]))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return out
+first, start = sample(), time.time()
+time.sleep(seconds)
+last, wall = sample(), time.time() - start
+totals = collections.Counter()
+for tid, (name, value) in last.items():
+    if tid in first:
+        totals[name] += (value - first[tid][1]) / ticks
+print(f'per-thread CPU over {wall:.0f}s (cores):')
+for name, value in totals.most_common(12):
+    print(f'  {name:24} {value / wall:5.2f}')
+print(f'  {"TOTAL":24} {sum(totals.values()) / wall:5.2f}')
+PROFILE
+    ) &
+  fi
   if [ -n "$NODE" ] && [ $((T % 5)) -eq 0 ]; then
     # Bounded: pipewiresrc blocks until the buffers arrive, so a title that has
     # stopped presenting would otherwise hang the whole loop - including the

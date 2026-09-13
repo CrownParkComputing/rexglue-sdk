@@ -1449,6 +1449,13 @@ void XHostThread::Execute() {
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
 
+  // A host thread runs guest code too - the audio worker dispatches the title's
+  // mixing callback - so it needs the same floating-point policy a guest thread
+  // gets, seeded from the host rather than from a zeroed context.
+  if (thread_state_ && thread_state_->context()) {
+    thread_state_->context()->fpscr.InitHost();
+  }
+
   int ret = host_fn_();
 
   // Exit.

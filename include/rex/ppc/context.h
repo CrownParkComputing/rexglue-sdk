@@ -160,10 +160,24 @@ struct FPSCRRegister {
   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
   inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
 
+  // Every write to the host control word goes through here, because the guest
+  // bits are the only ones the guest owns and the exception policy must survive
+  // all of them. A context whose csr was never seeded by InitHost() holds zero,
+  // and writing that - which enableFlushMode() did on its first call - unmasks
+  // every floating-point exception, so the next guest divide by zero raises
+  // SIGFPE and kills the process. On PowerPC that divide quietly yields
+  // infinity, and this runtime never delivers FP exceptions to the guest, so
+  // trapping is never the right answer. Burnout Revenge hit it within seconds
+  // of booting, on the audio thread.
+  inline void writeCsr() noexcept {
+    Platform::InitHostExceptions(csr);
+    setcsr(csr);
+  }
+
   // Restoring the whole word would unmask every FP exception when csr is 0.
   inline void restoreGuestBits(uint32_t saved) noexcept {
     csr = (getcsr() & ~GuestMask) | (saved & GuestMask);
-    setcsr(csr);
+    writeCsr();
   }
 
   inline uint32_t loadFromHost() noexcept {
@@ -174,37 +188,36 @@ struct FPSCRRegister {
   inline void storeFromGuest(uint32_t value) noexcept {
     csr &= ~RoundMaskVal;
     csr |= Platform::GuestToHost[value & kRoundMask];
-    setcsr(csr);
+    writeCsr();
   }
 
   inline void enableFlushModeUnconditional() noexcept {
     csr |= FlushMask;
-    setcsr(csr);
+    writeCsr();
   }
 
   inline void disableFlushModeUnconditional() noexcept {
     csr &= ~FlushMask;
-    setcsr(csr);
+    writeCsr();
   }
 
   inline void enableFlushMode() noexcept {
     if ((csr & FlushMask) != FlushMask) [[unlikely]] {
       csr |= FlushMask;
-      setcsr(csr);
+      writeCsr();
     }
   }
 
   inline void disableFlushMode() noexcept {
     if ((csr & FlushMask) != 0) [[unlikely]] {
       csr &= ~FlushMask;
-      setcsr(csr);
+      writeCsr();
     }
   }
 
   inline void InitHost() noexcept {
     csr = getcsr();
-    Platform::InitHostExceptions(csr);
-    setcsr(csr);
+    writeCsr();
   }
 };
 

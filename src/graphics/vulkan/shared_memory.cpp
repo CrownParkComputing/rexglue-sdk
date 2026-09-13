@@ -320,17 +320,16 @@ bool VulkanSharedMemory::UploadRanges(
     // arm the watches for the whole span in ONE call. Arming is the expensive
     // half (it takes the kernel-wide lock), and arming a page that is not valid
     // costs at most one extra guest trap later.
-    bool any_new = false;
     for (const auto& upload_range : upload_page_ranges) {
-      any_new |= MakeRangeValid(upload_range.first << page_size_log2(),
-                                upload_range.second << page_size_log2(), false, false);
-    }
-    if (any_new) {
-      const uint32_t span_first_page = upload_page_ranges.front().first;
-      const uint32_t span_last_page =
-          upload_page_ranges.back().first + upload_page_ranges.back().second - 1;
-      ArmWriteWatches(span_first_page << page_size_log2(),
-                      (span_last_page - span_first_page + 1) << page_size_log2());
+      const uint32_t range_start = upload_range.first << page_size_log2();
+      const uint32_t range_length = upload_range.second << page_size_log2();
+      // Arm per uploaded range, not once across the span between the first and
+      // last of them: arming walks every system page of the range in each of
+      // the three physical heaps, so a span that reaches across untouched
+      // memory costs far more than the handful of ranges inside it.
+      if (MakeRangeValid(range_start, range_length, false, false)) {
+        ArmWriteWatches(range_start, range_length);
+      }
     }
   }
   stage_took(valid_ns);

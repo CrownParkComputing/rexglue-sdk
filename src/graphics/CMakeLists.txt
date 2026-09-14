@@ -170,10 +170,7 @@ endif()
 # of rexgpu-xenos: it links none of it and compiles its own copies of the
 # shared sources.
 #==============================================================================
-# Not on Android yet: this plugin links snappy, which is taken from the host
-# and has no arm64 build here. It is also the backend that still dies on the
-# first 3D frame, so it is not what an APK would load - rexgpu-xenos is.
-if(REXGLUE_USE_VULKAN AND NOT ANDROID)
+if(REXGLUE_USE_VULKAN)
     set(REXGPU_NATIVE_SOURCES
         native/plugin_main.cpp
         native/graphics_system.cpp
@@ -237,7 +234,9 @@ if(REXGLUE_USE_VULKAN AND NOT ANDROID)
     target_link_libraries(rexgpu-native PRIVATE
         rexruntime
         xxHash::xxhash
-        snappy
+        # snappy was inherited from rexgpu-xenos's link list and is used by
+        # neither plugin - no source in src/graphics references it. Keeping it
+        # was what blocked this plugin from cross-compiling.
         Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator
         glslang::SPIRV

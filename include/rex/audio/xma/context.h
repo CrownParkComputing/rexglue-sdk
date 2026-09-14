@@ -274,6 +274,7 @@ class XmaContext {
   std::mutex lock_;
   std::atomic<bool> is_allocated_ = false;
   std::atomic<bool> is_enabled_ = false;
+  uint32_t last_read_block_ = 0;
 
   // ffmpeg structures
   AVPacket* av_packet_ = nullptr;

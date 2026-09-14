@@ -15,3 +15,4 @@
 
 REXCVAR_DECLARE(bool, audio_mute);
 REXCVAR_DECLARE(bool, ffmpeg_verbose);
+REXCVAR_DECLARE(bool, xma_continuous_decode);

@@ -16,6 +16,7 @@
 #include <string>
 #include <cstring>
 
+#include <rex/audio/flags.h>
 #include <rex/audio/native_mix.h>
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
@@ -103,7 +104,12 @@ bool XmaContext::Work() {
   }
 
   std::lock_guard<std::mutex> lock(lock_);
-  set_is_enabled(false);
+  // A kick enables the context; the hardware then decodes for as long as it is
+  // enabled and the output ring has room. Disabling here turns each kick into
+  // exactly one pass. See --xma_continuous_decode.
+  if (!REXCVAR_GET(xma_continuous_decode)) {
+    set_is_enabled(false);
+  }
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);

@@ -31,6 +31,17 @@ extern "C" {
 REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debug and above)");
 
 REXCVAR_DEFINE_BOOL(
+    xma_continuous_decode, false, "Audio",
+    "Keep decoding an enabled XMA context until its output ring is full, instead of stopping after "
+    "the one pass a kick buys.\n"
+    "The hardware block is autonomous: a kick enables a context, it does not mean 'decode one frame "
+    "now'. We disable the context on entry to Work(), so each kick yields exactly one pass and the "
+    "background sweep finds nothing - measured at 34,064 sweeps with 29 doing work. A title that "
+    "expects the ring to keep filling between kicks then drains it faster than we fill it. The "
+    "runtime that plays Hydro Thunder correctly runs its decoder on a 4 ms thread 'continuously, "
+    "for as long as a context is enabled'; the ring is what bounds it.");
+
+REXCVAR_DEFINE_BOOL(
     xma_kick_register_601, false, "Audio",
     "Treat writes to XMA register 0x0601 as a context kick bitmask.\n"
     "0x0601 sits in a gap neither we nor Xenia have ever identified. Hydro Thunder writes it ~357 "
@@ -192,6 +203,13 @@ void XmaDecoder::WorkerThreadMain() {
     }
 
     if (did_work) {
+      continue;
+    }
+    if (REXCVAR_GET(xma_continuous_decode)) {
+      // Contexts stay enabled, so "nothing to do right now" means every ring is
+      // full - which is a reason to come back shortly, not to sleep until the
+      // next kick. Matching the 4 ms cadence of the runtime this is modelled on.
+      rex::thread::Wait(work_event_.get(), false, std::chrono::milliseconds(4));
       continue;
     }
     // No work done this iteration, block until signaled.

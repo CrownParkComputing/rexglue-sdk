@@ -18,6 +18,8 @@ REXCVAR_DECLARE(bool, vsync);
 REXCVAR_DECLARE(bool, clear_memory_page_state);
 REXCVAR_DECLARE(bool, half_pixel_offset);
 REXCVAR_DECLARE(bool, async_shader_compilation);
+REXCVAR_DECLARE(bool, log_texture_swizzles);
+REXCVAR_DECLARE(std::string, dump_textures);
 
 // GPU Resolution / Readback / Queries
 REXCVAR_DECLARE(int32_t, resolution_scale);

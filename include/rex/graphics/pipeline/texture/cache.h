@@ -514,6 +514,7 @@ class TextureCache {
   // Returns nullptr not only if the key is not supported, but also if couldn't
   // create the texture - if it's nullptr, occasionally a recreation attempt
   // should be made.
+  void DumpTextureToDisk(const TextureKey& key, const std::string& dir);
   Texture* FindOrCreateTexture(TextureKey key);
 
   static const LoadShaderInfo& GetLoadShaderInfo(LoadShaderIndex load_shader_index) {

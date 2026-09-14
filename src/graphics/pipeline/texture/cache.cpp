@@ -12,6 +12,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <utility>
+#include <mutex>
+#include <set>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <vector>
 
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
@@ -349,6 +355,61 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_
   shared_memory().RangeWrittenByGpu(start_unscaled, length_unscaled);
 }
 
+// Write one texture's guest bytes to disk in linear order, so a decode can be
+// checked against the title's own data offline. This answers the question every
+// colour bug eventually reduces to: is the data wrong, or is our reading of it
+// wrong? Untiling happens here rather than in the reader because the tiled
+// address function is the part that is easy to get subtly wrong, and it is
+// already right here - reimplementing it in a script would just add a second
+// thing to doubt.
+void TextureCache::DumpTextureToDisk(const TextureKey& key, const std::string& dir) {
+  const FormatInfo* format_info = FormatInfo::Get(key.format);
+  uint32_t bytes_per_block = format_info->bytes_per_block();
+  // GetTiledOffset2D works in log2 of the block size, so a format whose block
+  // is not a power of two cannot go through the tiled path at all.
+  uint32_t bpb_log2 = 0;
+  while ((uint32_t(1) << bpb_log2) < bytes_per_block) ++bpb_log2;
+  if ((uint32_t(1) << bpb_log2) != bytes_per_block) {
+    return;
+  }
+  uint32_t blocks_w = (key.GetWidth() + format_info->block_width - 1) / format_info->block_width;
+  uint32_t blocks_h = (key.GetHeight() + format_info->block_height - 1) / format_info->block_height;
+  uint32_t pitch_blocks = (key.pitch << 5) / format_info->block_width;
+  if (!blocks_w || !blocks_h || !pitch_blocks) {
+    return;
+  }
+
+  const uint8_t* base = shared_memory_.memory().TranslatePhysical<const uint8_t*>(key.base_page
+                                                                                 << 12);
+  if (!base) {
+    return;
+  }
+
+  std::vector<uint8_t> linear(size_t(blocks_w) * blocks_h * bytes_per_block);
+  for (uint32_t by = 0; by < blocks_h; ++by) {
+    for (uint32_t bx = 0; bx < blocks_w; ++bx) {
+      size_t src = key.tiled ? size_t(texture_util::GetTiledOffset2D(int32_t(bx), int32_t(by),
+                                                                    pitch_blocks, bpb_log2))
+                             : (size_t(by) * pitch_blocks + bx) * bytes_per_block;
+      std::memcpy(&linear[(size_t(by) * blocks_w + bx) * bytes_per_block], base + src,
+                  bytes_per_block);
+    }
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  std::string stem = fmt::format("{}/{:08X}_{}x{}_{}", dir, key.base_page << 12, key.GetWidth(),
+                                 key.GetHeight(), format_info->name);
+  FILE* f = std::fopen((stem + ".bin").c_str(), "wb");
+  if (f) {
+    std::fwrite(linear.data(), 1, linear.size(), f);
+    std::fclose(f);
+  }
+  REXLOG_INFO("[texdump] {}.bin  {} blocks {}x{} bpb {} endian {} {}", stem, format_info->name,
+              blocks_w, blocks_h, bytes_per_block, uint32_t(key.endianness),
+              key.tiled ? "tiled" : "linear");
+}
+
 uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_format_swizzle) {
   uint32_t host_swizzle = 0;
   for (uint32_t i = 0; i < 4; ++i) {
@@ -504,6 +565,39 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     }
     uint32_t old_host_swizzle = binding.host_swizzle;
     binding.host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
+
+    // The component swizzle is the one part of a binding that can recolour a
+    // single texture while leaving every other texture in the scene correct -
+    // a mapping like (X,Y,X,W) hands blue red's value verbatim. It is not in
+    // TextureKey, so the per-texture log above cannot show it, and a colour
+    // fault that tracks one texture is invisible without it. Logged once per
+    // distinct (texture, swizzle) pair so a whole run stays greppable.
+    if (REXCVAR_GET(log_texture_swizzles)) {
+      static std::mutex seen_mutex;
+      static std::set<std::pair<uint64_t, uint32_t>> seen;
+      uint64_t key_hash = TextureKey::Hasher{}(binding.key);
+      std::pair<uint64_t, uint32_t> entry{key_hash, binding.host_swizzle};
+      bool is_new;
+      {
+        std::lock_guard<std::mutex> lock(seen_mutex);
+        is_new = seen.insert(entry).second;
+      }
+      if (is_new && !REXCVAR_GET(dump_textures).empty()) {
+        DumpTextureToDisk(binding.key, REXCVAR_GET(dump_textures));
+      }
+      if (is_new) {
+        auto name = [](uint32_t swizzle, uint32_t i) {
+          return "RGBA01??"[(swizzle >> (3 * i)) & 0b111];
+        };
+        REXLOG_INFO(
+            "[texswizzle] {}x{} {} base 0x{:08X} guest {}{}{}{} host {}{}{}{}",
+            binding.key.GetWidth(), binding.key.GetHeight(),
+            FormatInfo::Get(binding.key.format)->name, binding.key.base_page << 12,
+            name(fetch.swizzle, 0), name(fetch.swizzle, 1), name(fetch.swizzle, 2),
+            name(fetch.swizzle, 3), name(binding.host_swizzle, 0), name(binding.host_swizzle, 1),
+            name(binding.host_swizzle, 2), name(binding.host_swizzle, 3));
+      }
+    }
 
     // Check if need to load the unsigned and the signed versions of the texture
     // (if the format is emulated with different host bit representations for

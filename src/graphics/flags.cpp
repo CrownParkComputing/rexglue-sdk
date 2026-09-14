@@ -25,6 +25,14 @@ REXCVAR_DEFINE_BOOL(gamma_render_target_as_unorm16, true, "GPU",
                     "Use R16G16B16A16_UNORM for gamma render targets (more accurate than sRGB)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
+REXCVAR_DEFINE_STRING(dump_textures, "", "GPU",
+                      "Directory to dump each bound texture's guest bytes to, untiled into linear "
+                      "order. Answers whether a colour fault is in the title's data or in our "
+                      "reading of it.");
+REXCVAR_DEFINE_BOOL(log_texture_swizzles, false, "GPU",
+                    "Log each distinct (texture, component swizzle) pair bound. The swizzle is not "
+                    "part of the texture key, so it is absent from every other texture log - and it "
+                    "is what recolours one texture while the rest of the scene stays correct.");
 REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
                     "Use approximate compare for alpha test values to prevent "
                     "flickering on NVIDIA graphics cards");

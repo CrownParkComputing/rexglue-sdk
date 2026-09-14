@@ -23,6 +23,23 @@
 // 66,121 kicks decoded, at the correct rate, before the guest's mixer touches
 // any of it. So this takes that decoded audio and mixes it here instead.
 //
+// THIS DOES NOT WORK, and the reason is worth keeping.
+//
+// XMA decoding is not a real-time stream. The guest drives the hardware ahead
+// of playback: 1,470 kicks a second, 512 samples per channel each, is roughly
+// 750,000 samples a second for one context against the 48,000 real time needs.
+// Pacing lives entirely in the guest's mixer. So concatenating decoder output
+// and playing it cannot work - the queue below overflows and is trimmed from
+// the front on every push while the read cursor advances, which is a recipe for
+// static, and summing 34 contexts at unity finishes it. Measured output has a
+// median frequency of 7.9 kHz against real music's few hundred, which is the
+// signature of noise; I initially read that flat spectrum as "full bandwidth"
+// and it is the opposite.
+//
+// Decoded audio without voice state is not playable. Position, rate and gain
+// per voice live in FMOD inside the guest, and this layer cannot see them.
+// Anything native has to get them from there, not from the decoder.
+//
 // What this can and cannot do, stated plainly: the per-voice volume, pan and
 // 3D positioning live in the guest's mixer, not in the XMA contexts, so this
 // path reproduces the streams at unity gain spread across the front pair. For
@@ -46,6 +63,7 @@
 
 REXCVAR_DEFINE_BOOL(
     audio_native_xma, false, "Audio",
+    "DOES NOT WORK - produces static. Kept only so the reason is on record.\n"
     "Mix decoded XMA here and submit that instead of the guest's own mix.\n"
     "For a title whose recompiled mixer does not keep up - Hydro Thunder produces correct audio at "
     "half real time, so every block is heard twice - this bypasses it entirely: the streams we "

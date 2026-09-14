@@ -29,6 +29,8 @@
 #include <rex/system/xtypes.h>
 #include <rex/thread/mutex.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <thread>
 #include <rex/cvar.h>
@@ -36,6 +38,12 @@
 REXCVAR_DEFINE_UINT32(io_async_read_delay_us, 0, "Kernel",
                       "Artificial latency (microseconds) applied to asynchronous NtReadFile calls "
                       "before completion, to mimic optical-drive timing (0 = off)");
+
+REXCVAR_DEFINE_STRING(
+    skip_movies, "", "General",
+    "Refuse to open movies whose path contains any of these comma-separated substrings, so the "
+    "title skips them. Matched case-insensitively against the guest path; .bik only. Every movie "
+    "opened is logged as [movie] <path> so the names are discoverable.");
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -135,6 +143,47 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
       "NtCreateFile", "path={} access={:#x} attrs={:#x} share={:#x} disp={:#x} options={:#x}",
       target_path, (uint32_t)desired_access, (uint32_t)file_attributes, (uint32_t)share_access,
       (uint32_t)creation_disposition, (uint32_t)create_options);
+
+  // Movies a title plays are not always skippable from the pad, and sitting
+  // through one on every run costs more than it is worth during a bring-up.
+  // A title that cannot open a movie moves on - they already cope with missing
+  // .sub subtitle files the same way - so refusing the open is the least
+  // invasive skip available, and it needs no per-title code.
+  //
+  // Also names every movie as it is opened, because successful opens are not
+  // logged and there is otherwise no way to learn what to put in the list.
+  if (target_path.size() > 4) {
+    const bool is_movie =
+        target_path.size() >= 4 &&
+        (target_path.compare(target_path.size() - 4, 4, ".bik") == 0 ||
+         target_path.compare(target_path.size() - 4, 4, ".BIK") == 0);
+    if (is_movie) {
+      std::string lowered = target_path;
+      std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      const std::string skip_list = REXCVAR_GET(skip_movies);
+      bool skipped = false;
+      size_t pos = 0;
+      while (pos < skip_list.size() && !skipped) {
+        size_t comma = skip_list.find(',', pos);
+        std::string want = skip_list.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        pos = comma == std::string::npos ? skip_list.size() : comma + 1;
+        if (want.empty()) {
+          continue;
+        }
+        std::transform(want.begin(), want.end(), want.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lowered.find(want) != std::string::npos) {
+          skipped = true;
+        }
+      }
+      REXKRNL_INFO("[movie] {}{}", target_path, skipped ? "  -- SKIPPED (--skip_movies)" : "");
+      if (skipped) {
+        return X_STATUS_NO_SUCH_FILE;
+      }
+    }
+  }
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {

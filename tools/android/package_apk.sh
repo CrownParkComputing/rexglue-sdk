@@ -9,6 +9,11 @@
 set -euo pipefail
 
 SLUG="$1"; APP_NAME="$2"; LIBMAIN="$3"; SDK_LIBS="$4"; OUT_APK="$5"
+# Per-title cvars. A desktop build reads config/<slug>.toml from beside the
+# executable; on Android there is no such place, so anything the title needs
+# has to be handed to it here. Space-separated, e.g.
+#   EXTRA_ARGS="--clear_memory_page_state=true --render_target_path_vulkan=fsi"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 PACKAGE="com.crownpark.rexglue.${SLUG}"
 
 SDK_ROOT="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -25,6 +30,11 @@ mkdir -p "$WORK/lib/arm64-v8a" "$WORK/classes" "$WORK/res"
 # main is named, and the runtime/gpu libraries it NEEDs are resolved by the
 # dynamic linker from the same directory.
 mkdir -p "$WORK/src/${PACKAGE//./\/}"
+EXTRA_JAVA=""
+for a in $EXTRA_ARGS; do
+    EXTRA_JAVA="${EXTRA_JAVA}            \"${a}\",
+"
+done
 cat > "$WORK/src/${PACKAGE//./\/}/MainActivity.java" <<JAVA
 package ${PACKAGE};
 import org.libsdl.app.SDLActivity;
@@ -51,7 +61,7 @@ public class MainActivity extends SDLActivity {
             // in warnings.
             "--gpu_plugin", "xenos",
             "--license_mask=1",
-        };
+${EXTRA_JAVA}        };
     }
 }
 JAVA

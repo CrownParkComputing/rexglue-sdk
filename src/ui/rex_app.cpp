@@ -415,6 +415,12 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
   // lazily on the first Draw instead).
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
+  // A handheld has no F3. Starting the overlay visible is the only way to see
+  // the frame rate on a device, so it is a cvar as well as a keybind.
+  if (REXCVAR_GET(show_debug_overlay)) {
+    debug_overlay_ =
+        std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+  }
   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
     if (debug_overlay_) {
       debug_overlay_.reset();

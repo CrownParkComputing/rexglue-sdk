@@ -34,6 +34,9 @@ REXCVAR_DEFINE_INT32(present_side_panel_percent, 0, "UI/Presenter",
                     "Reserve this percentage of window width on each side for host panels")
     .range(0, 30);
 
+REXCVAR_DEFINE_BOOL(show_debug_overlay, false, "UI",
+                    "Show the debug overlay (frame rate and per-stage timings) from startup. The "
+                    "F3 toggle needs a keyboard, which a handheld does not have.");
 REXCVAR_DEFINE_BOOL(present_letterbox, true, "UI/Presenter",
                     "Enable letterboxing for non-native aspect ratios");
 

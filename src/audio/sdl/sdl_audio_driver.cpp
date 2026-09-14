@@ -30,6 +30,11 @@
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+REXCVAR_DEFINE_STRING(
+    audio_dump_out_wav, "", "Audio",
+    "Write what is handed to SDL - after the fold or passthrough, byte-swapped, scaled and "
+    "clamped - to this WAV. --audio_dump_wav captures the guest's submission instead; if that one "
+    "measures clean and this one does not, the fault is in the output stage and nowhere else.");
 REXCVAR_DEFINE_INT32(
     audio_channels, 0, "Audio",
     "Channels to open the output device with: 0 (the default) follows whatever the device "
@@ -183,6 +188,11 @@ void WriteWavHeader(std::FILE* file, uint16_t channels, uint32_t rate) {
   std::fwrite(&zero, 4, 1, file);  // patched: data size
 }
 
+// Rewrites the two size fields and returns to the end, so the file on disk is
+// valid at all times. A capture run is normally ended with a kill or a timeout,
+// which means Shutdown() never runs - patching only there leaves every dump
+// with zero sizes, readable by ffmpeg only because it guesses, and rejected or
+// misread by anything stricter.
 void PatchWavSizes(std::FILE* file) {
   const long end = std::ftell(file);
   if (end < 44) {
@@ -194,11 +204,16 @@ void PatchWavSizes(std::FILE* file) {
   std::fwrite(&riff_size, 4, 1, file);
   std::fseek(file, 40, SEEK_SET);
   std::fwrite(&data_size, 4, 1, file);
+  std::fseek(file, 0, SEEK_END);
 }
 
 std::mutex g_dump_lock;
 std::FILE* g_dump_file = nullptr;
 bool g_dump_tried = false;
+
+std::mutex g_out_dump_lock;
+std::FILE* g_out_dump_file = nullptr;
+bool g_out_dump_tried = false;
 }  // namespace
 
 void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
@@ -230,6 +245,10 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
               rex::byte_swap(input_frame[channel * channel_samples_ + sample]);
         }
         std::fwrite(interleaved.data(), sizeof(float), interleaved.size(), g_dump_file);
+      }
+      static uint32_t in_frames = 0;
+      if (++in_frames % 188 == 0) {  // about once a second
+        PatchWavSizes(g_dump_file);
       }
     }
   }
@@ -279,13 +298,30 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
       if (peak < 1e-6f) {
         ++silent_frames;
       }
+      static uint32_t ptr_history[8] = {};
       for (size_t back = 0; back < 8 && back < history_count; ++back) {
         if (history[(history_count - 1 - back) % 8] == hash) {
           ++repeats;
-          if (back == 3) ++repeat_at_4;
+          if (back == 3) {
+            ++repeat_at_4;
+            // Same guest buffer re-submitted, or a different buffer holding
+            // identical audio? The first is a submission/acknowledgement
+            // problem in our XAudio path; the second means the guest mixed the
+            // same thing twice and the fault is inside the title.
+            static uint32_t logged = 0;
+            if (logged < 8) {
+              ++logged;
+              REXAPU_INFO("audio repeat 4 frames back: now {:08X}, then {:08X} - {}", frame_ptr,
+                          ptr_history[(history_count - 4) % 8],
+                          frame_ptr == ptr_history[(history_count - 4) % 8]
+                              ? "SAME buffer re-submitted"
+                              : "different buffer, identical audio");
+            }
+          }
           break;
         }
       }
+      ptr_history[history_count % 8] = frame_ptr;
       history[history_count % 8] = hash;
       ++history_count;
       if (++submitted % 188 == 0) {  // ~once a second at 256 samples / 48 kHz
@@ -331,6 +367,14 @@ void SDLAudioDriver::Shutdown() {
       PatchWavSizes(g_dump_file);
       std::fclose(g_dump_file);
       g_dump_file = nullptr;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_out_dump_lock);
+    if (g_out_dump_file) {
+      PatchWavSizes(g_out_dump_file);
+      std::fclose(g_out_dump_file);
+      g_out_dump_file = nullptr;
     }
   }
 
@@ -417,6 +461,28 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
           default:
             assert_unhandled_case(driver->sdl_device_channels_);
             break;
+        }
+      }
+      if (!REXCVAR_GET(audio_dump_out_wav).empty()) {
+        std::lock_guard<std::mutex> dump_guard(g_out_dump_lock);
+        if (!g_out_dump_tried) {
+          g_out_dump_tried = true;
+          const std::string path = REXCVAR_GET(audio_dump_out_wav);
+          g_out_dump_file = std::fopen(path.c_str(), "wb");
+          if (g_out_dump_file) {
+            WriteWavHeader(g_out_dump_file, driver->sdl_device_channels_, frame_frequency_);
+            REXAPU_INFO("dumping device-bound audio to {} ({} ch)", path,
+                        int(driver->sdl_device_channels_));
+          }
+        }
+        if (g_out_dump_file) {
+          // Already interleaved, host-endian and clamped - exactly the bytes
+          // SDL gets, so it needs no rearranging on the way out.
+          std::fwrite(data, sizeof(float), static_cast<size_t>(sample_count), g_out_dump_file);
+          static uint32_t out_frames = 0;
+          if (++out_frames % 188 == 0) {
+            PatchWavSizes(g_out_dump_file);
+          }
         }
       }
       if (!SDL_PutAudioStreamData(stream, data, len)) {

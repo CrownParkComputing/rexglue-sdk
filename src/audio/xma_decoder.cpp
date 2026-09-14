@@ -30,6 +30,15 @@ extern "C" {
 
 REXCVAR_DEFINE_BOOL(ffmpeg_verbose, false, "Audio", "Verbose FFmpeg output (debug and above)");
 
+REXCVAR_DEFINE_BOOL(
+    xma_kick_register_601, false, "Audio",
+    "Treat writes to XMA register 0x0601 as a context kick bitmask.\n"
+    "0x0601 sits in a gap neither we nor Xenia have ever identified. Hydro Thunder writes it ~357 "
+    "times a second with values 2 and 3 - which read as a bitmask of contexts 0 and 1 - and never "
+    "touches the documented Kick registers at all, so nothing it queues is ever decoded and its "
+    "mixer repeats its last block. EXPERIMENTAL: if 0x0601 is something else, kicking on it "
+    "decodes contexts that were not ready.");
+
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
 // decoders. Later games use XAudio*() and direct memory writes to the XMA
@@ -303,14 +312,16 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
   assert_true(r < XmaRegisterFile::kRegisterCount);
   register_file_[r] = value;
 
-  if (r >= XmaRegister::Context0Kick && r <= XmaRegister::Context9Kick) {
+  const bool is_kick = (r >= XmaRegister::Context0Kick && r <= XmaRegister::Context9Kick);
+  const bool is_601_kick = (r == 0x0601) && REXCVAR_GET(xma_kick_register_601);
+  if (is_kick || is_601_kick) {
     // Context kick command.
     // This will kick off the given hardware contexts.
     // Basically, this kicks the SPU and says "hey, decode that audio!"
     // XMAEnableContext
 
     // The context ID is a bit in the range of the entire context array.
-    uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
+    uint32_t base_context_id = is_kick ? (r - XmaRegister::Context0Kick) * 32 : 0;
     uint32_t kicked_value = value;
     uint32_t stat_contexts_kicked = 0, stat_contexts_worked = 0;
     for (int i = 0; value && i < 32; ++i, value >>= 1) {

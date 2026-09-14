@@ -943,6 +943,11 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
       double total_ms = 0.0;
       uint64_t instant = 0;  // returned in under 10 us: nothing was waited for
       std::map<uint32_t, uint64_t> results;
+      // The requested timeout, in ms. A periodic consumer derives it from its
+      // block size and the sample rate it believes it is feeding, so it says
+      // what rate the guest thinks the device runs at - which a repeating
+      // mixer is usually wrong about.
+      int64_t timeout_ms = 0;
     };
     static std::mutex lock;
     static std::map<uint32_t, CallSite> sites;
@@ -959,6 +964,11 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
     auto& site = sites[caller_lr];
     ++site.calls;
     site.total_ms += ms;
+    if (timeout_ptr) {
+      // Guest timeouts are 100ns units, negative meaning relative.
+      const int64_t relative = -static_cast<int64_t>(timeout);
+      site.timeout_ms = relative / 10000;
+    }
     site.instant += ms < 0.01 ? 1 : 0;
     ++site.results[result];
     const auto now = std::chrono::steady_clock::now();
@@ -970,8 +980,9 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
           results += fmt::format(" {:#x}x{}", value, count);
         }
         REXLOG_INFO("[WAITSTATS] KeWaitForMultipleObjects lr {:#010x}: {} calls, {:.3f} ms avg, "
-                    "{} instant, results{}",
-                    lr, entry.calls, entry.total_ms / double(entry.calls), entry.instant, results);
+                    "{} instant, timeout {} ms, results{}",
+                    lr, entry.calls, entry.total_ms / double(entry.calls), entry.instant,
+                    entry.timeout_ms, results);
       }
     }
   }

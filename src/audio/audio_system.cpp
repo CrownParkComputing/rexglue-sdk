@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
@@ -143,6 +144,27 @@ void AudioSystem::WorkerThreadMain() {
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
                        client_callback, client_callback_arg, index);
+        }
+        // How often the guest is ASKED for audio, against how often it hands
+        // some over (counted in the driver). A mixer that is pumped more often
+        // than it has source for re-emits its last block, which is what a
+        // title with repeating audio looks like. Off unless REX_AUDIO_STATS=1.
+        {
+          static const bool stats = [] {
+            const char* v = getenv("REX_AUDIO_STATS");
+            if (!v) v = getenv("REX_AUDIO_REPEAT_STATS");
+            return v && *v == '1';
+          }();
+          if (stats) {
+            static uint64_t dispatched = 0;
+            static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            ++dispatched;
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next) {
+              next = now + std::chrono::seconds(1);
+              REXAPU_INFO("audio pump: {} guest callbacks dispatched so far", dispatched);
+            }
+          }
         }
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
         uint64_t args[] = {client_callback_arg};

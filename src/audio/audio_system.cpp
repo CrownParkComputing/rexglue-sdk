@@ -25,6 +25,17 @@
 #include <rex/thread.h>
 #include <rex/cvar.h>
 
+REXCVAR_DEFINE_BOOL(
+    audio_pace_callback, true, "Audio",
+    "Space the guest's audio render callback evenly at 187.5 Hz instead of calling it once per "
+    "device credit.\n"
+    "The device releases a credit per frame it consumes, and it consumes several at once, so the "
+    "credits - and therefore the calls - arrive in clumps. Measured on Hydro Thunder: 62% of calls "
+    "landed within 0.5 ms of the previous one and only a quarter were properly spaced. A mixer "
+    "that paces itself on elapsed time advances once per clump and repeats for the rest of it, "
+    "which is exactly a title replaying every fourth frame. Credits are still required first, so "
+    "back-pressure is unchanged; this only stops the calls bunching up.");
+
 REXCVAR_DEFINE_INT32(
     audio_maxqframes, 8, "Audio",
     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
@@ -45,6 +56,9 @@ namespace rex::audio {
 
 namespace {
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
+
+// 48000 / 256 = 187.5 calls a second.
+constexpr std::chrono::nanoseconds kFramePeriod{5333333};
 }  // namespace
 
 AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
@@ -140,6 +154,22 @@ void AudioSystem::WorkerThreadMain() {
       uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
       global_lock.unlock();
 
+      if (client_callback && REXCVAR_GET(audio_pace_callback)) {
+        // Hold the call until its slot. The credit above is the permission to
+        // render another frame; the period is when the console would have
+        // asked for it.
+        static std::chrono::steady_clock::time_point next_slot{};
+        const auto now = std::chrono::steady_clock::now();
+        if (next_slot.time_since_epoch().count() == 0 || now > next_slot + kFramePeriod * 4) {
+          // First call, or we have fallen far enough behind that catching up
+          // one period at a time would just reproduce the clumping.
+          next_slot = now;
+        } else if (now < next_slot) {
+          rex::thread::Sleep(next_slot - now);
+        }
+        next_slot += kFramePeriod;
+      }
+
       if (client_callback) {
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
@@ -156,6 +186,26 @@ void AudioSystem::WorkerThreadMain() {
             return v && *v == '1';
           }();
           if (stats) {
+            // How the calls are SPACED, not just how many. The device releases
+            // a credit per consumed frame, so several can arrive at once and
+            // the guest gets called in a burst with no wall-clock between the
+            // calls. A mixer that paces itself on elapsed time then advances
+            // once per burst and repeats the rest - which is what a title
+            // replaying the same block looks like. The runtime that plays Hydro
+            // Thunder correctly calls this on a fixed 187.5 Hz timer instead.
+            static auto last = std::chrono::steady_clock::now();
+            static uint64_t buckets[5] = {};  // <0.5ms, <1, <2, <4, >=4
+            const auto now_t = std::chrono::steady_clock::now();
+            const double gap_ms =
+                std::chrono::duration<double, std::milli>(now_t - last).count();
+            last = now_t;
+            buckets[gap_ms < 0.5 ? 0 : gap_ms < 1.0 ? 1 : gap_ms < 2.0 ? 2 : gap_ms < 4.0 ? 3 : 4]++;
+            static uint64_t spacing_n = 0;
+            if (++spacing_n % 376 == 0) {
+              REXAPU_INFO("[PUMP] callback gaps: <0.5ms {}, <1ms {}, <2ms {}, <4ms {}, >=4ms {}",
+                          buckets[0], buckets[1], buckets[2], buckets[3], buckets[4]);
+              for (auto& b : buckets) b = 0;
+            }
             static uint64_t dispatched = 0;
             static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(1);
             ++dispatched;

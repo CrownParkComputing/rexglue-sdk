@@ -167,8 +167,20 @@ bool build_bctr(BuilderContext& ctx) {
       }
     }
 
+    // The instruction being recompiled is bctr: branch to whatever CTR holds.
+    // The switch table above is a recovered optimisation over the targets we
+    // could identify statically, not the whole of the instruction's meaning -
+    // an index outside it still branches on real hardware. Trapping here makes
+    // a legal control path abort, and marks the default noreturn, which lets
+    // the optimiser assume the index is always in range.
+    //
+    // This was found by diffing a title against a build of the same XEX that
+    // plays correctly: 402 traps in our output, zero in that one, including
+    // both functions of the audio path under investigation.
     ctx.println("\tdefault:");
-    ctx.println("\t\t__builtin_trap(); // Switch case out of range");
+    ctx.println("\t\tREX_CALL_INDIRECT_FUNC({}.u32); // switch fell through; bctr = jump to CTR",
+                ctx.ctr());
+    ctx.println("\t\treturn;");
     ctx.println("\t}}");
 
     ctx.reset_switch_table();

@@ -11,6 +11,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
+#include <mutex>
+#include <string>
 #include <cstring>
 
 #include <rex/audio/native_mix.h>
@@ -106,11 +109,44 @@ bool XmaContext::Work() {
   XMA_CONTEXT_DATA data(context_ptr);
   const XMA_CONTEXT_DATA initial_data = data;
 
+  // What the decoder believes about each stream, against what the banks
+  // actually contain. is_stereo decides the block accounting (4 << is_stereo
+  // blocks per frame), so reading it wrong for a mono stream makes the ring
+  // advance in twice as many blocks as hold real audio - a clean 2:1.
+  // REX_XMA_STATS=1.
+  {
+    static const bool stats = [] {
+      const char* v = getenv("REX_XMA_STATS");
+      return v && *v == '1';
+    }();
+    if (stats) {
+      static std::mutex lock;
+      static std::map<uint32_t, uint32_t> shape;  // (stereo,rate,blocks,sdc) -> count
+      static uint64_t n = 0;
+      const uint32_t key = (uint32_t(data.is_stereo) << 24) | (uint32_t(data.sample_rate) << 16) |
+                           (uint32_t(data.output_buffer_block_count) << 8) |
+                           uint32_t(data.subframe_decode_count);
+      std::lock_guard<std::mutex> guard(lock);
+      ++shape[key];
+      if (++n % 2000 == 0) {
+        std::string line;
+        for (const auto& [k, c] : shape) {
+          line += fmt::format(" [stereo={} rate={}({}Hz) blocks={} sdc={}]x{}", (k >> 24) & 0xFF,
+                              (k >> 16) & 0xFF, GetSampleRate((k >> 16) & 0xFF), (k >> 8) & 0xFF,
+                              k & 0xFF, c);
+        }
+        REXAPU_INFO("[XMASTATS] context shapes:{}", line);
+        shape.clear();
+      }
+    }
+  }
+
   if (!data.output_buffer_valid) {
     return true;
   }
 
   memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
+  const uint32_t initial_write_block_ = data.output_buffer_write_offset;
 
   // Consume-only context: no input, just drain remaining subframes.
   if (data.IsConsumeOnlyContext()) {
@@ -152,6 +188,32 @@ bool XmaContext::Work() {
     if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
         current_frame_remaining_subframes_ == 0) {
       break;
+    }
+  }
+
+  // Blocks we produced this pass vs blocks the guest retired since last pass.
+  // If the guest drains more than we fill, it re-reads the ring - which is what
+  // a repeating mixer is. REX_XMA_STATS=1.
+  {
+    static const bool stats = [] {
+      const char* v = getenv("REX_XMA_STATS");
+      return v && *v == '1';
+    }();
+    if (stats) {
+      const uint32_t blocks = data.output_buffer_block_count ? data.output_buffer_block_count : 1;
+      const uint32_t now_read = data.output_buffer_read_offset;
+      const uint32_t produced =
+          (output_rb.write_offset() / kOutputBytesPerBlock + blocks - initial_write_block_) % blocks;
+      const uint32_t consumed = (now_read + blocks - last_read_block_) % blocks;
+      last_read_block_ = now_read;
+      static std::atomic<uint64_t> total_produced{0}, total_consumed{0}, passes{0};
+      total_produced.fetch_add(produced, std::memory_order_relaxed);
+      total_consumed.fetch_add(consumed, std::memory_order_relaxed);
+      if (passes.fetch_add(1, std::memory_order_relaxed) % 4000 == 3999) {
+        const uint64_t p = total_produced.exchange(0), c = total_consumed.exchange(0);
+        REXAPU_INFO("[XMASTATS] ring blocks: produced {} consumed {} ({:.2f} produced per consumed)",
+                    p, c, c ? double(p) / double(c) : 0.0);
+      }
     }
   }
 

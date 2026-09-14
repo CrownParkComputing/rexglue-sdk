@@ -1388,6 +1388,20 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
       // when it's resized.
       DisconnectPaintingFromSurfaceFromUIThread(
           SurfacePaintConnectionState::kUnconnectedRetryAtStateChange);
+    } else if (!update_paint_mode_to_desired &&
+               surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable &&
+               surface_width == surface_width_in_paint_connection_ &&
+               surface_height == surface_height_in_paint_connection_) {
+      // Nothing about the surface changed, so there is nothing to reconnect.
+      // Rebuilding the swapchain anyway is visible: each rebuild drops the
+      // presented image for a frame, and a compositor that animates a window
+      // open sends a resize per animation frame - measured at 19 rebuilds in
+      // one session on Hydro Thunder, several of them to an extent identical to
+      // the current one, which reads as flashing interference from the moment
+      // the window appears.
+      if (repaint_needed_out) {
+        *repaint_needed_out = true;
+      }
     } else {
       bool is_reconnect = IsConnectedSurfacePaintConnectionState(surface_paint_connection_state_);
       bool is_vsync_implicit = false;

@@ -13,6 +13,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -21,6 +22,35 @@
 #include <rex/thread/mutex.h>
 
 namespace rex::graphics {
+
+// std::vector<std::atomic<T>> does not compile against libc++: vector(n) wants
+// the element type to be Cpp17MoveInsertable and an atomic is neither copyable
+// nor movable. libstdc++ happens to accept it, so this only shows up when
+// cross-compiling for Android. The storage is the same flat array either way -
+// the vector's growth and move machinery was never used here.
+class AtomicU64Array {
+ public:
+  AtomicU64Array() = default;
+  explicit AtomicU64Array(size_t count)
+      : data_(count ? new std::atomic<uint64_t>[count]() : nullptr), size_(count) {}
+
+  std::atomic<uint64_t>& operator[](size_t index) { return data_[index]; }
+  const std::atomic<uint64_t>& operator[](size_t index) const { return data_[index]; }
+  size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  void clear() {
+    data_.reset();
+    size_ = 0;
+  }
+  // Kept so call sites read the same as they did with a vector; the array is
+  // exactly its own capacity, so there is nothing to give back.
+  void shrink_to_fit() {}
+
+ private:
+  std::unique_ptr<std::atomic<uint64_t>[]> data_;
+  size_t size_ = 0;
+};
+
 
 // Manages memory for unconverted textures, resolve targets, vertex and index
 // buffers that can be accessed from shaders with Xenon physical addresses, with
@@ -266,9 +296,9 @@ class SharedMemory {
   // takes. Writes still happen under the lock; a reader racing an invalidation
   // sees one side or the other, which is the same guarantee taking the lock
   // gave (the range could be invalidated the instant the lock was released).
-  std::vector<std::atomic<uint64_t>> system_page_flags_valid_;
+  AtomicU64Array system_page_flags_valid_;
   // Subset of valid pages containing data written by the GPU.
-  std::vector<std::atomic<uint64_t>> system_page_flags_valid_and_gpu_written_;
+  AtomicU64Array system_page_flags_valid_and_gpu_written_;
   uint32_t num_system_page_flags_ = 0;
 
   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(

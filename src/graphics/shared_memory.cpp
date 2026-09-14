@@ -46,9 +46,8 @@ SharedMemory::~SharedMemory() {
 
 void SharedMemory::InitializeCommon() {
   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
-  system_page_flags_valid_ = std::vector<std::atomic<uint64_t>>(num_system_page_flags_);
-  system_page_flags_valid_and_gpu_written_ =
-      std::vector<std::atomic<uint64_t>>(num_system_page_flags_);
+  system_page_flags_valid_ = AtomicU64Array(num_system_page_flags_);
+  system_page_flags_valid_and_gpu_written_ = AtomicU64Array(num_system_page_flags_);
   for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
     system_page_flags_valid_[i].store(0, std::memory_order_relaxed);
     system_page_flags_valid_and_gpu_written_[i].store(0, std::memory_order_relaxed);

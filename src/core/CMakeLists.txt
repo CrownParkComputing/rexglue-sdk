@@ -63,6 +63,7 @@ elseif(UNIX)
         dynlib_posix.cpp
         exception_handler_posix.cpp
         filesystem_posix.cpp
+        filesystem_android.cpp
         fiber_posix.cpp
         mapped_memory_posix.cpp
         math_gcc.cpp
@@ -98,7 +99,11 @@ target_include_directories(rexcore PRIVATE
     ${PROJECT_SOURCE_DIR}/thirdparty/cli11/include
 )
 
-if(APPLE)
+if(ANDROID)
+    # Bionic has pthreads and dlopen in libc itself and ships no librt, so
+    # naming them is a link error rather than a no-op. log is Android's own.
+    target_link_libraries(rexcore PRIVATE log)
+elseif(APPLE)
     target_link_libraries(rexcore PRIVATE pthread)
 elseif(UNIX)
     target_link_libraries(rexcore PRIVATE pthread rt dl)

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include <rex/audio/native_mix.h>
 #include <rex/audio/xma/context.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/audio/xma/helpers.h>
@@ -670,6 +671,17 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
   if (decoded) {
     ConvertFrame(reinterpret_cast<const uint8_t**>(&av_frame_->data), bool(data->is_stereo),
                  decoded_frame_.data());
+
+    // Tap for the native mix (--audio_native_xma). This is the decoded stream
+    // in its own rate, before the guest's mixer touches it - which is the point
+    // of the bypass, since that mixer is what is broken in the titles this is
+    // for. Costs one predictable branch when off.
+    if (NativeMixEnabled()) {
+      const uint32_t channels = data->is_stereo ? 2u : 1u;
+      const size_t frames = kSamplesPerFrame;
+      NativeMixPush(id(), reinterpret_cast<const int16_t*>(decoded_frame_.data()), frames,
+                    static_cast<uint32_t>(GetSampleRate(data->sample_rate)), channels);
+    }
 
     // Realign the decoder's output onto the bitstream's sample numbering: the
     // samples of the frame just decoded run from kDecoderStartPadding into this

@@ -16,10 +16,12 @@
 #include <mutex>
 #include <string>
 #include <cstring>
+#include <vector>
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
 #include <rex/audio/downmix.h>
+#include <rex/audio/native_mix.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
 #include <rex/cvar.h>
@@ -217,7 +219,20 @@ bool g_out_dump_tried = false;
 }  // namespace
 
 void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
-  const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
+  auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
+
+  // --audio_native_xma: replace what the guest mixed with what we mixed from
+  // the XMA streams we decoded ourselves. Used for a title whose recompiled
+  // mixer does not run at real time; falls through to the guest's own frame
+  // whenever nothing is playing through XMA, so a title that mixes correctly
+  // is unaffected even with the flag on.
+  static std::vector<float> native_frame;
+  if (NativeMixEnabled()) {
+    native_frame.resize(frame_samples_);
+    if (NativeMixFill(native_frame.data(), channel_samples_, frame_channels_)) {
+      input_frame = native_frame.data();
+    }
+  }
 
   if (!REXCVAR_GET(audio_dump_wav).empty()) {
     std::lock_guard<std::mutex> guard(g_dump_lock);

@@ -10,6 +10,7 @@
 */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include <rex/audio/native_mix.h>
@@ -134,17 +135,46 @@ bool XmaContext::Work() {
   }
 
   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
+    const uint32_t pre_decode_offset = data.input_buffer_read_offset;
+    const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
+
     Decode(&data);
     Consume(&output_rb, &data);
 
     if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
       break;
     }
+
+    // A Decode that neither advanced the read offset nor produced a frame has
+    // made no progress; continuing spins the whole ring on one packet. Only
+    // checked when nothing was pending on entry - with subframes remaining,
+    // Decode deliberately skips (offset unchanged) while Consume drains.
+    if (pre_remaining_subframes == 0 && data.input_buffer_read_offset == pre_decode_offset &&
+        current_frame_remaining_subframes_ == 0) {
+      break;
+    }
   }
 
-  data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
+  if (initial_data.IsAnyInputBufferValid()) {
+    data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
+  } else {
+    // Starved of input, the write offset is how the guest is told the hardware
+    // has stalled: it expects write to collapse onto read. Advancing it anyway
+    // says "there is fresh PCM here" when there is none, and a mixer waiting on
+    // write == read to re-queue never gets its signal - which is what a title
+    // that keeps replaying the same block looks like. Xenia carries the same
+    // branch, naming NFS: Carbon and NFS: MW as the titles that need it.
+    if (data.output_buffer_write_offset != data.output_buffer_read_offset) {
+      data.output_buffer_write_offset = data.output_buffer_read_offset;
+      data.output_buffer_valid = 0;
+    }
+  }
 
-  if (output_rb.empty()) {
+  // "The ring is full", which is not the same as "the offsets happen to
+  // coincide" - a fully drained ring is also empty(), and clearing the valid
+  // bit there tells the guest its buffer is unusable when it is merely caught
+  // up.
+  if (remaining_subframe_blocks_in_output_buffer_ == 0 && output_rb.empty()) {
     data.output_buffer_valid = 0;
   }
 
@@ -515,6 +545,23 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
   ret = avcodec_receive_frame(av_context, av_frame);
 
   if (ret == AVERROR(EAGAIN)) {
+    // Not an error: the decoder has lookahead and wants another packet before
+    // it can emit a frame. How often this happens decides how much audio a
+    // context actually produces, so count it. REX_XMA_STATS=1.
+    static const bool stats = [] {
+      const char* v = getenv("REX_XMA_STATS");
+      return v && *v == '1';
+    }();
+    if (stats) {
+      static std::atomic<uint64_t> eagain{0}, total{0};
+      const uint64_t n = eagain.fetch_add(1, std::memory_order_relaxed) + 1;
+      const uint64_t all = total.load(std::memory_order_relaxed);
+      if (n % 500 == 0) {
+        REXAPU_INFO("[XMASTATS] decode returned EAGAIN {} times ({} frames emitted) - each one "
+                    "drops a frame via carry_valid_",
+                    n, all);
+      }
+    }
     return false;
   }
   if (ret < 0) {
@@ -522,6 +569,19 @@ bool XmaContext::DecodePacket(AVCodecContext* av_context, const AVPacket* av_pac
     av_strerror(ret, errbuf, sizeof(errbuf));
     REXAPU_ERROR("XmaContext {}: Error during decoding: {} ({})", id(), errbuf, ret);
     return false;
+  }
+  {
+    static const bool stats = [] {
+      const char* v = getenv("REX_XMA_STATS");
+      return v && *v == '1';
+    }();
+    if (stats) {
+      static std::atomic<uint64_t> ok{0};
+      const uint64_t n = ok.fetch_add(1, std::memory_order_relaxed) + 1;
+      if (n % 2000 == 0) {
+        REXAPU_INFO("[XMASTATS] decode produced a frame {} times", n);
+      }
+    }
   }
   return true;
 }

@@ -62,7 +62,7 @@ sed -i "s|$PROJECT_ROOT/assets|assets|g" "$PROJECT_ROOT/${NAME}_manifest.toml"
 
 echo "==> config, tooling and scripts"
 cp "$SDK/tools/port_profile.toml" "$PROJECT_ROOT/config/$NAME.toml"
-cp "$SDK/tools/content_zip.sh" "$SDK/tools/port_check.py" "$PROJECT_ROOT/tools/"
+cp "$SDK/tools/content_zip.sh" "$SDK/tools/port_check.py" "$SDK/tools/port_doctor.sh" "$PROJECT_ROOT/tools/"
 for script in headless_play measure; do
   sed "s|@TITLE@|$NAME|g" "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
   chmod +x "$PROJECT_ROOT/tools/$script.sh"
@@ -156,6 +156,19 @@ Importing the content is not part of the build: a rebuild must not depend on
 having the game to hand. \`./run.sh\` checks \`assets/\` against those checksums
 and, only when they do not match, asks where the archive is - or takes
 \`${NAME^^}_CONTENT_ZIP=/path/to/$NAME-content.zip\`.
+
+## First run: let the doctor pick the settings
+
+\`\`\`sh
+tools/port_doctor.sh .        # ~6 minutes, no display, nobody at the keyboard
+\`\`\`
+
+Checks the generated code, then runs the title on each render path and each
+page-coherency setting and reports what each one costs. Every check exists
+because a title failed it and the cause took hours to find by hand: Shift 2
+loses its text on the \`host\` path, Hydro Thunder renders blocky tile-pattern
+garbage with \`clear_memory_page_state=false\`, MCLA is 25% faster on \`host\`.
+Nothing about the symptom says which - compare the frames it captures.
 
 ## Testing without a display
 

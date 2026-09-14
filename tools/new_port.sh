@@ -178,6 +178,35 @@ tools/measure.sh 150 "25:Return"                  # per-frame cost breakdown
 tools/measure.sh 150 "25:Return" --gpu_hot_page_frames=0   # A/B a setting
 \`\`\`
 
+## Replacing guest code with native code
+
+Any recompiled function can be replaced with a native C++ one. \`DEFINE_REX_FUNC\`
+emits the body as \`__imp__<name>\` and \`<name>\` as a weak alias, so a strong
+definition in \`src/\` wins at link time and the original stays callable:
+
+\`\`\`cpp
+#include <rex/hook.h>
+extern "C" void __imp__sub_82345678(PPCContext& ctx, uint8_t* base);
+
+REX_HOOK_RAW(sub_82345678) {
+  // measure, replace, or skip - then optionally run the original
+  __imp__sub_82345678(ctx, base);
+}
+\`\`\`
+
+Add the file with \`target_sources(<title>_recomp PRIVATE ...)\` AFTER
+\`rexglue_setup_target\`, which is what creates that target. This survives a
+re-codegen, which a hand edit to \`generated/\` does not - that is the whole
+reason the mechanism exists. \`REX_HOOK(name, fn)\` marshals PPC registers into
+plain C++ arguments; \`[[midasm_hook]]\` in the manifest injects a native call at
+one instruction inside a function.
+
+Worth knowing what this is NOT for: replacing a title's audio or physics
+middleware wholesale has been tried and does not work, because the state that
+matters (voice position, gain, pan) lives inside the guest and is not visible
+from outside it. Use it to measure, to skip a path that cannot work, or to fix
+one function - not to reimplement a subsystem.
+
 ## Configuration
 
 \`config/$NAME.toml\` starts from the shared profile in the SDK

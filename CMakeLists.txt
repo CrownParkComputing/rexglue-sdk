@@ -271,8 +271,13 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
-add_subdirectory(src/codegen)
-add_subdirectory(src/rexglue)
+if(NOT ANDROID)
+    # The codegen library and the rexglue CLI that drives it are build-time
+    # host tools: they translate a XEX to C++ on the machine doing the build.
+    # Nothing on the device runs them, and they pull in host-only dependencies.
+    add_subdirectory(src/codegen)
+    add_subdirectory(src/rexglue)
+endif()
 
 # Add tests subdirectory if tests are enabled
 if(REXGLUE_BUILD_TESTS)

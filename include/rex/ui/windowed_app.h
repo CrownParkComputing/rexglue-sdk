@@ -24,9 +24,13 @@
 #include <rex/platform.h>
 #include <rex/ui/windowed_app_context.h>
 
-#if REX_PLATFORM_ANDROID
-// Multiple apps in a single library instead of separate executables.
-#define XE_UI_WINDOWED_APPS_IN_LIBRARY 1
+// Xenia put every app in one library on Android and picked between them by
+// identifier, because it shipped an emulator and its tools together. A port
+// here is one title per APK, so it keeps the single-app model: that is what
+// provides main(), which is what SDL3's Android entry point calls. Define
+// XE_UI_WINDOWED_APPS_IN_LIBRARY yourself to get the multi-app behaviour back.
+#ifndef XE_UI_WINDOWED_APPS_IN_LIBRARY
+#define XE_UI_WINDOWED_APPS_IN_LIBRARY 0
 #endif
 
 namespace rex {

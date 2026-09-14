@@ -16,6 +16,15 @@
 #include <string>
 #include <vector>
 
+#include <rex/platform.h>
+#if REX_PLATFORM_ANDROID
+// SDLActivity dlopens this library and looks for SDL_main, not main. Including
+// this header renames main() to an exported SDL_main; the library is built with
+// hidden visibility, so without the header's export decoration the symbol is
+// present but not findable and the app exits the instant it starts.
+#include <SDL3/SDL_main.h>
+#endif
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>

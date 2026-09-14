@@ -55,6 +55,13 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 }  // namespace
 
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
+#if REX_PLATFORM_ANDROID
+  // There is no folder to sit next to on Android: the executable is
+  // /system/bin/app_process and the plugin is in the APK's own native library
+  // directory, whose name contains an install hash. The dynamic linker already
+  // searches that directory, so ask for the library by name and let it resolve.
+  std::filesystem::path path = PluginFileName(name);
+#else
   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
   if (!std::filesystem::exists(path)) {
     REXSYS_ERROR(
@@ -63,6 +70,7 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
         name, path.string(), name);
     return nullptr;
   }
+#endif
 
   platform::DynamicLibrary library;
   if (!library.Load(path, platform::SymbolResolution::kImmediate)) {

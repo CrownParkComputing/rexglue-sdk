@@ -7,7 +7,11 @@ set_target_properties(rexui PROPERTIES EXPORT_NAME ui)
 set_target_properties(rexinput PROPERTIES EXPORT_NAME input)
 set_target_properties(rexaudio PROPERTIES EXPORT_NAME audio)
 set_target_properties(rexruntime PROPERTIES EXPORT_NAME runtime)
-set_target_properties(rexcodegen PROPERTIES EXPORT_NAME codegen)
+# rexcodegen and the rexglue CLI are host build tools, not built when
+# cross-compiling, so neither can be named here on such a build.
+if(NOT ANDROID)
+    set_target_properties(rexcodegen PROPERTIES EXPORT_NAME codegen)
+endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/rexglue_helpers.cmake)
 
@@ -52,11 +56,13 @@ install(TARGETS ${REXGLUE_INSTALL_TARGETS}
 )
 
 # A Debug codegen tool runs an order of magnitude slower, so only Release ships.
-install(TARGETS rexglue
-    EXPORT rexglueTargets
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    CONFIGURATIONS Release
-)
+if(NOT ANDROID)
+    install(TARGETS rexglue
+        EXPORT rexglueTargets
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        CONFIGURATIONS Release
+    )
+endif()
 
 if(REXGLUE_INSTALL_FIDELITYFX_TARGETS)
     install(TARGETS ${REXGLUE_INSTALL_FIDELITYFX_TARGETS}

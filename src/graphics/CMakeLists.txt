@@ -170,7 +170,10 @@ endif()
 # of rexgpu-xenos: it links none of it and compiles its own copies of the
 # shared sources.
 #==============================================================================
-if(REXGLUE_USE_VULKAN)
+# Not on Android yet: this plugin links snappy, which is taken from the host
+# and has no arm64 build here. It is also the backend that still dies on the
+# first 3D frame, so it is not what an APK would load - rexgpu-xenos is.
+if(REXGLUE_USE_VULKAN AND NOT ANDROID)
     set(REXGPU_NATIVE_SOURCES
         native/plugin_main.cpp
         native/graphics_system.cpp

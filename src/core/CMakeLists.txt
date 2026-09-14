@@ -102,7 +102,9 @@ target_include_directories(rexcore PRIVATE
 if(ANDROID)
     # Bionic has pthreads and dlopen in libc itself and ships no librt, so
     # naming them is a link error rather than a no-op. log is Android's own.
-    target_link_libraries(rexcore PRIVATE log)
+    # SDL3 is here for one call: the app's private directory, which is where
+    # logs have to go because the working directory is read-only /system/bin.
+    target_link_libraries(rexcore PRIVATE log SDL3::SDL3)
 elseif(APPLE)
     target_link_libraries(rexcore PRIVATE pthread)
 elseif(UNIX)

@@ -23,6 +23,11 @@
 #include <toml++/toml.hpp>
 
 #include <rex/cvar.h>
+#include <rex/platform.h>
+#if REX_PLATFORM_ANDROID
+#include <SDL3/SDL_system.h>
+#endif
+
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/platform/env.h>
@@ -221,8 +226,21 @@ void InitLogging(const LogConfig& config) {
   if (config.log_file) {
     resolved_path = config.log_file;
   } else if (!config.app_name.empty()) {
-    auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
-                                          : std::filesystem::path(config.log_dir);
+    // The working directory is where the app was started from, which on Android
+    // is /system/bin - read-only, so creating "logs" there aborts the process
+    // before a single line is written. SDL knows the app's own private
+    // directory, which needs no permission and is removed with the app.
+    std::filesystem::path default_log_dir;
+#if REX_PLATFORM_ANDROID
+    if (const char* internal = SDL_GetAndroidInternalStoragePath()) {
+      default_log_dir = std::filesystem::path(internal) / "logs";
+    }
+#endif
+    if (default_log_dir.empty()) {
+      default_log_dir = std::filesystem::current_path() / "logs";
+    }
+    auto log_dir =
+        config.log_dir.empty() ? default_log_dir : std::filesystem::path(config.log_dir);
     resolved_path = NextSequentialLogPath(log_dir, config.app_name).string();
   }
   if (!resolved_path.empty()) {

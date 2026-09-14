@@ -360,6 +360,31 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // call site's view of it. A constant that ends up wrong at draw time is
   // either written wrong or written right and then clobbered, and only the
   // sequence of writes tells those apart.
+  // Once the wrong value is seen going into a constant, the question becomes
+  // where the guest got it. Scan physical memory for the float4 the block came
+  // from: if it sits in the title's static data the value is deliberate, and if
+  // it does not, something computed it.
+  if (REXCVAR_GET(scan_guest_u32) && value == REXCVAR_GET(scan_guest_u32)) {
+    static std::once_flag scanned;
+    std::call_once(scanned, [&]() {
+      uint32_t needle = REXCVAR_GET(scan_guest_u32);
+      uint32_t hits = 0;
+      for (uint32_t addr = 0x10000; addr < 0x20000000 && hits < 24; addr += 4) {
+        auto* p = memory_->TranslatePhysical<const uint32_t*>(addr);
+        if (!p) continue;
+        if (rex::byte_swap(*p) != needle) continue;
+        // Print the surrounding float4 pair so the block is recognisable.
+        auto at = [&](int32_t o) {
+          auto* q = memory_->TranslatePhysical<const uint32_t*>(uint32_t(int32_t(addr) + o * 4));
+          return q ? rex::byte_swap(*q) : 0u;
+        };
+        REXLOG_INFO("[scan] 0x{:08X}: {:08X} {:08X} [{:08X}] {:08X} {:08X} {:08X}", addr, at(-3),
+                    at(-2), at(0), at(1), at(2), at(3));
+        ++hits;
+      }
+      REXLOG_INFO("[scan] {} hits for {:08X}", hits, needle);
+    });
+  }
   if (REXCVAR_GET(trace_float_constant) >= 0) {
     uint32_t traced = uint32_t(REXCVAR_GET(trace_float_constant));
     uint32_t first = XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * traced;

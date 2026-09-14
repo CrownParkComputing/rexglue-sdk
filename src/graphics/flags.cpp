@@ -31,6 +31,8 @@ REXCVAR_DEFINE_STRING(dump_textures, "", "GPU",
                       "reading of it.");
 REXCVAR_DEFINE_INT32(trace_float_constant, -1, "GPU",
                      "Log every write to this float constant register (-1 = off).");
+REXCVAR_DEFINE_UINT32(scan_guest_u32, 0, "GPU",
+                      "When this value is written to a register, scan guest memory for it once.");
 REXCVAR_DEFINE_UINT32(log_draw_texture, 0, "GPU",
                       "Log every draw that binds this texture base address, with its constants.");
 REXCVAR_DEFINE_BOOL(log_draw_shaders, false, "GPU",

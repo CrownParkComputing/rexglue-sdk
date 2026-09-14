@@ -45,6 +45,20 @@ REXCVAR_DEFINE_UINT32(
     "Protection is page-granular, so a hot neighbour on the same page keeps opening the window "
     "this closes, and the guest's own page protection undoes the watch outright; lower "
     "catches more writers and costs more syscalls.");
+REXCVAR_DEFINE_UINT32(guest_watch_find, 0, "Kernel",
+                      "Instead of a fixed address, poll guest memory for this 32-bit value and "
+                      "watch wherever it turns up. For anything the title allocates, the address "
+                      "differs every run, so it has to be found inside the run that watches it.");
+REXCVAR_DEFINE_UINT32(guest_watch_find_from, 0x00010000, "Kernel",
+                      "Lowest guest address guest_watch_find searches.");
+REXCVAR_DEFINE_UINT32(guest_watch_find_to, 0x20000000, "Kernel",
+                      "Highest guest address guest_watch_find searches.");
+REXCVAR_DEFINE_UINT32(guest_watch_find_length, 4, "Kernel",
+                      "Bytes to watch around a guest_watch_find match.");
+REXCVAR_DEFINE_UINT32(guest_watch_find_pair, 0, "Kernel",
+                      "Require the word before a guest_watch_find match to equal this.");
+REXCVAR_DEFINE_UINT32(guest_watch_find_delay_ms, 0, "Kernel",
+                      "Wait this long before searching, so the allocation exists.");
 REXCVAR_DEFINE_BOOL(guest_watch_words, true, "Kernel",
                     "Report --guest_watch changes as big-endian 32-bit words (the guest's own "
                     "view). Off reports raw bytes, for unaligned or byte-packed data.");
@@ -253,9 +267,87 @@ void RearmMain(rex::memory::Memory* memory, std::vector<WatchRange> ranges) {
 
 }  // namespace
 
+// Poll guest memory for a 32-bit value, and hand back ranges covering the first
+// few places it appears. A watch is only useful once you know the address, and
+// for anything the title allocates that address changes every run - so the
+// address has to be discovered inside the run that watches it.
+std::vector<WatchRange> FindValueRanges(rex::memory::Memory* memory, uint32_t needle) {
+  std::vector<WatchRange> ranges;
+  // Wait before looking: the interesting allocation usually does not exist yet
+  // at start-up, and scanning early finds an unrelated match instead.
+  rex::thread::Sleep(std::chrono::milliseconds(REXCVAR_GET(guest_watch_find_delay_ms)));
+  const uint32_t pair = REXCVAR_GET(guest_watch_find_pair);
+  for (uint32_t attempt = 0; attempt < 400 && ranges.empty(); ++attempt) {
+    // Two windows: the title's own virtual allocations, and the virtual mirror
+    // of physical memory, which is where anything the GPU also reads shows up.
+    // Scanning every mapped address takes minutes per pass, which is longer
+    // than the window in which the value is interesting. Search the narrowest
+    // region that can hold it.
+    const uint32_t window[2] = {REXCVAR_GET(guest_watch_find_from),
+                                REXCVAR_GET(guest_watch_find_to)};
+    {
+    for (uint32_t address = window[0]; address < window[1] && ranges.size() < 4; address += 4) {
+      // Must match how the watch arms pages (TranslateVirtual); searching the
+      // physical mapping yields addresses the watch then protects elsewhere,
+      // and it silently reports nothing.
+      auto* word = memory->TranslateVirtual<const uint32_t*>(address);
+      if (!word || rex::byte_swap(*word) != needle) {
+        continue;
+      }
+      // An isolated match is almost always coincidence. Requiring the word
+      // before it to be a known neighbour pins the actual structure.
+      if (pair) {
+        auto* prev = memory->TranslateVirtual<const uint32_t*>(address - 4);
+        if (!prev || rex::byte_swap(*prev) != pair) {
+          continue;
+        }
+      }
+      REXLOG_INFO("[GWATCH] found {:#010x} at {:#010x}", needle, address);
+      WatchRange range;
+      // A value written once, before it can be found, is never caught by
+      // watching its own word. Widening the window to the structure around it
+      // catches the writes to its neighbours, which the same code makes.
+      range.length = REXCVAR_GET(guest_watch_find_length);
+      range.address = address > range.length / 2 ? address - range.length / 2 : address;
+      range.shadow.resize(range.length);
+      ranges.push_back(std::move(range));
+    }
+    }
+    if (ranges.empty()) {
+      rex::thread::Sleep(std::chrono::milliseconds(250));
+    }
+  }
+  if (ranges.empty()) {
+    REXLOG_WARN("[GWATCH] value {:#010x} never appeared in guest memory", needle);
+  }
+  return ranges;
+}
+
+void FindAndWatchMain(rex::memory::Memory* memory, uint32_t needle) {
+  auto ranges = FindValueRanges(memory, needle);
+  if (ranges.empty()) {
+    return;
+  }
+  if (REXCVAR_GET(guest_watch_writers)) {
+    RearmAll(memory, ranges);
+    std::thread(RearmMain, memory, ranges).detach();
+  }
+  WatchMain(memory, std::move(ranges));
+}
+
 void StartGuestMemoryWatch(rex::memory::Memory* memory) {
+  if (!memory) {
+    return;
+  }
+  if (uint32_t needle = REXCVAR_GET(guest_watch_find)) {
+    bool find_expected = false;
+    if (g_started.compare_exchange_strong(find_expected, true)) {
+      std::thread(FindAndWatchMain, memory, needle).detach();
+    }
+    return;
+  }
   const std::string spec = REXCVAR_GET(guest_watch);
-  if (spec.empty() || !memory) {
+  if (spec.empty()) {
     return;
   }
   bool expected = false;

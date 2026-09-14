@@ -21,6 +21,7 @@ REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(bool, log_texture_swizzles);
 REXCVAR_DECLARE(bool, log_draw_shaders);
 REXCVAR_DECLARE(uint32_t, log_draw_texture);
+REXCVAR_DECLARE(uint32_t, scan_guest_u32);
 REXCVAR_DECLARE(int32_t, trace_float_constant);
 REXCVAR_DECLARE(std::string, dump_textures);
 

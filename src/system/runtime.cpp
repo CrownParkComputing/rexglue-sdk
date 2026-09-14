@@ -9,6 +9,7 @@
  *              See LICENSE file in the project root for full license text.
  */
 
+#include <thread>
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/filesystem/devices/host_path_device.h>
@@ -106,6 +107,26 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
 
   // Initialize clock
   chrono::Clock::set_guest_tick_frequency(50000000);
+
+  // One-shot self-check, off unless REX_CLOCK_CHECK=1. A guest whose timebase
+  // advances at the wrong rate computes every duration wrongly - an audio
+  // mixer paced from it produces half or double the samples it should, which
+  // looks like a codec fault and is not one. Measuring beats reading the
+  // scaling code, which has looked correct through two sessions of this.
+  if (const char* v = getenv("REX_CLOCK_CHECK"); v && *v == '1') {
+    std::thread([] {
+      const uint64_t t0 = chrono::Clock::QueryGuestTickCount();
+      const auto h0 = std::chrono::steady_clock::now();
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      const uint64_t t1 = chrono::Clock::QueryGuestTickCount();
+      const double host_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - h0).count();
+      const double implied = double(t1 - t0) / host_s;
+      REXSYS_INFO("[CLOCKCHECK] guest timebase advanced {} ticks in {:.3f} s = {:.0f} Hz "
+                  "(expected {}), ratio {:.4f}",
+                  t1 - t0, host_s, implied, chrono::Clock::guest_tick_frequency(),
+                  implied / double(chrono::Clock::guest_tick_frequency()));
+    }).detach();
+  }
   chrono::Clock::set_guest_system_time_base(chrono::Clock::QueryHostSystemTime());
   chrono::Clock::set_guest_time_scalar(1.0);
 

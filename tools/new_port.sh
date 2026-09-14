@@ -64,7 +64,8 @@ echo "==> config, tooling and scripts"
 cp "$SDK/tools/port_profile.toml" "$PROJECT_ROOT/config/$NAME.toml"
 cp "$SDK/tools/content_zip.sh" "$SDK/tools/port_check.py" "$SDK/tools/port_doctor.sh" "$PROJECT_ROOT/tools/"
 for script in headless_play measure; do
-  sed "s|@TITLE@|$NAME|g" "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
+  sed -e "s|@TITLE@|$NAME|g" -e "s|@SDK_LIB@|$SDK/out/install/linux-amd64/lib|g" \
+    "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
   chmod +x "$PROJECT_ROOT/tools/$script.sh"
 done
 

@@ -356,6 +356,22 @@ uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
 }
 
 void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  // Trace every write to one float constant register, with its value and the
+  // call site's view of it. A constant that ends up wrong at draw time is
+  // either written wrong or written right and then clobbered, and only the
+  // sequence of writes tells those apart.
+  if (REXCVAR_GET(trace_float_constant) >= 0) {
+    uint32_t traced = uint32_t(REXCVAR_GET(trace_float_constant));
+    uint32_t first = XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * traced;
+    if (index + 8 >= first && index < first + 12) {
+      float as_float;
+      std::memcpy(&as_float, &value, sizeof(as_float));
+      uint32_t constant = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+      REXLOG_INFO("[constwrite] reg={} c{}.{} = {:.4f}", index, constant,
+                  "xyzw"[(index - XE_GPU_REG_SHADER_CONSTANT_000_X) & 3], as_float);
+    }
+  }
+
   RegisterFile& regs = *register_file_;
 
   if (index >= RegisterFile::kRegisterCount) {
@@ -509,6 +525,15 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
 void CommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                              uint32_t num_registers) {
+  if (REXCVAR_GET(trace_float_constant) >= 0) {
+    uint32_t traced =
+        XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * uint32_t(REXCVAR_GET(trace_float_constant));
+    if (start_index <= traced + 3 && start_index + num_registers > traced) {
+      REXLOG_INFO("[constrange] start={} count={} (covers c{} regs {}..{})", start_index,
+                  num_registers, REXCVAR_GET(trace_float_constant), start_index,
+                  start_index + num_registers - 1);
+    }
+  }
   for (uint32_t i = 0; i < num_registers; ++i) {
     uint32_t data = memory::load_and_swap<uint32_t>(base + i);
     WriteRegister(start_index + i, data);

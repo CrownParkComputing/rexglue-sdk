@@ -29,6 +29,13 @@ REXCVAR_DEFINE_STRING(dump_textures, "", "GPU",
                       "Directory to dump each bound texture's guest bytes to, untiled into linear "
                       "order. Answers whether a colour fault is in the title's data or in our "
                       "reading of it.");
+REXCVAR_DEFINE_INT32(trace_float_constant, -1, "GPU",
+                     "Log every write to this float constant register (-1 = off).");
+REXCVAR_DEFINE_UINT32(log_draw_texture, 0, "GPU",
+                      "Log every draw that binds this texture base address, with its constants.");
+REXCVAR_DEFINE_BOOL(log_draw_shaders, false, "GPU",
+                    "Log each distinct (pixel shader, bound texture set) pair drawn. Links a "
+                    "texture to the shader that draws it, which no other log does.");
 REXCVAR_DEFINE_BOOL(log_texture_swizzles, false, "GPU",
                     "Log each distinct (texture, component swizzle) pair bound. The swizzle is not "
                     "part of the texture key, so it is absent from every other texture log - and it "

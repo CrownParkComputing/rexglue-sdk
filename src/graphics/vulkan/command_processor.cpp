@@ -3890,6 +3890,69 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return false;
   };
 
+  // Which pixel shader draws a given texture is the link no existing log
+  // makes, and it is the one a "this element is the wrong colour" bug needs:
+  // the texture tells you what was drawn, the shader tells you how. Logged once
+  // per distinct (pixel shader, texture set) so a whole run stays greppable.
+  if (REXCVAR_GET(log_draw_shaders) || REXCVAR_GET(log_draw_texture)) {
+    uint32_t bases[32];
+    size_t base_count = 0;
+    for (uint32_t i = 0; i < 32 && base_count < 32; ++i) {
+      xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(i);
+      if (fetch.type == xenos::FetchConstantType::kTexture && fetch.base_address) {
+        bases[base_count++] = fetch.base_address << 12;
+      }
+    }
+    uint64_t ps_hash = active_pixel_shader() ? active_pixel_shader()->ucode_data_hash() : 0;
+    uint64_t signature = ps_hash;
+    for (size_t i = 0; i < base_count; ++i) {
+      signature = signature * 1099511628211ull ^ bases[i];
+    }
+    static std::mutex seen_mutex;
+    static std::set<uint64_t> seen;
+    bool is_new;
+    {
+      std::lock_guard<std::mutex> lock(seen_mutex);
+      is_new = seen.insert(signature).second;
+    }
+    // Deduplicating hides how a value moves between draws, which is exactly
+    // what a constant that looks half-written needs. Tracing a constant turns
+    // the dedup off.
+    if (REXCVAR_GET(trace_float_constant) >= 0) {
+      is_new = true;
+    }
+    // Narrow the log to the draws that use one texture, and log every one of
+    // them. Deduplicating hides how a constant moves between draws, and logging
+    // everything slows the title enough to change what it does.
+    uint32_t only = REXCVAR_GET(log_draw_texture);
+    if (only) {
+      is_new = false;
+      for (size_t i = 0; i < base_count; ++i) {
+        if (bases[i] == only) {
+          is_new = true;
+          break;
+        }
+      }
+    }
+    if (is_new) {
+      std::string texture_list;
+      for (size_t i = 0; i < base_count; ++i) {
+        texture_list += fmt::format("{}{:08X}", i ? "," : "", bases[i]);
+      }
+      // A shader whose only work is "texture times a constant" puts the whole
+      // colour question in that constant, so print the first few alongside.
+      std::string constants;
+      for (uint32_t c = 0; c < 4; ++c) {
+        const float* v =
+            reinterpret_cast<const float*>(&regs[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * c]);
+        constants += fmt::format(" c{}=({:.3f},{:.3f},{:.3f},{:.3f})", c, v[0], v[1], v[2], v[3]);
+      }
+      REXLOG_INFO("[drawshader] ps={:016X} vs={:016X} prim={} indices={} textures=[{}]{}", ps_hash,
+                  active_vertex_shader() ? active_vertex_shader()->ucode_data_hash() : 0,
+                  uint32_t(prim_type), index_count, texture_list, constants);
+    }
+  }
+
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
   if (edram_mode == xenos::EdramMode::kCopy) {
     // Diagnostic: a resolve whose RB_COPY_CONTROL/RB_COPY_DEST_INFO are entirely

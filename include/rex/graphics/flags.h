@@ -19,6 +19,9 @@ REXCVAR_DECLARE(bool, clear_memory_page_state);
 REXCVAR_DECLARE(bool, half_pixel_offset);
 REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(bool, log_texture_swizzles);
+REXCVAR_DECLARE(bool, log_draw_shaders);
+REXCVAR_DECLARE(uint32_t, log_draw_texture);
+REXCVAR_DECLARE(int32_t, trace_float_constant);
 REXCVAR_DECLARE(std::string, dump_textures);
 
 // GPU Resolution / Readback / Queries

@@ -14,6 +14,12 @@ SLUG="$1"; APP_NAME="$2"; LIBMAIN="$3"; SDK_LIBS="$4"; OUT_APK="$5"
 # has to be handed to it here. Space-separated, e.g.
 #   EXTRA_ARGS="--clear_memory_page_state=true --render_target_path_vulkan=fsi"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+# Which GPU backend(s) to ship. "xenos" is full Xenos emulation and is what
+# renders correctly today; "native" translates to real GPU commands with no
+# EDRAM, tiling or resolve emulation. Space-separated to ship both and choose
+# at runtime with --gpu_plugin.
+GPU_PLUGINS="${GPU_PLUGINS:-xenos}"
+GPU_PLUGIN_DEFAULT="${GPU_PLUGINS%% *}"   # the activity asks for the first one
 PACKAGE="com.crownpark.rexglue.${SLUG}"
 
 SDK_ROOT="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -32,7 +38,7 @@ mkdir -p "$WORK/lib/arm64-v8a" "$WORK/classes" "$WORK/res"
 mkdir -p "$WORK/src/${PACKAGE//./\/}"
 EXTRA_JAVA=""
 for a in $EXTRA_ARGS; do
-    EXTRA_JAVA="${EXTRA_JAVA}            \"${a}\",
+    EXTRA_JAVA="${EXTRA_JAVA}        args.add(\"${a}\");
 "
 done
 cat > "$WORK/src/${PACKAGE//./\/}/MainActivity.java" <<JAVA
@@ -48,7 +54,7 @@ public class MainActivity extends SDLActivity {
     // game tree is pushed to files/game and the profile written to files/user.
     @Override protected String[] getArguments() {
         String files = getExternalFilesDir(null).getAbsolutePath();
-        return new String[] {
+        java.util.ArrayList<String> args = new java.util.ArrayList<>(java.util.Arrays.asList(
             "--game_data_root=" + files + "/game",
             "--user_data_root=" + files + "/user",
             // Logging starts before SDL does, so the runtime cannot ask Android
@@ -59,9 +65,29 @@ public class MainActivity extends SDLActivity {
             // Without this no GPU emulation is loaded at all and every Vd*
             // call is ignored: the title runs, draws nothing, and says so only
             // in warnings.
-            "--gpu_plugin", "xenos",
-            "--license_mask=1",
-${EXTRA_JAVA}        };
+            "--gpu_plugin", "${GPU_PLUGIN_DEFAULT}",
+            "--license_mask=1"
+        ));
+${EXTRA_JAVA}
+        // Anything in files/rexglue.args (one per line, # for comments) is
+        // appended, so a setting can be changed on the device instead of
+        // rebuilding and reinstalling to try one flag. Later arguments win.
+        try {
+            java.io.File extra = new java.io.File(files, "rexglue.args");
+            if (extra.isFile()) {
+                java.io.BufferedReader r =
+                    new java.io.BufferedReader(new java.io.FileReader(extra));
+                String line;
+                while ((line = r.readLine()) != null) {
+                    line = line.trim();
+                    if (!line.isEmpty() && !line.startsWith("#")) { args.add(line); }
+                }
+                r.close();
+            }
+        } catch (java.io.IOException e) {
+            android.util.Log.e("rexglue", "could not read rexglue.args", e);
+        }
+        return args.toArray(new String[0]);
     }
 }
 JAVA
@@ -107,7 +133,11 @@ echo "==> native libraries"
 # Stripped: the debug symbols are several hundred MB and the device does not
 # need them. The unstripped copies stay in the build tree for symbolising.
 STRIP="$(ls "$SDK_ROOT"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip | sort -V | tail -1)"
-for so in "$LIBMAIN" "$SDK_LIBS"/librexruntime.so "$SDK_LIBS"/librexgpu-xenos.so; do
+PLUGIN_SOS=""
+for plugin in $GPU_PLUGINS; do
+    PLUGIN_SOS="$PLUGIN_SOS $SDK_LIBS/librexgpu-${plugin}.so"
+done
+for so in "$LIBMAIN" "$SDK_LIBS"/librexruntime.so $PLUGIN_SOS; do
     cp "$so" "$WORK/lib/arm64-v8a/"
     "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$(basename "$so")"
 done
@@ -133,8 +163,11 @@ fi
 
 # Prove the APK actually contains what it must. A missing dex or library
 # installs perfectly happily and then fails on launch.
-for required in classes.dex lib/arm64-v8a/libmain.so lib/arm64-v8a/librexruntime.so \
-                lib/arm64-v8a/librexgpu-xenos.so; do
+REQUIRED="classes.dex lib/arm64-v8a/libmain.so lib/arm64-v8a/librexruntime.so"
+for plugin in $GPU_PLUGINS; do
+    REQUIRED="$REQUIRED lib/arm64-v8a/librexgpu-${plugin}.so"
+done
+for required in $REQUIRED; do
     unzip -l "$OUT_APK" | grep -q " $required\$" \
         || { echo "APK is missing $required" >&2; exit 1; }
 done

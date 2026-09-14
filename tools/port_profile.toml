@@ -5,6 +5,15 @@
 #
 # Order to turn things off if a title misbehaves: gpu_hot_page_frames first,
 # then clear_memory_page_state, then render_target_path_vulkan.
+#
+# Two of these are performance settings bought at the price of correctness, and
+# the symptom when the price comes due is NOT obvious - on Hydro Thunder it was
+# reported as "red flashing" and turned out to be texture corruption in the
+# Xenos tile pattern. Before assuming a rendering bug in the SDK, capture an
+# actual bad frame and put these back to their safe values:
+#   clear_memory_page_state = true, gpu_hot_page_frames = 0.
+# tools/port_check.py catches the codegen-level problems; these are the two
+# runtime ones that keep recurring.
 
 # BRING-UP ONLY. Log an indirect-call target that was never recompiled and
 # return 0 rather than aborting, so the first run surfaces the whole
@@ -16,7 +25,10 @@ unregistered_function_nonfatal = true
 gpu_allow_invalid_fetch_constants = true
 
 # Async pipeline compilation skips presents and draws untextured placeholders on
-# every title tried so far. Compile synchronously and answer the hitches with a
+# every title tried so far - on Hydro Thunder that reads as flashing, and it was
+# briefly mistaken for a rendering bug. It is also usually unnecessary: once the
+# driver pipeline cache is warm the "compilations" are cache hits, so play
+# through once before concluding a title needs it. Compile synchronously and answer the hitches with a
 # warm cache instead: play through the content, then point
 # shader_storage_seed_root at a directory of the resulting shareable cache files
 # so a fresh install starts with its pipelines already built.
@@ -29,7 +41,13 @@ async_shader_compilation = false
 # pair of frames from one spot on both paths before believing either.
 render_target_path_vulkan = "host"
 
-# Do not wipe shared-memory page-valid state at every frame end. With it on (the
+# SAFETY vs SPEED. Do not wipe shared-memory page-valid state at every frame end.
+# Hydro Thunder needed this back ON: with it off, textures intermittently render
+# as blocky tile-pattern garbage - orange/magenta over the sky, striped green
+# over the water - because the GPU changed pages we then read as if unchanged.
+# 247 frames sampled after turning it on, zero corrupted, against a peak
+# red:blue of 4.95 before. If a title shows ANY intermittent texture or
+# geometry corruption, this is the first thing to put back to true. With it on (the
 # SDK default) every page the CPU uploaded loses its valid bit each frame, so
 # the whole CPU-visible working set is re-uploaded next frame - measured at
 # ~190 MB per two seconds for ~1 MB of actual guest writes. Worth 2.9 -> 10 FPS
@@ -53,3 +71,21 @@ gpu_hot_page_frames = 3
 # into an ImGui popup while the game owns the keyboard is awkward. Set it to the
 # name the profile should have; empty (the default) shows the dialog.
 # keyboard_text = "PLAYER"
+
+# Audio needs no per-title setting. The mixer callback is paced evenly at
+# 187.5 Hz by the runtime (--audio_pace_callback, on by default). Before that,
+# calls arrived in clumps - the device releases a credit per frame consumed and
+# consumes several at once - and any title whose mixer paces itself on elapsed
+# time advanced once per clump and repeated the rest, which sounds slow and
+# robotic. If a title still sounds wrong, REX_AUDIO_STATS=1 reports the callback
+# spacing, queue depth and repeat rate, and --audio_dump_wav / --audio_dump_out_wav
+# capture both ends of the pipeline so the guest and the output stage can be
+# told apart.
+
+# Useful during bring-up, not shipped:
+#   --skip_movies=<substring>   refuse to open matching .bik so the title skips
+#                               them; every movie opened is logged as [movie].
+#   --guest_watch=<addr>:<len>  report changes to a guest structure and name the
+#                               guest code that wrote them.
+#   --guest_wait_report_seconds=N   list guest kernel waits still outstanding,
+#                               which names a deadlock in one line.

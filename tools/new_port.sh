@@ -62,7 +62,7 @@ sed -i "s|$PROJECT_ROOT/assets|assets|g" "$PROJECT_ROOT/${NAME}_manifest.toml"
 
 echo "==> config, tooling and scripts"
 cp "$SDK/tools/port_profile.toml" "$PROJECT_ROOT/config/$NAME.toml"
-cp "$SDK/tools/content_zip.sh" "$PROJECT_ROOT/tools/"
+cp "$SDK/tools/content_zip.sh" "$SDK/tools/port_check.py" "$PROJECT_ROOT/tools/"
 for script in headless_play measure; do
   sed "s|@TITLE@|$NAME|g" "$SDK/tools/$script.sh.in" > "$PROJECT_ROOT/tools/$script.sh"
   chmod +x "$PROJECT_ROOT/tools/$script.sh"
@@ -179,6 +179,20 @@ README
 # PPCImageConfig. The build's own codegen step then writes the files too late.
 echo "==> generating guest code"
 (cd "$PROJECT_ROOT" && "$REXGLUE" codegen | tail -2)
+
+# Check the output before anyone spends minutes compiling it or hours playing
+# it. Both of the expensive failures on previous conversions are visible here:
+# a function the scanner split so the halves branch into each other (does not
+# compile, found after a four minute build) and a call to an address codegen
+# never emitted (compiles fine, then kills the title the first time that path
+# runs). A non-zero exit prints the manifest lines to paste.
+echo "==> checking generated code"
+if ! "$PROJECT_ROOT/tools/port_check.py" "$PROJECT_ROOT"; then
+  echo
+  echo "Add those lines to ${NAME}_manifest.toml, re-run:"
+  echo "  $REXGLUE codegen ${NAME}_manifest.toml"
+  echo "and check again before building."
+fi
 
 if [ "$PACK" = 1 ]; then
   echo "==> packing content into one zip"

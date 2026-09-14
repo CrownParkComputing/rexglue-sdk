@@ -28,7 +28,10 @@
 #include <rex/ui/flags.h>
 #include <rex/ui/sdl_virtual_key.h>
 
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_ANDROID
+// Must precede the generic Linux branch: Android is Linux, but it has no Xlib.
+#include <rex/ui/surface_android.h>
+#elif REX_PLATFORM_WIN32
 #include <rex/ui/surface_win.h>
 #elif REX_PLATFORM_MAC
 #include <CoreFoundation/CoreFoundation.h>
@@ -376,7 +379,18 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
   if (!sdl_window_) {
     return nullptr;
   }
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_ANDROID
+  if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {
+    // SDL owns the ANativeWindow on Android; it hands it over as a window
+    // property rather than the app creating one.
+    SDL_PropertiesID android_props = SDL_GetWindowProperties(sdl_window_);
+    auto* native_window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
+        android_props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+    if (native_window) {
+      return std::make_unique<AndroidNativeWindowSurface>(native_window, sdl_window_);
+    }
+  }
+#elif REX_PLATFORM_WIN32
   SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
   if (allowed_types & Surface::kTypeFlag_Win32Hwnd) {
     HWND hwnd = static_cast<HWND>(

@@ -343,8 +343,12 @@ void MultiWaitStatsTick() {
 class PosixConditionBase {
  public:
   PosixConditionBase() {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
     // Use robust mutexes so waits can recover if owner thread terminates.
+    // Bionic has no PTHREAD_MUTEX_ROBUST and no pthread_mutex_consistent, so on
+    // Android the mutex stays a plain one: a thread dying while holding it
+    // leaves it locked rather than recoverable. That is the same behaviour as
+    // Windows and macOS here, not an Android-only regression.
     pthread_mutexattr_t attr;
     if (pthread_mutexattr_init(&attr) == 0) {
       if (pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST) == 0) {
@@ -393,7 +397,7 @@ class PosixConditionBase {
     // not satisfied and it goes straight back to sleep. See signaled_for().
     const uint64_t ticket = next_ticket_++;
     auto predicate = [this, ticket] { return this->signaled_for(ticket); };
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
     int lock_result = pthread_mutex_lock(native_mutex);
     if (lock_result == EOWNERDEAD) {
@@ -495,7 +499,7 @@ class PosixConditionBase {
       locks.reserve(handles.size());
 
       for (size_t i = 0; i < handles.size(); ++i) {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
         if (result == 0 || result == EOWNERDEAD) {

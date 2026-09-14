@@ -158,6 +158,18 @@ if(WIN32)
         message(FATAL_ERROR "Unsupported Windows architecture: ${REX_TARGET_PROCESSOR}")
     endif()
     add_compile_definitions(REX_PLATFORM_WINDOWS=1)
+elseif(ANDROID)
+    # Android is Linux, so it must be tested BEFORE the generic UNIX branch -
+    # otherwise it is named linux-arm64 and picks up the desktop windowing
+    # sources and host X11/Wayland packages, which configure cleanly and then
+    # fail at link with errors that read like a broken sysroot.
+    set(REX_PLATFORM "android-${CMAKE_ANDROID_ARCH_ABI}")
+    add_compile_definitions(REX_PLATFORM_LINUX=1)
+    # The NDK's libc++ defines _LIBCPP_HAS_NO_EXPERIMENTAL_STOP_TOKEN, so
+    # std::jthread and std::stop_token - which timer_queue.cpp is written
+    # against - are absent until the experimental library is enabled.
+    add_compile_options(-fexperimental-library)
+    add_link_options(-fexperimental-library)
 elseif(UNIX AND NOT APPLE)
     if(REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
         set(REX_PLATFORM "linux-amd64")

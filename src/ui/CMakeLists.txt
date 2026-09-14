@@ -64,7 +64,11 @@ if(REXGLUE_USE_D3D12)
 endif()
 
 # Platform-specific sources (windowing itself is SDL3, platform-independent)
-if(WIN32)
+if(ANDROID)
+    set(REXUI_PLATFORM_SOURCES
+        surface_android.cpp
+    )
+elseif(WIN32)
     set(REXUI_PLATFORM_SOURCES
         surface_win.cpp
     )
@@ -146,7 +150,13 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 # Platform-specific dependencies
-if(UNIX AND NOT APPLE)
+if(ANDROID)
+    # No X11 or Wayland here: the window comes from the Android native window,
+    # and vulkan/api.h only reaches for <wayland-client.h> on a desktop Linux
+    # build. Searching for them with pkg-config finds the HOST packages and
+    # silently cross-links desktop libraries into an arm64 target.
+    target_link_libraries(rexui PUBLIC android)
+elseif(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
     # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every

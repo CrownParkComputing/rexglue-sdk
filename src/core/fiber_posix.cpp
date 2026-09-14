@@ -17,7 +17,48 @@
 #endif
 
 #include <rex/platform.h>
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+
+#if REX_PLATFORM_ANDROID
+
+// Bionic has no getcontext/makecontext/swapcontext, so this backend cannot be
+// built for Android. These only implement the GUEST's CreateFiber/SwitchToFiber
+// kernel APIs, which a title has to import to reach - none of the titles ported
+// so far do. So rather than write an arm64 context switcher for something
+// nothing calls, the entry points stay and refuse: a title that genuinely uses
+// guest fibers gets a clear failure at the call instead of a link error for
+// everyone else.
+
+#include <rex/logging.h>
+#include <rex/thread/fiber.h>
+
+namespace rex::thread {
+
+thread_local Fiber* Fiber::tls_current_ = nullptr;
+
+namespace {
+void ReportUnsupported() {
+  REXLOG_ERROR(
+      "This title uses guest fibers (CreateFiber/SwitchToFiber). The POSIX "
+      "fiber backend needs ucontext, which Android's libc does not provide, so "
+      "an arm64 context switcher has to be written before this title can run "
+      "here.");
+}
+}  // namespace
+
+Fiber* Fiber::ConvertCurrentThread() {
+  ReportUnsupported();
+  return nullptr;
+}
+Fiber* Fiber::Create(size_t, void (*)(void*), void*) {
+  ReportUnsupported();
+  return nullptr;
+}
+void Fiber::SwitchTo(Fiber*) { ReportUnsupported(); }
+void Fiber::Destroy() {}
+
+}  // namespace rex::thread
+
+#elif REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 
 #include <rex/thread/fiber.h>
 

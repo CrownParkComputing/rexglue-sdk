@@ -40,9 +40,23 @@ PPCFunc* ResolveIndirectFunction(uint32_t guest_address);
 #define REX_JOIN(x, y) x##y
 #define REX_XSTRINGIFY(x) #x
 #define REX_STRINGIFY(x) REX_XSTRINGIFY(x)
+// GNU ld's DLL auto-export deliberately skips every symbol whose name starts
+// with "__imp_", because on PE that prefix names an import thunk. ReXGlue's
+// kernel hooks are all called __imp__<Export>, so on a MinGW build the runtime
+// DLL would export none of them and every title would fail to link. An
+// explicit dllexport is honoured regardless of that filter, so mark the
+// definitions while the runtime itself is being compiled. Inert everywhere
+// else, including in titles that use the same macro for their own functions.
+#if defined(_WIN32) && defined(rexruntime_EXPORTS)
+#define REX_FUNC_LINKAGE __declspec(dllexport)
+#else
+#define REX_FUNC_LINKAGE
+#endif
+
 // REX_FUNC is the bare signature; the declaring site supplies linkage, either
 // by writing extern "C" itself or by using REX_EXTERN.
-#define REX_FUNC(x) void x([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
+#define REX_FUNC(x) \
+  REX_FUNC_LINKAGE void x([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
 #define REX_EXTERN(x) extern "C" REX_FUNC(x)
 
 //=============================================================================

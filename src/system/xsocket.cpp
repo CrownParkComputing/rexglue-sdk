@@ -21,9 +21,9 @@
 
 // Standard socket types used by Xbox API emulation
 #if REX_PLATFORM_WIN32
-#include <WinSock2.h>
+#include <winsock2.h>
 
-#include <WS2tcpip.h>
+#include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>

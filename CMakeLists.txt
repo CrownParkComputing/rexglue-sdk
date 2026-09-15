@@ -128,6 +128,16 @@ if(NOT WIN32)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# The SSE level the sources actually assume. src/core/memory.cpp uses
+# _mm_shuffle_epi8 (SSSE3) for the byte-swapping copies, and recomp targets ask
+# for SSE4.1 separately. This builds on Linux only because the toolchain here
+# defaults to a higher baseline than plain x86-64 - a cross-build to Windows
+# gets the bare baseline and fails on an always_inline intrinsic, which reads
+# as a compiler bug rather than a missing flag.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
+    add_compile_options(-mssse3 -msse4.1)
+endif()
+
 # Global compile options
 add_compile_options(
     -fno-strict-aliasing

@@ -110,6 +110,13 @@ if(WIN32)
     target_link_libraries(rexruntime PRIVATE ws2_32)
     target_link_libraries(rexruntime PUBLIC dxgi dxguid)
     target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MINGW)
+        # The kernel hooks carry an explicit dllexport (see REX_FUNC_LINKAGE in
+        # rex/ppc/func.h), because ld's auto-export skips every "__imp_" name.
+        # Any explicit export switches ld out of auto-export mode entirely, so
+        # ask for it back or the plugins lose the rest of the runtime's API.
+        target_link_options(rexruntime PRIVATE -Wl,--export-all-symbols)
+    endif()
 endif()
 
 if(REXGLUE_USE_D3D12)

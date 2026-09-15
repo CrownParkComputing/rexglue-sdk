@@ -56,11 +56,20 @@ void raise_thread_name_exception(HANDLE thread, const std::string& name) {
   info.szName = name.c_str();
   info.dwThreadID = ::GetThreadId(thread);
   info.dwFlags = 0;
+#if defined(_MSC_VER)
   __try {
     RaiseException(0x406D1388, 0, sizeof(info) / sizeof(ULONG_PTR),
                    reinterpret_cast<ULONG_PTR*>(&info));
   } __except (EXCEPTION_EXECUTE_HANDLER) {  // NOLINT
   }
+#else
+  // MSVC's SEH has no equivalent in a MinGW/clang toolchain. This is the legacy
+  // way of naming a thread - raise an exception a debugger recognises - and it
+  // only runs when one is attached. set_thread_name_impl below uses
+  // SetThreadDescription, which every debugger worth the name reads and which
+  // works without one, so a cross-build simply does not raise it.
+  (void)info;
+#endif
 }
 
 static void set_thread_name_impl(HANDLE thread, const std::string_view name) {

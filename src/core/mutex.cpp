@@ -12,8 +12,14 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string>
-#include <dlfcn.h>
+#include <rex/platform.h>
+#if !REX_PLATFORM_WIN32
+// Used only to turn a return address into a symbol name in the lock-wait
+// report. Neither exists in a Windows toolchain, so that report falls back to
+// the raw address there rather than the whole file failing to compile.
 #include <cxxabi.h>
+#include <dlfcn.h>
+#endif
 #include <map>
 #include <vector>
 #include <chrono>
@@ -59,6 +65,7 @@ void GlobalLockWatch::Report(const void* blocker, int64_t microseconds) {
     // a reader needs; without it this is a hex address in a shared library at a
     // randomised base.
     std::string where = fmt::format("{}", fmt::ptr(ranked[i].first));
+#if !REX_PLATFORM_WIN32
     Dl_info info;
     if (ranked[i].first && dladdr(ranked[i].first, &info) && info.dli_sname) {
       int status = 0;
@@ -67,6 +74,7 @@ void GlobalLockWatch::Report(const void* blocker, int64_t microseconds) {
                           uintptr_t(ranked[i].first) - uintptr_t(info.dli_saddr));
       std::free(demangled);
     }
+#endif
     REXLOG_WARN("[LOCKWAIT]   {} waits, {} ms total - {}", ranked[i].second.waits,
                 ranked[i].second.total_microseconds / 1000, where);
   }

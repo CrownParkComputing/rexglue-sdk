@@ -101,6 +101,13 @@ function(rexglue_configure_target target_name)
 
     rexglue_apply_target_settings(${target_name})
 
+    if(MINGW)
+        # The entry point is wWinMain (UTF-16 argv). MSVC picks that up on its
+        # own; MinGW only links wWinMainCRTStartup when asked with -municode,
+        # and without it the CRT goes looking for a WinMain that does not exist.
+        target_link_options(${target_name} PRIVATE -municode)
+    endif()
+
     if(WIN32)
         # Stage runtime DLLs (rexruntime, TracyClient, etc.) next to the host
         # binary on every link. copy_if_different is a no-op when up to date.

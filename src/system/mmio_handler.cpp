@@ -15,7 +15,10 @@
 #include <set>
 #include <utility>
 
+#include <rex/platform.h>
+#if !REX_PLATFORM_WIN32
 #include <dlfcn.h>
+#endif
 
 #include <rex/assert.h>
 #include <rex/exception_handler.h>
@@ -497,6 +500,7 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
             "r11 {:#010x}",
             guest_lr, guest_r3, guest_r4, guest_r5, guest_r10, guest_r11);
 
+#if !REX_PLATFORM_WIN32
         Dl_info info{};
         if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname) {
           REXLOG_ERROR(
@@ -517,6 +521,12 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
               host_to_guest_virtual_(host_to_guest_virtual_context_, fault_host_address),
               is_write ? "write" : "read");
         }
+#else
+        REXLOG_ERROR(
+            "Access violation at host pc {:016X}, guest address {:08X}, {}", pc,
+            host_to_guest_virtual_(host_to_guest_virtual_context_, fault_host_address),
+            is_write ? "write" : "read");
+#endif
       }
     }
     return false;

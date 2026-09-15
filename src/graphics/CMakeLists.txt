@@ -106,6 +106,13 @@ set_target_properties(rexgpu-xenos PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON
 )
 
+# The loader asks for "rexgpu-<name>.dll" on Windows (gpu_plugin_loader.cpp),
+# but MinGW would name it librexgpu-<name>.dll. Drop the prefix so the two
+# agree; MSVC already emits no prefix.
+if(WIN32)
+    set_target_properties(rexgpu-xenos PROPERTIES PREFIX "")
+endif()
+
 target_include_directories(rexgpu-xenos PRIVATE
     ${REXGLUE_ROOT}/thirdparty/renderdoc
     ${REXGLUE_ROOT}  # For thirdparty/dxbc/DXBCChecksum.h include
@@ -222,6 +229,13 @@ if(REXGLUE_USE_VULKAN)
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON
     )
+
+    # The loader asks for "rexgpu-<name>.dll" on Windows (gpu_plugin_loader.cpp),
+    # but MinGW would name it librexgpu-<name>.dll. Drop the prefix so the two
+    # agree; MSVC already emits no prefix.
+    if(WIN32)
+        set_target_properties(rexgpu-native PROPERTIES PREFIX "")
+    endif()
 
     target_include_directories(rexgpu-native PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

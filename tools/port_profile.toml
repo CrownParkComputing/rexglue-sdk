@@ -89,3 +89,11 @@ gpu_hot_page_frames = 3
 #                               guest code that wrote them.
 #   --guest_wait_report_seconds=N   list guest kernel waits still outstanding,
 #                               which names a deadlock in one line.
+
+# Answer the system prompts with their default and draw no dialog. Without
+# this, a title that asks the guide to confirm something - After Burner Climax
+# does it the moment you press Start - gets ReXGlue's own ImGui message box
+# over the game, and ReXGlue's theme is green, so it reads as a green box
+# appearing from nowhere. There is exactly one local profile and one storage
+# device here, so the prompt has no real choice in it to make.
+headless = true

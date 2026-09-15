@@ -27,7 +27,11 @@ BUILD_TOOLS="$(ls -d "$SDK_ROOT"/build-tools/* | sort -V | tail -1)"
 PLATFORM_JAR="$(ls -d "$SDK_ROOT"/platforms/android-* | sort -V | tail -1)/android.jar"
 SDL_JAVA="${REXSDK_DIR:-/home/jon/rexglue-vmx}/thirdparty/sdl3/android-project/app/src/main/java"
 
-WORK="$(mktemp -d)"
+# Staged beside the output APK, not in /tmp: the unstripped libraries are a
+# few hundred MB and /tmp here is a 16 GB tmpfs shared with everything else.
+# Filling it makes the NDK's clang report "IO failure on output stream", which
+# reads as a compiler fault and is not one.
+WORK="$(mktemp -d "$(dirname "$OUT_APK")/.package.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/lib/arm64-v8a" "$WORK/classes" "$WORK/res"
 
@@ -103,7 +107,13 @@ cat > "$WORK/AndroidManifest.xml" <<MANIFEST
                  android:allowBackup="false"
                  android:extractNativeLibs="true"
                  android:debuggable="true">
+        <!-- The title bar belongs to the ACTIVITY, not to SDL. The fullscreen
+             cvar only affects the SDL window, so without this theme the app
+             draws under a bar showing the window title and build string.
+             (An XML comment may not contain a double hyphen, so cvars are
+             named without their leading dashes here.) -->
         <activity android:name=".MainActivity"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
                   android:exported="true"
                   android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
                   android:launchMode="singleInstance"

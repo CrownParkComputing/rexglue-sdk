@@ -412,8 +412,17 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
-  if (!regs.GetRegisterInfo(index)) {
-    REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
+  // GetRegisterInfo is a switch over 3,443 cases, and this is the hottest path
+  // in the GPU thread - every register the guest writes comes through here. The
+  // lookup's only purpose is to name a register nobody recognises in a DEBUG
+  // line, so asking for it before knowing whether that line will be emitted
+  // costs a table walk per register write and throws the answer away. Measured
+  // at 2.7% of total process time on SoulCalibur II.
+  {
+    auto* gpu_log = ::rex::GetLoggerRaw(::rex::log::gpu());
+    if (gpu_log && gpu_log->should_log(spdlog::level::debug) && !regs.GetRegisterInfo(index)) {
+      REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
+    }
   }
 
   // Scratch register writeback.

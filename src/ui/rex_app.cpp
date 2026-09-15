@@ -47,6 +47,14 @@
 #include <filesystem>
 #include <string_view>
 
+REXCVAR_DEFINE_STRING(
+    window_title, "", "UI",
+    "Text for the window title bar. Empty (the default) uses the title's own name. A bundle that "
+    "ships to someone else wants the game's real name here, not the project slug.");
+REXCVAR_DEFINE_BOOL(
+    window_title_build_stamp, false, "UI",
+    "Append the SDK build stamp to the window title. Useful while bringing a title up and telling "
+    "two builds apart; noise in anything handed to a player, so off by default.");
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
@@ -361,8 +369,12 @@ bool ReXApp::SetupPresentation() {
     return false;
   }
 
-  // Set window title with SDK build stamp
-  std::string title = std::string(GetName()) + " " + REXGLUE_BUILD_TITLE;
+  const std::string& configured_title = REXCVAR_GET(window_title);
+  std::string title = configured_title.empty() ? std::string(GetName()) : configured_title;
+  if (REXCVAR_GET(window_title_build_stamp)) {
+    title += " ";
+    title += REXGLUE_BUILD_TITLE;
+  }
   window_->SetTitle(title);
 
   window_->AddListener(this);

@@ -51,7 +51,9 @@ set(REXKERNEL_SOURCES
     xboxkrnl/xboxkrnl_strings.cpp
     xboxkrnl/guest_wait_watchdog.cpp
     xboxkrnl/xboxkrnl_threading.cpp
-    # xboxkrnl/xboxkrnl_usbcam.cpp  # TODO: lol eventually.
+    # Jetpac Refuelled imports the Xbox Live Vision camera entry points, so a
+    # title that never uses a camera still fails to link without these.
+    xboxkrnl/xboxkrnl_usbcam.cpp
     xboxkrnl/xboxkrnl_video.cpp
     xboxkrnl/xboxkrnl_xconfig.cpp
     xboxkrnl/xboxkrnl_audio.cpp

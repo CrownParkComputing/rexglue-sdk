@@ -57,7 +57,12 @@ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
       is_new = seen.insert(target).second;
     }
     if (is_new) {
-      REXLOG_ERROR("[UNREGFN] 0x{:08X}", target);
+      // The target alone does not say whether this is a function we failed to
+      // recompile or a pointer the guest never initialised, and those need
+      // opposite fixes. The link register names the caller, which settles it:
+      // read that sub in the generated code and the pointer's origin is there.
+      REXLOG_ERROR("[UNREGFN] 0x{:08X} called from 0x{:08X} (r3={:08X} r4={:08X} r5={:08X})",
+                   target, static_cast<uint32_t>(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
     }
     // Return a null/zero result so callers that null-check the (missing)
     // function's return value take their graceful path instead of dereferencing

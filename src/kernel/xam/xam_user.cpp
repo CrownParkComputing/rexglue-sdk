@@ -66,14 +66,15 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
 }
 
 u32 XamUserGetSigninState_entry(u32 user_index) {
-  uint32_t signin_state = 0;
-  if (user_index < 4) {
-    if (user_index == 0) {
-      const auto& user_profile = REX_KERNEL_STATE()->user_profile();
-      signin_state = user_profile->signin_state();
-    }
+  // XUSER_INDEX_ANY (0xFF) asks "is anyone signed in?" rather than naming a
+  // pad. Answering 0 to that reads as "no profile at all", and a title that
+  // gates on it stops at its own sign-in screen with no way past - Geometry
+  // Wars 3 puts up "YOU MUST BE SIGNED INTO A PROFILE TO PLAY THIS GAME".
+  if (user_index == 0 || (user_index & 0xFF) == 0xFF) {
+    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+    return user_profile->signin_state();
   }
-  return signin_state;
+  return 0;
 }
 
 typedef struct {

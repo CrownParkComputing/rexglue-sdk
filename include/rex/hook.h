@@ -28,6 +28,26 @@
 // Hook Macros
 //=============================================================================
 
+namespace rex {
+// Defined in system/import_trace.cpp. Records an import the first time it runs
+// when REX_TRACE_IMPORTS names an output file; the per-call cost with tracing
+// off is one load of a function-local static and a predictable branch.
+bool ImportTraceEnabled();
+void NoteImportUsed(const char* name);
+}  // namespace rex
+
+// A title's import table says what it might call; this says what it did. That
+// shorter list is the work list for giving one title a native implementation
+// of the kernel surface it actually uses.
+#define REX_TRACE_IMPORT(subroutine_name)      \
+  do {                                         \
+    static bool rex_import_seen_ = false;      \
+    if (!rex_import_seen_) {                   \
+      rex_import_seen_ = true;                 \
+      ::rex::NoteImportUsed(subroutine_name);  \
+    }                                          \
+  } while (0)
+
 // Hook a recompiled function with an auto-marshaled native C++ function.
 // The native function uses plain types (u32, mapped_u32, etc.) and
 // HostToGuestFunction handles register translation automatically.
@@ -36,11 +56,13 @@
 #define REX_HOOK(subroutine, function)                           \
   extern "C" REX_FUNC(subroutine) {                              \
     ZoneNamedN(___tracy_hook_zone, #subroutine, TracyIsStarted); \
+    REX_TRACE_IMPORT(#subroutine);                               \
     rex::ppc::HostToGuestFunction<function>(ctx, base);          \
   }
 #else
 #define REX_HOOK(subroutine, function)                  \
   extern "C" REX_FUNC(subroutine) {                     \
+    REX_TRACE_IMPORT(#subroutine);                      \
     rex::ppc::HostToGuestFunction<function>(ctx, base); \
   }
 #endif
@@ -52,6 +74,7 @@
 #define REX_STUB(subroutine)              \
   extern "C" REX_FUNC(subroutine) {       \
     (void)base;                           \
+    REX_TRACE_IMPORT(#subroutine);        \
     REXKRNL_WARN("{} STUB", #subroutine); \
   }
 
@@ -68,18 +91,48 @@
     ctx.r3.u64 = (value);                                                                 \
   }
 
+// Kernel exports are WEAK definitions. A port that wants to answer one import
+// with its own native code defines the same symbol in its own sources and the
+// strong definition wins, with no SDK edit and no duplicate-symbol error - in a
+// static link as well as a shared one, which is what makes a per-title native
+// kernel possible at all. REX_NATIVE_HOOK in the port is the other half.
+#if defined(_MSC_VER)
+// MSVC has no weak definitions; a port overriding an import there needs
+// /FORCE:MULTIPLE or an SDK edit instead.
+#define REX_WEAK_EXPORT
+#else
+#define REX_WEAK_EXPORT __attribute__((weak))
+#endif
+
 // Export: hook + register in global registry for kernel ordinal lookup.
-#define REX_EXPORT(name, function) \
-  REX_HOOK(name, function)         \
+#define REX_EXPORT(name, function)                                             \
+  extern "C" REX_WEAK_EXPORT REX_FUNC(name) {                                  \
+    REX_TRACE_IMPORT(#name);                                                   \
+    rex::ppc::HostToGuestFunction<function>(ctx, base);                        \
+  }                                                                            \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
-#define REX_EXPORT_STUB(name) \
-  REX_STUB(name)              \
+#define REX_EXPORT_STUB(name)                                                  \
+  extern "C" REX_WEAK_EXPORT REX_FUNC(name) {                                  \
+    (void)base;                                                                \
+    REX_TRACE_IMPORT(#name);                                                   \
+    REXKRNL_WARN("{} STUB", #name);                                            \
+  }                                                                            \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
 
-#define REX_EXPORT_STUB_RETURN(name, retval) \
-  REX_STUB_RETURN(name, retval)              \
+#define REX_EXPORT_STUB_RETURN(name, retval)                                   \
+  extern "C" REX_WEAK_EXPORT REX_FUNC(name) {                                  \
+    (void)base;                                                                \
+    REX_TRACE_IMPORT(#name);                                                   \
+    REXKRNL_WARN("{} STUB - returning {:#x}", #name,                           \
+                 static_cast<uint32_t>(retval));                               \
+    ctx.r3.u64 = (retval);                                                     \
+  }                                                                            \
   static rex::ppc::detail::PPCFuncRegistrar _ppc_reg_##name(#name, &name);
+
+// Author a native replacement for a kernel import in a port. Same signature as
+// REX_HOOK_RAW; the name is the import, e.g. REX_NATIVE_HOOK(__imp__XGetLanguage).
+#define REX_NATIVE_HOOK(name) extern "C" REX_FUNC(name)
 
 namespace rex {
 

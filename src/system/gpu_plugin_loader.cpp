@@ -24,6 +24,12 @@
 
 namespace rex::system {
 
+#if defined(REXGLUE_GPU_BUILTIN)
+// Defined by the GPU backend's plugin_main.cpp, linked into this binary.
+extern "C" uint32_t rex_gpu_abi_version(void);
+extern "C" IGraphicsSystem* rex_gpu_create(uint32_t abi_version, const GpuCreateInfo* info);
+#endif
+
 namespace {
 
 // Plugin binaries follow the SDK's per-config postfix convention; this TU is
@@ -55,6 +61,28 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 }  // namespace
 
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
+#if defined(REXGLUE_GPU_BUILTIN)
+  // The GPU backend is linked into this binary rather than dlopened. A plugin
+  // resolves the runtime's symbols from librexruntime.so, so with a static
+  // runtime there is no library for it to bind to - building it in is what
+  // makes a single self-contained executable possible at all.
+  (void)name;
+  if (rex_gpu_abi_version() != kGpuPluginAbiVersion) {
+    REXSYS_ERROR("built-in GPU backend is ABI {}, host is ABI {}", rex_gpu_abi_version(),
+                 kGpuPluginAbiVersion);
+    return nullptr;
+  }
+  std::string backend_str(backend);
+  GpuCreateInfo info{};
+  info.struct_size = sizeof(GpuCreateInfo);
+  info.backend = backend_str.c_str();
+  IGraphicsSystem* system = rex_gpu_create(kGpuPluginAbiVersion, &info);
+  if (!system) {
+    REXSYS_ERROR("built-in GPU backend failed to create a graphics system");
+    return nullptr;
+  }
+  return std::unique_ptr<IGraphicsSystem>(system);
+#else
 #if REX_PLATFORM_ANDROID
   // There is no folder to sit next to on Android: the executable is
   // /system/bin/app_process and the plugin is in the APK's own native library
@@ -108,6 +136,7 @@ std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::strin
   LoadedPlugins().push_back(std::move(library));
   REXSYS_DEBUG("GPU plugin '{}' loaded ({})", name, path.filename().string());
   return std::unique_ptr<IGraphicsSystem>(graphics_system);
+#endif  // REXGLUE_GPU_BUILTIN
 }
 
 }  // namespace rex::system

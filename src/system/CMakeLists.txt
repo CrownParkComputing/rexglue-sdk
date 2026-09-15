@@ -39,6 +39,7 @@ set(REXSYSTEM_SOURCES
     export_resolver.cpp
     lzx.cpp
     guest_memory_watch.cpp
+    import_trace.cpp
     mmio_handler.cpp
     map_parser.cpp
     module.cpp
@@ -49,10 +50,30 @@ set(REXSYSTEM_SOURCES
     xex_module.cpp
 )
 
-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+# A shared runtime carries every kernel export for every title - 2,866 hooks -
+# because it cannot know which one will load it. Built static instead, with
+# function sections and --gc-sections on the consumer, the linker keeps only the
+# kernel surface the title actually references and the port stops depending on
+# librexruntime at all. Per-title rather than global: the GPU plugins are still
+# dlopened and still need the shared build, so this is an option, not a switch.
+option(REXGLUE_RUNTIME_STATIC "Build rexruntime as a static library" OFF)
+if(REXGLUE_RUNTIME_STATIC)
+    add_library(rexruntime STATIC ${REXSYSTEM_SOURCES})
+    # Each function and variable in its own section, so --gc-sections can drop
+    # the ones nothing reaches.
+    target_compile_options(rexruntime PRIVATE
+        $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang,GNU>:-ffunction-sections;-fdata-sections>)
+else()
+    add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
+endif()
 add_library(rex::runtime ALIAS rexruntime)
 add_library(rex::system ALIAS rexruntime)
 add_library(rex::kernel ALIAS rexruntime)
+
+if(REXGLUE_GPU_BUILTIN)
+    target_compile_definitions(rexruntime PRIVATE REXGLUE_GPU_BUILTIN=1)
+    target_link_libraries(rexruntime PUBLIC rexgpu-xenos)
+endif()
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 

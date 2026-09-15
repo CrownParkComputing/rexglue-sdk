@@ -97,7 +97,17 @@ if(REXGLUE_USE_D3D12)
         ${REXGPU_XENOS_D3D12_SOURCES})
 endif()
 
-add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
+# Built into the title rather than dlopened when the runtime is static: a
+# plugin binds the runtime's symbols from librexruntime.so, and a static build
+# has no such library for it to bind to.
+option(REXGLUE_GPU_BUILTIN "Link the Xenos GPU backend into the title" OFF)
+if(REXGLUE_GPU_BUILTIN)
+    add_library(rexgpu-xenos STATIC ${REXGPU_XENOS_SOURCES})
+    target_compile_options(rexgpu-xenos PRIVATE
+        $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang,GNU>:-ffunction-sections;-fdata-sections>)
+else()
+    add_library(rexgpu-xenos SHARED ${REXGPU_XENOS_SOURCES})
+endif()
 add_library(rex::gpu-xenos ALIAS rexgpu-xenos)
 
 set_target_properties(rexgpu-xenos PROPERTIES

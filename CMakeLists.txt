@@ -313,7 +313,11 @@ message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")
 message(STATUS "===========================================")
 
 # SDK install/export rules (skipped when consumed as a subdirectory)
-if(PROJECT_IS_TOP_LEVEL)
+# Also skipped for a static runtime: static linking makes rexruntime's private
+# dependencies transitive, so exporting it would require exporting rexcore,
+# rexui and the rest as well. That build exists to produce one self-contained
+# title binary, not an installable SDK, so it has no export set to satisfy.
+if(PROJECT_IS_TOP_LEVEL AND NOT REXGLUE_RUNTIME_STATIC)
     include(cmake/rexglue_devenv.cmake)
     include(cmake/rexglue_install.cmake)
 else()

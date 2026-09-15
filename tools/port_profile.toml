@@ -97,3 +97,9 @@ gpu_hot_page_frames = 3
 # appearing from nowhere. There is exactly one local profile and one storage
 # device here, so the prompt has no real choice in it to make.
 headless = true
+
+# The window's name. Empty uses the project slug; set the game's real name here
+# before handing a bundle to anyone. The SDK build stamp is no longer appended
+# by default - window_title_build_stamp = true brings it back while bringing a
+# title up and telling two builds apart.
+window_title = ""

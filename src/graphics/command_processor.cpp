@@ -418,8 +418,12 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // line, so asking for it before knowing whether that line will be emitted
   // costs a table walk per register write and throws the answer away. Measured
   // at 2.7% of total process time on SoulCalibur II.
+  // The logger handle is resolved once rather than per write: looking it up
+  // every time simply swapped one hot lookup for a cheaper one (0.8% of total
+  // on the same profile). The level is still checked on every call, so raising
+  // the log level at runtime still takes effect.
   {
-    auto* gpu_log = ::rex::GetLoggerRaw(::rex::log::gpu());
+    static auto* const gpu_log = ::rex::GetLoggerRaw(::rex::log::gpu());
     if (gpu_log && gpu_log->should_log(spdlog::level::debug) && !regs.GetRegisterInfo(index)) {
       REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
     }

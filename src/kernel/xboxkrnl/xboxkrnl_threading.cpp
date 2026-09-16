@@ -21,6 +21,8 @@
 #include <memory>
 #include <vector>
 
+#include <mutex>
+#include <set>
 #include <rex/chrono/clock.h>
 #include <rex/dbg.h>
 #include <rex/kernel/xboxkrnl/guest_wait_watchdog.h>
@@ -1279,25 +1281,86 @@ void KeInitializeDpc_entry(ppc_ptr_t<XDPC> dpc, mapped_void routine, mapped_void
 }
 
 u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
-  assert_always("DPC does not dispatch yet; going to hang!");
+  // A queued DPC has to RUN. This used to insert it into dpc_list and stop -
+  // with an assert_always that Release builds compile away - so every title
+  // that hands work to a DPC hung silently, waiting on an event the deferred
+  // routine was going to signal. One title's front-end thread sat 150 s in
+  // KeWaitForSingleObject on exactly that event, with a blank screen and no
+  // sound, because the D3D interrupt path queues a DPC whose routine completes
+  // the request. Upstream xenia-canary runs the routine inline on the calling
+  // thread under DPC impersonation (IRQL_DISPATCH, dpc_active set); do the
+  // same. The list insert is kept so KeRemoveQueueDpc / IsQueued keep their
+  // meaning for the (brief) window the DPC is considered queued.
+  //
+  // Nested: a deferred routine may itself queue a DPC. Impersonate only at the
+  // outermost level so the inner End does not drop IRQL / dpc_active while the
+  // outer routine is still running.
+  static thread_local int dpc_depth = 0;
 
   uint32_t list_entry_ptr = dpc.guest_address() + 4;
-
-  // Lock dispatcher.
-  auto global_lock = rex::thread::global_critical_region::AcquireDirect();
-  auto dpc_list = REX_KERNEL_STATE()->dpc_list();
-
-  // If already in a queue, abort.
-  if (dpc_list->IsQueued(list_entry_ptr)) {
-    return 0;
+  uint32_t routine = 0;
+  uint32_t context = 0;
+  {
+    auto global_lock = rex::thread::global_critical_region::AcquireDirect();
+    auto dpc_list = REX_KERNEL_STATE()->dpc_list();
+    if (dpc_list->IsQueued(list_entry_ptr)) {
+      return 0;
+    }
+    dpc->arg1 = (uint32_t)arg1;
+    dpc->arg2 = (uint32_t)arg2;
+    routine = dpc->routine;
+    context = dpc->context;
+    // The real kernel dequeues a DPC before calling it, so a routine that
+    // re-queues its own DPC (a self-rearming completion is a common shape)
+    // succeeds. Running it inline means it is never observably queued at all:
+    // insert nothing, and KeRemoveQueueDpc on it correctly reports "not
+    // queued". Only a DPC with no routine is left on the list, as before.
+    if (!routine) {
+      dpc_list->Insert(list_entry_ptr);
+    }
   }
 
-  // Prep DPC.
-  dpc->arg1 = (uint32_t)arg1;
-  dpc->arg2 = (uint32_t)arg2;
+  // Name each distinct DPC the first time it is queued. "The DPC never runs"
+  // and "the DPC is never queued" need opposite fixes, and only this line
+  // tells them apart.
+  {
+    static std::mutex seen_mutex;
+    static std::set<uint32_t> seen;
+    bool first;
+    {
+      std::lock_guard<std::mutex> lock(seen_mutex);
+      first = seen.insert(dpc.guest_address()).second;
+    }
+    if (first) {
+      REXKRNL_INFO("[dpc] first queue: dpc={:08X} routine={:08X} context={:08X} arg1={:08X} arg2={:08X}",
+                   dpc.guest_address(), routine, context, (uint32_t)arg1, (uint32_t)arg2);
+    }
+  }
 
-  dpc_list->Insert(list_entry_ptr);
-
+  if (routine) {
+    auto thread = XThread::GetCurrentThread();
+    if (thread) {
+      auto* kernel_state = REX_KERNEL_STATE();
+      const bool outermost = (dpc_depth++ == 0);
+      DPCImpersonationScope scope{};
+      if (outermost) {
+        scope = kernel_state->BeginDPCImpersonation();
+      }
+      // ExecuteTrap, not Execute: this runs guest code from INSIDE a kernel
+      // export the guest called mid-function. Execute preserves only lr and r1;
+      // ExecuteTrap saves and restores the whole PPC context, which is how the
+      // SDK already delivers APCs (DeliverAPCs) and what a trap-frame DPC on
+      // the 360 amounts to. The routine cannot then disturb the queuer's
+      // registers, condition fields or FP state however it is written.
+      uint64_t args[] = {dpc.guest_address(), (uint64_t)context, (uint64_t)arg1, (uint64_t)arg2};
+      kernel_state->function_dispatcher()->ExecuteTrap(thread->thread_state(), routine, args,
+                                                       rex::countof(args));
+      if (outermost) {
+        kernel_state->EndDPCImpersonation(scope);
+      }
+      --dpc_depth;
+    }
+  }
   return 1;
 }
 

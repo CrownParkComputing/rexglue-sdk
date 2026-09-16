@@ -10,6 +10,14 @@
  */
 
 #include <rex/kernel/xam/apps/xmp_app.h>
+
+#include <algorithm>
+#include <span>
+
+#include <rex/audio/music_player.h>
+#include <rex/filesystem/entry.h>
+#include <rex/filesystem/file.h>
+#include <rex/system/kernel_state.h>
 #include <rex/logging.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
@@ -21,6 +29,40 @@ using namespace rex::system;
 using namespace rex::system::xam;
 namespace apps {
 using namespace rex::system;
+
+
+namespace {
+
+// A playlist entry as the native player sees it: the file is read through the
+// VFS when the track starts, so a title's music plays whether its files sit in
+// a host folder or inside a disc image.
+rex::audio::MusicTrack MakeTrack(const std::u16string& guest_path) {
+  rex::audio::MusicTrack track;
+  track.label = rex::string::to_utf8(guest_path);
+  const std::string path = track.label;
+  track.load = [path](std::vector<uint8_t>& out) {
+    auto* entry = REX_KERNEL_FS()->ResolvePath(path);
+    if (!entry) {
+      REXKRNL_ERROR("XMP: song file '{}' not found", path);
+      return false;
+    }
+    rex::filesystem::File* file = nullptr;
+    if (entry->Open(rex::filesystem::FileAccess::kGenericRead, &file) != X_STATUS_SUCCESS ||
+        !file) {
+      REXKRNL_ERROR("XMP: song file '{}' could not be opened", path);
+      return false;
+    }
+    out.resize(entry->size());
+    size_t bytes_read = 0;
+    const X_STATUS status = file->ReadSync(std::span<uint8_t>(out), 0, &bytes_read);
+    file->Destroy();
+    out.resize(bytes_read);
+    return status == X_STATUS_SUCCESS && bytes_read > 0;
+  };
+  return track;
+}
+
+}  // namespace
 
 XmpApp::XmpApp(KernelState* kernel_state)
     : App(kernel_state, 0xFA),
@@ -81,6 +123,10 @@ X_HRESULT XmpApp::XMPCreateTitlePlaylist(uint32_t songs_ptr, uint32_t song_count
       song->track_number = memory::load_and_swap<uint32_t>(song_base + 24);
       song->duration_ms = memory::load_and_swap<uint32_t>(song_base + 28);
       song->format = static_cast<Song::Format>(memory::load_and_swap<uint32_t>(song_base + 32));
+      REXKRNL_DEBUG("XMP playlist {} song {}: '{}' ({} - {}, {} ms)", playlist->handle,
+                    song->handle, rex::string::to_utf8(song->file_path),
+                    rex::string::to_utf8(song->artist), rex::string::to_utf8(song->name),
+                    song->duration_ms);
       if (out_song_handles) {
         memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(out_song_handles + (i * 4)),
                                          song->handle);
@@ -129,16 +175,45 @@ X_HRESULT XmpApp::XMPPlayTitlePlaylist(uint32_t playlist_handle, uint32_t song_h
     playlist = it->second;
   }
 
+  // A console with the dashboard's music playing tells the title so and plays
+  // that instead; there is no dashboard here, so the title's playlist is what
+  // plays regardless of which client it thinks holds the controller.
   if (playback_client_ == PlaybackClient::kSystem) {
-    REXKRNL_WARN("XMPPlayTitlePlaylist: System playback is enabled!");
-    return X_E_SUCCESS;
+    REXKRNL_DEBUG("XMPPlayTitlePlaylist: system playback flag set; playing the title playlist anyway");
   }
 
-  // Start playlist?
-  REXKRNL_WARN("Playlist playback not supported");
+  std::vector<rex::audio::MusicTrack> tracks;
+  size_t start_index = 0;
+  for (size_t i = 0; i < playlist->songs.size(); ++i) {
+    const auto& song = playlist->songs[i];
+    if (song_handle && song->handle == song_handle) {
+      start_index = tracks.size();
+    }
+    tracks.push_back(MakeTrack(song->file_path));
+  }
+  if (tracks.empty()) {
+    REXKRNL_WARN("XMPPlayTitlePlaylist: playlist {:08X} has no songs", playlist_handle);
+    return X_E_FAIL;
+  }
+  REXKRNL_INFO("XMP: playing title playlist '{}' ({} songs) from song {}",
+               rex::string::to_utf8(playlist->name), tracks.size(), start_index);
+
   active_playlist_ = playlist;
-  active_song_index_ = 0;
+  active_song_index_ = static_cast<int>(start_index);
   state_ = State::kPlaying;
+  // XMP_REPEATMODE_PLAYLIST is 0, XMP_REPEATMODE_NOREPEAT is 1 (xmp.h). A
+  // title that wants shuffle across its whole soundtrack registers one
+  // playlist per song with NOREPEAT and starts the next one itself when this
+  // one reports idle, so that transition is what the finished callback feeds.
+  const bool repeat = repeat_mode_ != static_cast<RepeatMode>(1);
+  rex::audio::MusicSetFinishedCallback([this]() {
+    auto global_lock = global_critical_region_.Acquire();
+    state_ = State::kIdle;
+    OnStateChanged();
+  });
+  rex::audio::MusicSetPlaylist(std::move(tracks), start_index, repeat);
+  rex::audio::MusicSetVolume(volume_);
+  rex::audio::MusicPlay();
   OnStateChanged();
   kernel_state_->BroadcastNotification(kMsgPlaybackBehaviorChanged, 1);
   return X_E_SUCCESS;
@@ -148,6 +223,7 @@ X_HRESULT XmpApp::XMPContinue() {
   REXKRNL_DEBUG("XMPContinue()");
   if (state_ == State::kPaused) {
     state_ = State::kPlaying;
+    rex::audio::MusicPlay();
   }
   OnStateChanged();
   return X_E_SUCCESS;
@@ -156,6 +232,7 @@ X_HRESULT XmpApp::XMPContinue() {
 X_HRESULT XmpApp::XMPStop(uint32_t unk) {
   assert_zero(unk);
   REXKRNL_DEBUG("XMPStop({:08X})", unk);
+  rex::audio::MusicStop();
   active_playlist_ = nullptr;  // ?
   active_song_index_ = 0;
   state_ = State::kIdle;
@@ -167,6 +244,7 @@ X_HRESULT XmpApp::XMPPause() {
   REXKRNL_DEBUG("XMPPause()");
   if (state_ == State::kPlaying) {
     state_ = State::kPaused;
+    rex::audio::MusicPause();
   }
   OnStateChanged();
   return X_E_SUCCESS;
@@ -179,6 +257,7 @@ X_HRESULT XmpApp::XMPNext() {
   }
   state_ = State::kPlaying;
   active_song_index_ = (active_song_index_ + 1) % active_playlist_->songs.size();
+  rex::audio::MusicNext();
   OnStateChanged();
   return X_E_SUCCESS;
 }
@@ -194,6 +273,7 @@ X_HRESULT XmpApp::XMPPrevious() {
   } else {
     --active_song_index_;
   }
+  rex::audio::MusicPrevious();
   OnStateChanged();
   return X_E_SUCCESS;
 }
@@ -298,6 +378,7 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       assert_true(args->xmp_client == 0x00000002);
       REXKRNL_DEBUG("XMPSetVolume({:g})", float(args->value));
       volume_ = args->value;
+      rex::audio::MusicSetVolume(volume_);
       return X_E_SUCCESS;
     }
     case 0x0007000D: {
@@ -348,6 +429,8 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       if (!active_playlist_) {
         return X_E_FAIL;
       }
+      active_song_index_ = static_cast<int>(
+          std::min(rex::audio::MusicCurrentIndex(), active_playlist_->songs.size() - 1));
       auto& song = active_playlist_->songs[active_song_index_];
       memory::store_and_swap<uint32_t>(info + 0, song->handle);
       memory::store_and_swap<std::u16string>(info + 4 + 572 + 0, song->name);

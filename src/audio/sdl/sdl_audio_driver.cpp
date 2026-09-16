@@ -21,6 +21,7 @@
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
 #include <rex/audio/downmix.h>
+#include <rex/audio/music_player.h>
 #include <rex/audio/native_mix.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
@@ -231,6 +232,17 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
     native_frame.resize(frame_samples_);
     if (NativeMixFill(native_frame.data(), channel_samples_, frame_channels_)) {
       input_frame = native_frame.data();
+    }
+  }
+  // Title-playlist music (XMP): decoded from the title's own WMA files and
+  // added to the front pair here, on top of whatever the guest mixed. See
+  // music_player.cpp. Nothing happens unless a playlist is playing.
+  static std::vector<float> music_frame;
+  if (MusicIsPlaying()) {
+    music_frame.resize(frame_samples_);
+    std::memcpy(music_frame.data(), input_frame, frame_samples_ * sizeof(float));
+    if (MusicMixInto(music_frame.data(), channel_samples_, frame_channels_)) {
+      input_frame = music_frame.data();
     }
   }
 

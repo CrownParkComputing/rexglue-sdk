@@ -7,6 +7,7 @@ add_library(rexaudio OBJECT
     audio_system.cpp
     downmix.cpp
     native_mix.cpp
+    music_player.cpp
     xma_context.cpp
     xma_decoder.cpp
     xma_register_file.cpp

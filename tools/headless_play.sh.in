@@ -16,6 +16,12 @@
 #    Vulkan straight to the compositor. The node ID is in gamescope's stdout.
 #  - xdotool must use XTEST (no --window): SDL ignores synthetic XSendEvent
 #    keys, so the window has to be focused and the key delivered as a real one.
+#  - Audio goes to SDL's dummy driver, not the speakers. A headless run that
+#    plays through the desktop gets muted by whoever is sitting there, and
+#    PipeWire remembers that mute for the "rexglue" application name - which
+#    every port shares - so the NEXT live run of ANY title is silent. The
+#    guest still mixes and REX_AUDIO_STATS still measures; only the device is
+#    fake. HEADLESS_AUDIO_DRIVER=pipewire puts it back for a listening test.
 #  - Keys must be HELD. A default xdotool tap is ~12 ms and falls between the
 #    guest's 30 Hz input polls, so it is simply never seen.
 #
@@ -43,7 +49,7 @@ for lib in librexruntime.so librexgpu-xenos.so; do
 done
 cd "$ROOT/out/build/linux"
 
-gamescope --backend headless -W 1280 -H 720 -- env LD_LIBRARY_PATH=. SDL_VIDEODRIVER=x11 \
+gamescope --backend headless -W 1280 -H 720 -- env LD_LIBRARY_PATH=. SDL_VIDEODRIVER=x11 SDL_AUDIO_DRIVER="${HEADLESS_AUDIO_DRIVER:-dummy}" \
   ${GAME_ENV:-} ./@TITLE@ --game_data_root="$ROOT/assets" --gpu_plugin xenos \
   --user_data_root="$ROOT/user-data" --license_mask=1 --mnk_mode ${GAME_ARGS:-} \
   >"$OUT/run.log" 2>&1 &

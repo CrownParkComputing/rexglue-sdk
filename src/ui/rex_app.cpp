@@ -433,6 +433,14 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
     debug_overlay_ =
         std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
   }
+  // RetroRecomp side rails + FPS readout, shared by every title. Created
+  // unconditionally; it reads show_side_panels / show_fps for its own
+  // visibility and registers F8 / F10. Auto-adds to the imgui drawer.
+  if (imgui_drawer_) {
+    side_panels_ =
+        std::make_unique<ui::SidePanelsDialog>(imgui_drawer_.get(), immediate_drawer_.get(),
+                                               frame_stats_provider_);
+  }
   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
     if (debug_overlay_) {
       debug_overlay_.reset();

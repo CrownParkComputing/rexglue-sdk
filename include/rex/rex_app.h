@@ -26,6 +26,7 @@
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/immediate_drawer.h>
 #include <rex/ui/overlay/debug_overlay.h>
+#include <rex/ui/overlay/side_panels.h>
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 #include <rex/ui/windowed_app.h>
@@ -304,6 +305,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   // Built-in overlays
   std::shared_ptr<LogCaptureSink> log_sink_;
   std::unique_ptr<ui::DebugOverlayDialog> debug_overlay_;
+  std::unique_ptr<ui::SidePanelsDialog> side_panels_;
   std::unique_ptr<ui::ConsoleDialog> console_overlay_;
   std::unique_ptr<ui::SettingsDialog> settings_overlay_;
   std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;

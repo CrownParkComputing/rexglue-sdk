@@ -95,6 +95,10 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                     "pipelines are being prepared.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+#include <atomic>
+
+#include <rex/graphics/present_stats.h>
+
 namespace rex::graphics {
 
 using namespace rex::graphics::xenos;
@@ -1060,6 +1064,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   }
 #endif
 
+  rex::graphics::NotifyGuestPresent();
   // Swap rate, without the perf-counter build or a debug-level log flood: a
   // headless bring-up otherwise has no way to say whether a title runs at 30 FPS
   // or at 5. Off unless REX_FPS_LOG=1.

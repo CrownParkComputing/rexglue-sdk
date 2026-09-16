@@ -19,6 +19,7 @@
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/ui/presenter.h>
+#include <rex/graphics/present_stats.h>
 #include <rex/ui/window.h>
 
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
@@ -281,6 +282,14 @@ GuestOutputPaintConfig BuildGuestOutputPaintConfigFromCVar() {
 }
 
 }  // namespace
+
+
+#include <atomic>
+namespace rex::graphics {
+static std::atomic<uint64_t> g_guest_present_count{0};
+void NotifyGuestPresent() { g_guest_present_count.fetch_add(1, std::memory_order_relaxed); }
+uint64_t GuestPresentCount() { return g_guest_present_count.load(std::memory_order_relaxed); }
+}  // namespace rex::graphics
 
 namespace rex {
 namespace ui {

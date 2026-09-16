@@ -45,7 +45,7 @@ function Refresh-Info {
     "Built:  $($Facts.built)",
     $Native,
     "",
-    "Recommended source:",
+    "Expected source:",
     "  $Source",
     "",
     "Saves and settings live in user-data\.  Details: CONVERSION.md, NATIVE_COVERAGE.md"

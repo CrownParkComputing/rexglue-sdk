@@ -23,7 +23,7 @@ function Fail($text) { Say $text 'Error'; exit 1 }
 
 if (-not $Source) {
   $rec = if (Test-Path "$Root\content\SOURCE.txt") { Get-Content "$Root\content\SOURCE.txt" -First 1 } else { "see content\SOURCE.txt" }
-  $q = "Import your own copy of $Name.`n`nRecommended source:`n$rec`n`nYes = an archive or disc image (.zip / .7z / .rar / .iso)`nNo = an already-extracted folder"
+  $q = "Import your own copy of $Name.`n`nExpected source:`n$rec`n`nYes = an archive or disc image (.zip / .7z / .rar / .iso)`nNo = an already-extracted folder"
   $r = [System.Windows.Forms.MessageBox]::Show($q, "$Name - Import game files", 'YesNoCancel', 'Question')
   if ($r -eq 'Cancel') { exit 1 }
   if ($r -eq 'Yes') {
@@ -95,7 +95,7 @@ if ($missing.Count) { $summary += ", $($missing.Count) missing" }
 if ($bad.Count) { $summary += ", $($bad.Count) differ" }
 if ($missing.Count -or $bad.Count) {
   $first = ($missing + $bad | Select-Object -First 6) -join "`n"
-  Say "Imported into assets\, but it is not the expected rip:`n$summary`n`nFirst problems:`n$first`n`nThe game may still run. The recommended source is in content\SOURCE.txt." 'Warning'
+  Say "Imported into assets\, but it is not the expected rip:`n$summary`n`nFirst problems:`n$first`n`nThe game may still run. The expected source is in content\SOURCE.txt." 'Warning'
   exit 2
 }
 Say "Game files imported and verified.`n$summary`n`nYou can Play now."

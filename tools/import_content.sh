@@ -49,7 +49,7 @@ if [ -z "$SRC" ]; then
   if have_gui; then
         RECOMMENDED=""
     if [ -s "$ROOT/content/SOURCE.txt" ]; then
-      RECOMMENDED="Recommended source: $(head -1 "$ROOT/content/SOURCE.txt")\n$(tail -n +2 "$ROOT/content/SOURCE.txt" | tr '\n' ' ')\n\n"
+      RECOMMENDED="Expected source: $(head -1 "$ROOT/content/SOURCE.txt")\n$(tail -n +2 "$ROOT/content/SOURCE.txt" | tr '\n' ' ')\n\n"
     fi
 CHOICE=$(zenity --list --title="$TITLE - import your game" --width=560 --height=260 \
       --text="${RECOMMENDED}$TITLE needs your own copy of the game.\n\nNothing is downloaded and nothing leaves this machine - the files are copied into this folder so the port can run." \
@@ -63,7 +63,7 @@ CHOICE=$(zenity --list --title="$TITLE - import your game" --width=560 --height=
       *)   SRC=$(zenity --file-selection --directory --title="Select the extracted game folder" 2>/dev/null) || exit 1 ;;
     esac
   else
-    [ -s "$ROOT/content/SOURCE.txt" ] && { echo "Recommended source: $(head -1 "$ROOT/content/SOURCE.txt")"; tail -n +2 "$ROOT/content/SOURCE.txt"; }
+    [ -s "$ROOT/content/SOURCE.txt" ] && { echo "Expected source: $(head -1 "$ROOT/content/SOURCE.txt")"; tail -n +2 "$ROOT/content/SOURCE.txt"; }
     echo "$TITLE needs your own copy of the game."
     echo "Give a folder, a .rar/.zip/.7z, or a .iso disc image - disc tree or XBLA package both work."
     read -r -p "Path: " SRC || exit 1

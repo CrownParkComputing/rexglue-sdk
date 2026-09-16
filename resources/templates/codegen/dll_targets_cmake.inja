@@ -26,7 +26,11 @@ if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ mod.output_dir }}/sour
     target_link_libraries({{ mod.lib_name }} PRIVATE rex::runtime)
     rexglue_apply_recomp_settings({{ mod.lib_name }}
         "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ mod.output_dir }}/{{ project }}_pch.h")
-    add_dependencies({{ mod.lib_name }} {{ project }}_codegen)
+    # Codegen is a host tool; a cross build (Windows, Android) has no such
+    # target and just compiles the generated sources already in the tree.
+    if(NOT CMAKE_CROSSCOMPILING)
+        add_dependencies({{ mod.lib_name }} {{ project }}_codegen)
+    endif()
     set_target_properties({{ mod.lib_name }} PROPERTIES
         CXX_VISIBILITY_PRESET hidden
     )

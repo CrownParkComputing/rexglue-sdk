@@ -101,7 +101,7 @@ ${NAME:-$SLUG} - native Windows port (launcher)
 
   1. Launcher.bat             opens the launcher: Import game files / Play
      - or -   Play.bat        imports on first run, then plays
-  2. Import your own copy of the game when asked. Recommended source:
+  2. Import your own copy of the game when asked. Expected source:
      $(head -1 "$PORT/content/SOURCE.txt" 2>/dev/null || echo "see content\SOURCE.txt")
      A .zip / .7z / .rar as downloaded, a .iso disc image, or the extracted
      folder all work; the files are copied into assets\ here and checked

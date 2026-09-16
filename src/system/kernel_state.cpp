@@ -778,7 +778,15 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
 #else
     std::string lib_file = "lib" + recomp->shared_lib_name + ".so";
 #endif
+#if REX_PLATFORM_ANDROID
+    // No folder to sit next to on Android: the executable is
+    // /system/bin/app_process and the module libraries are in the APK's own
+    // native library directory, which the dynamic linker already searches.
+    // Ask by name, the way LoadGpuPlugin does.
+    std::filesystem::path lib_path = lib_file;
+#else
     auto lib_path = rex::filesystem::GetExecutableFolder() / lib_file;
+#endif
 
     rex::platform::DynamicLibrary library_local;
     if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {

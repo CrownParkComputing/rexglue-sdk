@@ -101,10 +101,11 @@ ${NAME:-$SLUG} - native Linux port (launcher)
 
   1. tools/port_gui.sh        opens the launcher: Import game files / Play
      - or -   ./run.sh        imports on first run, then plays
-  2. Import your own copy of the game when asked. Recommended source:
+  2. Import your own copy of the game when asked. Expected source:
      $(head -1 "$PORT/content/SOURCE.txt" 2>/dev/null || echo "see content/SOURCE.txt")
-     A .rar/.zip/.7z as downloaded or the extracted folder both work; the
-     files are copied into assets/ here and checked against content/content.sha256.
+     A .iso of the disc, a .rar/.zip/.7z of its files, or the extracted folder
+     all work; the files are copied into assets/ here and checked against
+     content/content.sha256.
   3. Play. Saves and settings live in user-data/.
 
 Needs: Linux x86-64, a Vulkan GPU driver, zenity (for the GUI), 7z or unrar for

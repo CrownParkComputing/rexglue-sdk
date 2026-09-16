@@ -151,6 +151,14 @@ for so in "$LIBMAIN" "$SDK_LIBS"/librexruntime.so $PLUGIN_SOS; do
     cp "$so" "$WORK/lib/arm64-v8a/"
     "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$(basename "$so")"
 done
+# Multi-module titles (Split/Second: launcher + SKIPPER + SPLITSECOND1) keep
+# every recompiled module in its own lib<slug>_<MODULE>.so beside libmain.so.
+# They ride along, and the runtime asks the linker for them by name on Android.
+for so in "$(dirname "$LIBMAIN")"/lib${SLUG}_*.so; do
+    [ -f "$so" ] || continue
+    cp "$so" "$WORK/lib/arm64-v8a/"
+    "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$(basename "$so")"
+done
 
 echo "==> aapt2 link"
 "$BUILD_TOOLS/aapt2" link -o "$WORK/base.apk" -I "$PLATFORM_JAR" \

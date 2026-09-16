@@ -236,7 +236,7 @@ def render_player(port):
         status = "not imported yet - use 'Import game files'"
     files = [status]
     if release:
-        files += [None, f"Recommended source: {release}"]
+        files += [None, f"Expected source: {release}"]
         if about:
             files.append(about)
     out += _section("Game files", files) + [""]
@@ -296,7 +296,7 @@ def render_developer(port):
     out = [slug, "=" * len(slug), ""]
     release, about = source_record(port)
     if release:
-        out += [f"Recommended source : {release}"]
+        out += [f"Expected source : {release}"]
         if about:
             out += [f"                     {about}"]
         out.append("")

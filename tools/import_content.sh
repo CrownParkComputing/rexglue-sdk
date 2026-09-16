@@ -39,10 +39,50 @@ fail() { if have_gui; then zenity --error --no-wrap --title="$TITLE" --text="$1"
 
 content_ok() { "$ROOT/tools/content_zip.sh" verify >/dev/null 2>&1; }
 
-if [ "${1:-}" = "--check" ]; then content_ok && exit 0 || exit 1; fi
-if content_ok; then echo "game content already installed"; exit 0; fi
+# ------------------------------------------------------------------- DLC ------
+# Downloadable content is one LIVE/CON/PIRS package per pack. The runtime
+# enumerates DLC as a raw package file dropped into the content tree and mounts
+# it on demand (ContentManager::ListContent), so installing a pack is a
+# header-checked copy - no unpacking. The tree is rooted at the launcher's
+# user-data (what --user_data_root points at); marketplace content uses the
+# shared xuid 0. Layout: user-data/<xuid>/<title-id>/<content-type>/<file>.
+DLC_ROOT="$ROOT/user-data/0000000000000000"
 
-SRC="${1:-}"
+install_dlc() {   # <package-file>  -> place it where the runtime looks
+  local pkg="$1" info tid ctype dest
+  [ -f "$pkg" ] || { fail "DLC package not found:\n$pkg"; return 1; }
+  case "$(head -c4 "$pkg" 2>/dev/null)" in
+    LIVE|CON\ |PIRS) : ;;
+    *) fail "That is not an Xbox 360 content package.\n\nDLC is a single LIVE / CON / PIRS file:\n$(basename "$pkg")"; return 1 ;;
+  esac
+  info="$(python3 "$STFS" info "$pkg" 2>/dev/null)" || { fail "Could not read the DLC package header:\n$(basename "$pkg")"; return 1; }
+  tid="${info%% *}"; ctype="$(printf '%s\n' "$info" | awk '{print $2}')"
+  [ -n "$tid" ] && [ -n "$ctype" ] || { fail "The DLC package header is unreadable:\n$(basename "$pkg")"; return 1; }
+  dest="$DLC_ROOT/$tid/$ctype"
+  mkdir -p "$dest" || { fail "Could not create the content folder for the DLC."; return 1; }
+  cp -f "$pkg" "$dest/$(basename "$pkg")" || { fail "Could not copy the DLC into place."; return 1; }
+  echo "installed DLC $(basename "$pkg") -> title $tid type $ctype"
+  return 0
+}
+
+offer_dlc() {     # GUI only: ask, then install as many packs as the user picks
+  have_gui || return 0
+  while zenity --question --no-wrap --title="$TITLE" \
+      --ok-label="Add DLC..." --cancel-label="Done" \
+      --text="Any downloadable content (DLC) to install for $TITLE?\n\nA DLC pack is a single LIVE / CON / PIRS file. Most titles have none - you can skip this." 2>/dev/null; do
+    local f
+    f=$(zenity --file-selection --title="Select the DLC package" \
+        --file-filter="Content packages | *" 2>/dev/null) || continue
+    install_dlc "$f" && say "DLC installed:\n$(basename "$f")"
+  done
+  return 0
+}
+
+if [ "${1:-}" = "--check" ]; then content_ok && exit 0 || exit 1; fi
+if [ "${1:-}" = "--dlc" ]; then install_dlc "${2:-}"; exit $?; fi
+
+SRC="${1:-}"; SRC_ARG="$SRC"
+if content_ok; then echo "game content already installed"; [ -z "$SRC_ARG" ] && offer_dlc; exit 0; fi
 
 # ---------------------------------------------------------------- ask --------
 if [ -z "$SRC" ]; then
@@ -139,6 +179,7 @@ cp -a "$GAMEDIR/." "$ROOT/assets/" 2>/dev/null
 stop_progress "$P"
 
 if content_ok; then
+  [ -z "$SRC_ARG" ] && offer_dlc
   say "$TITLE is ready to play."
   exit 0
 fi
@@ -150,11 +191,12 @@ if [ -f "$ROOT/content/content.sha256" ] && [ -f "$ROOT/assets/default.xex" ]; t
   if have_gui; then
     zenity --question --no-wrap --title="$TITLE" \
       --text="Imported, but the files do not match the checksums this port was built from.\n\nUsually a different region or revision. It will probably still run.\n\nKeep it and start anyway?" 2>/dev/null \
-      && { touch "$ROOT/assets/.recomp-content-verified" 2>/dev/null; exit 0; }
+      && { touch "$ROOT/assets/.recomp-content-verified" 2>/dev/null; [ -z "$SRC_ARG" ] && offer_dlc; exit 0; }
     exit 1
   fi
   echo "warning: content does not match content.sha256 (different region or revision?)"
   touch "$ROOT/assets/.recomp-content-verified" 2>/dev/null
+  [ -z "$SRC_ARG" ] && offer_dlc
   exit 0
 fi
 fail "Import failed - no default.xex ended up in assets/."

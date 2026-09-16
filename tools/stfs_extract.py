@@ -39,6 +39,9 @@ class Stfs:
         self.magic = magic.decode().strip()
         head = self._at(0, 0x400)
         self.data_start = (u32be(head, 0x340) + BLOCK - 1) // BLOCK * BLOCK
+        # XContentMetadata sits at 0x344: content_type is its first field, and
+        # the title id is inside execution_info at +0x10 (media,ver,base,+0x0C).
+        self.content_type = u32be(head, 0x344)
         self.title_id = u32be(head, 0x344 + 0x10 + 0x0C)
         desc = self._at(0x344 + 0x35, 0x24)
         if desc[0] != 0x24:
@@ -133,8 +136,24 @@ def main():
         print(__doc__)
         return 2
     action, package = sys.argv[1], sys.argv[2]
+
+    # 'info' prints only the header fields a DLC install needs, so a caller can
+    # read them without the full block parse (which a valid pack could still
+    # trip on): <title_id hex8> <content_type hex8> <magic>. content_type
+    # 00000002 is marketplace content (DLC).
+    if action == "info":
+        with open(package, "rb") as f:
+            head = f.read(0x400)
+        magic = head[:4]
+        if magic not in (b"LIVE", b"CON ", b"PIRS"):
+            raise ValueError(f"not an STFS package (magic {magic!r})")
+        content_type = u32be(head, 0x344)
+        title_id = u32be(head, 0x344 + 0x10 + 0x0C)
+        print(f"{title_id:08X} {content_type:08X} {magic.decode().strip()}")
+        return 0
+
     stfs = Stfs(package)
-    print(f"{stfs.magic} package, title {stfs.title_id:08X}, "
+    print(f"{stfs.magic} package, title {stfs.title_id:08X}, type {stfs.content_type:08X}, "
           f"{stfs.total_blocks} blocks, {'read-only' if stfs.read_only else 'writable'} layout")
 
     entries = stfs.entries()

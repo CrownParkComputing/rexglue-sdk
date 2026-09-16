@@ -31,6 +31,16 @@ if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ mod.output_dir }}/sour
     if(NOT CMAKE_CROSSCOMPILING)
         add_dependencies({{ mod.lib_name }} {{ project }}_codegen)
     endif()
+    if(WIN32)
+        # The runtime opens <name>.dll on Windows (LoadLibrary adds no prefix)
+        # and lib<name>.so elsewhere; CMake's "lib" default would hide the DLL.
+        set_target_properties({{ mod.lib_name }} PROPERTIES PREFIX "")
+    endif()
+    if(WIN32)
+        # The runtime opens <name>.dll on Windows (LoadLibrary adds no prefix)
+        # and lib<name>.so elsewhere; CMake's "lib" default would hide the DLL.
+        set_target_properties({{ mod.lib_name }} PROPERTIES PREFIX "")
+    endif()
     set_target_properties({{ mod.lib_name }} PROPERTIES
         CXX_VISIBILITY_PRESET hidden
     )

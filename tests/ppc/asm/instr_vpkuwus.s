@@ -21,3 +21,19 @@ test_vpkuwus_2:
   #_ REGISTER_OUT v4 [FFFFFFFF, 00010002, FFFFFFFE, 00000010]
   # {65535, 65535, 2, 3, 65535, 65535, 65535, 16}
   #_ REGISTER_OUT v5 [FFFFFFFF, 00020003, FFFFFFFF, FFFF0010]
+
+test_vpkuwus_3:
+  # Destination aliases both sources: result must not read its own packed halfwords
+  #_ REGISTER_IN v3 [00010000, 0000FFFF, 00000080, 12345678]
+  vpkuwus v3, v3, v3
+  blr
+  #_ REGISTER_OUT v3 [FFFFFFFF, 0080FFFF, FFFFFFFF, 0080FFFF]
+
+test_vpkuwus_4:
+  # Destination aliases the second source
+  #_ REGISTER_IN v4 [00000001, 0000FFFE, 00010000, FFFFFFFF]
+  #_ REGISTER_IN v5 [00000080, 00000100, 0000FFFF, 80000000]
+  vpkuwus v5, v4, v5
+  blr
+  #_ REGISTER_OUT v4 [00000001, 0000FFFE, 00010000, FFFFFFFF]
+  #_ REGISTER_OUT v5 [0001FFFE, FFFFFFFF, 00800100, FFFFFFFF]

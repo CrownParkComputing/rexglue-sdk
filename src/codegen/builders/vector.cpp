@@ -1098,14 +1098,19 @@ bool build_vpkuhus(BuilderContext& ctx) {
   // NOTE(tomc): _mm_packus_epi16 treats inputs as signed, so we need custom saturation for
   // unsigned. Unsigned halfwords >= 0x8000 would be interpreted as negative and clamped to 0
   // instead of 0xFF.
+  //
+  // Build the result in a temporary: the destination is routinely one of the
+  // sources (Burnout Revenge packs its UI colours with `vpkuhus v13,v13,v13`),
+  // and writing bytes in place overwrites halfwords that later iterations still
+  // read - the second half of the vector then packs its own packed bytes and
+  // saturates to 0xFF.
   for (size_t i = 0; i < 8; i++) {
-    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];",
-                ctx.v(ctx.insn.operands[0]), 15 - i, ctx.v(ctx.insn.operands[1]), 7 - i,
-                ctx.v(ctx.insn.operands[1]), 7 - i);
-    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];",
-                ctx.v(ctx.insn.operands[0]), 7 - i, ctx.v(ctx.insn.operands[2]), 7 - i,
-                ctx.v(ctx.insn.operands[2]), 7 - i);
+    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];", ctx.v_temp(),
+                15 - i, ctx.v(ctx.insn.operands[1]), 7 - i, ctx.v(ctx.insn.operands[1]), 7 - i);
+    ctx.println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : (uint8_t){}.u16[{}];", ctx.v_temp(),
+                7 - i, ctx.v(ctx.insn.operands[2]), 7 - i, ctx.v(ctx.insn.operands[2]), 7 - i);
   }
+  ctx.println("\t{} = {};", ctx.v(ctx.insn.operands[0]), ctx.v_temp());
   return true;
 }
 
@@ -1126,14 +1131,17 @@ bool build_vpkuwus(BuilderContext& ctx) {
 
   // NOTE(tomc): _mm_packus_epi32 treats inputs as signed, so we need custom saturation for unsigned
   // Saturate each u32 to [0, 0xFFFF], then pack to u16
+  // Same aliasing rule as vpkuhus: the destination may be a source, so pack
+  // into a temporary and assign once.
   for (size_t i = 0; i < 4; i++) {
     ctx.println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : (uint16_t){}.u32[{}];",
-                ctx.v(ctx.insn.operands[0]), 7 - i, ctx.v(ctx.insn.operands[1]), 3 - i,
+                ctx.v_temp(), 7 - i, ctx.v(ctx.insn.operands[1]), 3 - i,
                 ctx.v(ctx.insn.operands[1]), 3 - i);
     ctx.println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : (uint16_t){}.u32[{}];",
-                ctx.v(ctx.insn.operands[0]), 3 - i, ctx.v(ctx.insn.operands[2]), 3 - i,
+                ctx.v_temp(), 3 - i, ctx.v(ctx.insn.operands[2]), 3 - i,
                 ctx.v(ctx.insn.operands[2]), 3 - i);
   }
+  ctx.println("\t{} = {};", ctx.v(ctx.insn.operands[0]), ctx.v_temp());
   return true;
 }
 

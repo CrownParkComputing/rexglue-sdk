@@ -9,3 +9,19 @@ test_vpkuhus_1:
   #_ REGISTER_OUT v4 [00040104, 00050105, 00060106, 00070107]
   # {0, 255, 1, 255, 2, 255, 3, 255, 4, 255, 5, 255, 6, 255, 7, 255}
   #_ REGISTER_OUT v5 [00FF01FF, 02FF03FF, 04FF05FF, 06FF07FF]
+
+test_vpkuhus_2:
+  # Destination aliases both sources (Burnout Revenge UI colour pack): result must not read its own packed bytes
+  #_ REGISTER_IN v3 [47800080, 47800080, 478000FF, 47800000]
+  vpkuhus v3, v3, v3
+  blr
+  #_ REGISTER_OUT v3 [FF80FF80, FFFFFF00, FF80FF80, FFFFFF00]
+
+test_vpkuhus_3:
+  # Destination aliases the second source
+  #_ REGISTER_IN v4 [00010002, 01FF0100, 00FF7FFF, 80008001]
+  #_ REGISTER_IN v5 [47800080, 47800080, 478000FF, 47800000]
+  vpkuhus v5, v4, v5
+  blr
+  #_ REGISTER_OUT v4 [00010002, 01FF0100, 00FF7FFF, 80008001]
+  #_ REGISTER_OUT v5 [0102FFFF, FFFFFFFF, FF80FF80, FFFFFF00]

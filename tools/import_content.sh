@@ -12,6 +12,7 @@
 #
 #   - a .rar/.zip/.7z holding a DISC TREE          (default.xex + folders)
 #   - a .rar/.zip/.7z holding an STFS PACKAGE      (XBLA; one big LIVE/CON/PIRS file)
+#   - a .iso DISC IMAGE                            (XDVDFS, as ripped from the disc)
 #   - an already-extracted folder of either shape
 #   - the port's own <title>-content.zip from a previous import
 #
@@ -23,8 +24,14 @@ set -uo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TITLE="$(basename "$ROOT" | sed 's/-recomp$//')"
+SLUG="$TITLE"
+# Dialogs carry the game's name, not the folder slug.
+NAME="$(sed -n 's/^window_title = "\(.*\)"$/\1/p' "$ROOT/config/$SLUG.toml" 2>/dev/null | head -1)"
+[ -n "$NAME" ] && TITLE="$NAME"
 SDK="${REXSDK_DIR:-/home/jon/rexglue-vmx}"
 STFS="$ROOT/tools/stfs_extract.py"; [ -f "$STFS" ] || STFS="$SDK/tools/stfs_extract.py"
+# rexiso reads a disc image with the runtime's own XDVDFS reader; it ships next to the launcher.
+REXISO="$ROOT/rexiso"; [ -x "$REXISO" ] || REXISO="$SDK/out/install/linux-amd64/bin/rexiso"
 
 have_gui() { [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; }
 say()  { if have_gui; then zenity --info --no-wrap --title="$TITLE" --text="$1" 2>/dev/null; else echo "$1"; fi; }
@@ -47,18 +54,18 @@ if [ -z "$SRC" ]; then
 CHOICE=$(zenity --list --title="$TITLE - import your game" --width=560 --height=260 \
       --text="${RECOMMENDED}$TITLE needs your own copy of the game.\n\nNothing is downloaded and nothing leaves this machine - the files are copied into this folder so the port can run." \
       --radiolist --column="" --column="Where is it?" \
-      TRUE "An archive  (.rar / .zip / .7z)" \
+      TRUE "An archive or disc image  (.rar / .zip / .7z / .iso)" \
       FALSE "A folder    (already extracted)" 2>/dev/null) || exit 1
     case "$CHOICE" in
       An*) SRC=$(zenity --file-selection --title="Select the game archive" \
-                 --file-filter="Game archives | *.rar *.RAR *.zip *.ZIP *.7z *.7Z" \
+                 --file-filter="Game archives and disc images | *.rar *.RAR *.zip *.ZIP *.7z *.7Z *.iso *.ISO" \
                  --file-filter="All files | *" 2>/dev/null) || exit 1 ;;
       *)   SRC=$(zenity --file-selection --directory --title="Select the extracted game folder" 2>/dev/null) || exit 1 ;;
     esac
   else
     [ -s "$ROOT/content/SOURCE.txt" ] && { echo "Recommended source: $(head -1 "$ROOT/content/SOURCE.txt")"; tail -n +2 "$ROOT/content/SOURCE.txt"; }
     echo "$TITLE needs your own copy of the game."
-    echo "Give a folder, or a .rar/.zip/.7z - disc tree or XBLA package both work."
+    echo "Give a folder, a .rar/.zip/.7z, or a .iso disc image - disc tree or XBLA package both work."
     read -r -p "Path: " SRC || exit 1
   fi
 fi
@@ -86,12 +93,14 @@ if [ -f "$SRC" ]; then
       content_ok && { say "$TITLE is ready to play."; exit 0; }
       fail "That archive did not match this port's checksums." ;;
   esac
+  case "${SRC,,}" in *.iso) [ -x "$REXISO" ] || fail "rexiso is missing next to the launcher, so a .iso cannot be read.\nExtract the image yourself and import the folder instead." ;; esac
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/rexglue-import.XXXXXX")"
   P=$(progress "Extracting $(basename "$SRC")...\nA disc rip can take a few minutes.")
   case "${SRC,,}" in
     *.rar) unrar x -o+ -idq "$SRC" "$WORK/" >/dev/null 2>&1 ;;
     *.zip) unzip -qq -o "$SRC" -d "$WORK" >/dev/null 2>&1 ;;
     *.7z)  7z x -y -bso0 -bsp0 -o"$WORK" "$SRC" >/dev/null 2>&1 ;;
+    *.iso) "$REXISO" extract "$SRC" "$WORK" >/dev/null 2>&1 ;;
     *)     7z x -y -bso0 -bsp0 -o"$WORK" "$SRC" >/dev/null 2>&1 ;;
   esac
   stop_progress "$P"

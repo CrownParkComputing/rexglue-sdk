@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pack a port as a LAUNCHER: everything except the game.
 #
-#   bundle_launcher.sh <port-dir> <out.tar.zst>
+#   bundle_launcher.sh <port-dir> <out.tar.zst> [slug]
 #
 # This is the shape a port is published in. The executable, the two runtime
 # libraries it loads, its configuration, the GUI and importer, the checksums
@@ -16,10 +16,14 @@
 #   <slug>/config/           settings          <slug>/content/        SOURCE.txt, content.sha256
 #   <slug>/CONVERSION.md     what was done     <slug>/NATIVE_COVERAGE.md
 #   <slug>/bundle.txt        build facts       <slug>/README.txt
+#   <slug>/shader_seed/      warmed pipelines  <slug>/lib<slug>_*.so  extra modules
 set -euo pipefail
 PORT="$(cd -- "$1" && pwd)"
 OUT="$(cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")"
-SLUG="$(basename "$PORT" | sed 's/-recomp$//')"
+# The slug is the executable/config name: the manifest's project name, not the
+# directory (rru-recomp builds ridgeracerunbounded). A third argument overrides.
+SLUG="${3:-$(sed -n 's/^name = "\(.*\)"$/\1/p' "$PORT"/*_manifest.toml 2>/dev/null | head -1)}"
+[ -n "$SLUG" ] || SLUG="$(basename "$PORT" | sed 's/-recomp$//')"
 SDK="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$PORT/out/build/linux"
 [ -x "$BUILD/$SLUG" ] || { echo "no built executable at $BUILD/$SLUG" >&2; exit 1; }
@@ -40,6 +44,11 @@ done
 strip --strip-unneeded "$D/$SLUG" "$D"/lib*.so 2>/dev/null || true
 cp "$PORT/config/$SLUG.toml" "$D/config/"
 cp "$D/config/$SLUG.toml" "$D/$SLUG.toml"   # the runtime reads it beside the executable
+# A port that ships a warmed shader/pipeline seed (shader_storage_seed_root)
+# starts without compilation hitches; the directory is relative to the exe.
+if [ -d "$BUILD/shader_seed" ]; then cp -r "$BUILD/shader_seed" "$D/shader_seed"; fi
+# Multi-module titles: every recompiled module library lives beside the exe.
+for m in "$BUILD"/lib${SLUG}_*.so; do [ -f "$m" ] && cp "$m" "$D/"; done
 
 # --- tools: the player-facing set only -----------------------------------------
 for t in port_gui.sh import_content.sh content_zip.sh port_info.py; do
@@ -47,6 +56,9 @@ for t in port_gui.sh import_content.sh content_zip.sh port_info.py; do
   cp "$src" "$D/tools/$t"
 done
 cp "$SDK/tools/stfs_extract.py" "$D/tools/" 2>/dev/null || true
+# rexiso lets the importer take a plain .iso (runtime XDVDFS reader, host tool).
+REXISO="$SDK/out/install/linux-amd64/bin/rexiso"; [ -x "$REXISO" ] || REXISO="$SDK/out/linux-amd64/Release/rexiso"
+cp "$REXISO" "$D/rexiso" && strip "$D/rexiso"
 chmod +x "$D/tools/"*.sh
 
 # --- facts and notes --------------------------------------------------------------

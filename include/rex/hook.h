@@ -96,9 +96,15 @@ void NoteImportUsed(const char* name);
 // strong definition wins, with no SDK edit and no duplicate-symbol error - in a
 // static link as well as a shared one, which is what makes a per-title native
 // kernel possible at all. REX_NATIVE_HOOK in the port is the other half.
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 // MSVC has no weak definitions; a port overriding an import there needs
-// /FORCE:MULTIPLE or an SDK edit instead.
+// /FORCE:MULTIPLE or an SDK edit instead. MinGW does spell them, but PE has
+// no weak symbol: GNU ld models one as a weak external with a default alias,
+// and refuses to dllexport that ("symbol wrong type (2 vs 3)") - so a weak
+// hook would cost the runtime DLL every one of its ~2,900 exports. On Windows
+// the hooks are strong, and a title's REX_NATIVE_HOOK still wins for the
+// title's own calls because the linker takes the exe's object definition
+// before it searches the import library.
 #define REX_WEAK_EXPORT
 #else
 #define REX_WEAK_EXPORT __attribute__((weak))

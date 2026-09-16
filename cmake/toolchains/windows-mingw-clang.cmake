@@ -15,7 +15,12 @@ set(CMAKE_C_COMPILER_TARGET ${TRIPLE})
 set(CMAKE_CXX_COMPILER_TARGET ${TRIPLE})
 set(CMAKE_RC_COMPILER ${TRIPLE}-windres)
 
-set(CMAKE_FIND_ROOT_PATH /usr/${TRIPLE})
+# Package search is confined to the sysroot below, so an installed SDK that
+# lives elsewhere (out/install/win-amd64) has to be named as a second root:
+#   -DREXGLUE_FIND_ROOT_EXTRA=/path/to/out/install/win-amd64
+# A -D cache entry is visible here; rexglue_DIR alone is re-rooted and lost.
+set(REXGLUE_FIND_ROOT_EXTRA "" CACHE PATH "Extra CMAKE_FIND_ROOT_PATH entry (an installed SDK)")
+set(CMAKE_FIND_ROOT_PATH /usr/${TRIPLE} ${REXGLUE_FIND_ROOT_EXTRA})
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

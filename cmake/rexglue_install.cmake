@@ -64,6 +64,15 @@ if(NOT ANDROID)
     )
 endif()
 
+# rexiso ships inside every launcher bundle so the importer can take a plain
+# .iso as well as an archive. Not exported: nothing links against it.
+if(NOT ANDROID)
+    install(TARGETS rexiso
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        CONFIGURATIONS Release
+    )
+endif()
+
 if(REXGLUE_INSTALL_FIDELITYFX_TARGETS)
     install(TARGETS ${REXGLUE_INSTALL_FIDELITYFX_TARGETS}
         EXPORT rexglueTargets

@@ -287,6 +287,8 @@ if(NOT ANDROID)
     # Nothing on the device runs them, and they pull in host-only dependencies.
     add_subdirectory(src/codegen)
     add_subdirectory(src/rexglue)
+    # Disc-image (XDVDFS) lister/extractor for the launchers' importer.
+    add_subdirectory(src/rexiso)
 endif()
 
 # Add tests subdirectory if tests are enabled

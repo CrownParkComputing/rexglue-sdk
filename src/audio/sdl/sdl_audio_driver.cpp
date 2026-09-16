@@ -55,6 +55,12 @@ REXCVAR_DEFINE_STRING(
     "delivery. The header is finished on shutdown; a killed process leaves sizes of 0 which most "
     "players still handle.");
 
+REXCVAR_DEFINE_STRING(
+    audio_app_name, "rexglue", "Audio",
+    "Application name the audio stream carries (what PipeWire/PulseAudio show and remember "
+    "volume and mute against). Every port shares the default; a headless verification run "
+    "passes its own so that muting it does not mute the next live run of any title.");
+
 namespace rex::audio::sdl {
 
 namespace {
@@ -94,7 +100,8 @@ bool SDLAudioDriver::Initialize() {
   SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
 
   // Set app name for audio device identification
-  SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "rexglue");
+  SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING,
+                             REXCVAR_GET(audio_app_name).c_str());
 
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
     REXAPU_ERROR("SDL_InitSubSystem(SDL_INIT_AUDIO) failed: {}", SDL_GetError());

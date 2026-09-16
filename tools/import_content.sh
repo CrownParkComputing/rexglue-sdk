@@ -24,7 +24,7 @@ set -uo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TITLE="$(basename "$ROOT" | sed 's/-recomp$//')"
 SDK="${REXSDK_DIR:-/home/jon/rexglue-vmx}"
-STFS="$SDK/tools/stfs_extract.py"
+STFS="$ROOT/tools/stfs_extract.py"; [ -f "$STFS" ] || STFS="$SDK/tools/stfs_extract.py"
 
 have_gui() { [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v zenity >/dev/null 2>&1; }
 say()  { if have_gui; then zenity --info --no-wrap --title="$TITLE" --text="$1" 2>/dev/null; else echo "$1"; fi; }

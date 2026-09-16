@@ -63,7 +63,7 @@ def display_name(port):
     slug = _slug(port)
     cfg = _toml_pairs(_read(port / "config" / f"{slug}.toml"))
     name = cfg.get("window_title", ("", ""))[0].strip('"')
-    return name or slug
+    return name or bundle_facts(port).get("name") or slug
 
 
 def native_coverage(port):
@@ -72,7 +72,7 @@ def native_coverage(port):
     measures what the title calls and what the image really carries."""
     script = SDK / "native_report.py"
     if not script.is_file():
-        return None
+        return coverage_from_report(port)
     cmd = [sys.executable, str(script), str(port)]
     trace = port / "out" / "native" / "used.txt"
     exe = port / "out" / "build" / "linux" / _slug(port)
@@ -97,11 +97,42 @@ def native_coverage(port):
             "imported": int(imported.group(1)) if imported else None}
 
 
+def coverage_from_report(port):
+    """A launcher bundle carries NATIVE_COVERAGE.md (written by native_report.py
+    --write at bundle time) instead of the tool and the trace."""
+    text = _read(port / "NATIVE_COVERAGE.md")
+    m = re.search(r"(\d+) of (\d+) imports (called at runtime )?are native \((\d+)%\)", text)
+    if not m:
+        return None
+    groups = []
+    for g in re.finditer(r"^\| ([^|]+?) \| +(\d+) \| +(\d+) \|$", text, re.M):
+        if g.group(1).strip() != "group":
+            groups.append((g.group(1).strip(), int(g.group(2)), int(g.group(3))))
+    imported = re.search(r"(\d+) imported in total", text)
+    return {"native": int(m.group(1)), "total": int(m.group(2)), "percent": int(m.group(4)),
+            "groups": groups, "basis": "called" if m.group(3) else "imported",
+            "imported": int(imported.group(1)) if imported else None}
+
+
+def bundle_facts(port):
+    out = {}
+    for line in _read(port / "bundle.txt").splitlines():
+        k, _, v = line.partition("=")
+        if k:
+            out[k.strip()] = v.strip()
+    return out
+
+
 def recompile_size(port):
     gen = port / "generated" / "default"
     cpp = sorted(gen.glob("*_recomp.*.cpp")) if gen.is_dir() else []
-    funcs = sum(_read(f).count("DEFINE_REX_FUNC(") for f in cpp)
-    return {"functions": funcs, "files": len(cpp)}
+    if cpp:
+        return {"functions": sum(_read(f).count("DEFINE_REX_FUNC(") for f in cpp), "files": len(cpp)}
+    facts = bundle_facts(port)
+    try:
+        return {"functions": int(facts.get("functions", 0)), "files": int(facts.get("files", 0))}
+    except ValueError:
+        return {"functions": 0, "files": 0}
 
 
 def special_changes(port):

@@ -7,7 +7,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\Import-GameFiles.ps1 [-Source <file-or-folder>] [-Quiet]
 #
 # Exit: 0 imported and verified, 2 imported but not the expected rip, 1 nothing imported.
-param([string]$Source = "", [switch]$Quiet)
+param([string]$Source = "", [string]$Dlc = "", [switch]$Quiet)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Facts = @{}
@@ -20,6 +20,48 @@ function Say($text, $icon = 'Information') {
   if ($Quiet) { Write-Host $text } else { [void][System.Windows.Forms.MessageBox]::Show($text, "$Name - Import game files", 'OK', $icon) }
 }
 function Fail($text) { Say $text 'Error'; exit 1 }
+
+# --- DLC -----------------------------------------------------------------------
+# The runtime enumerates DLC as a raw LIVE/CON/PIRS package dropped into the
+# content tree and mounts it on demand, so installing a pack is a header-checked
+# copy into user-data\0000000000000000\<title-id>\<content-type>\. The two
+# header fields we need are big-endian u32s: content_type at 0x344, title id at
+# 0x360 (inside execution_info at 0x344+0x10+0x0C).
+function Read-Be32($bytes, $off) {
+  return ([uint32]$bytes[$off] -shl 24) -bor ([uint32]$bytes[$off+1] -shl 16) -bor ([uint32]$bytes[$off+2] -shl 8) -bor [uint32]$bytes[$off+3]
+}
+function Install-Dlc($pkg) {
+  if (-not (Test-Path -LiteralPath $pkg)) { Say "DLC package not found:`n$pkg" 'Error'; return $false }
+  $fs = [System.IO.File]::OpenRead($pkg)
+  try { $head = New-Object byte[] 0x400; [void]$fs.Read($head, 0, 0x400) } finally { $fs.Close() }
+  $magic = [System.Text.Encoding]::ASCII.GetString($head, 0, 4)
+  if ($magic -ne 'LIVE' -and $magic -ne 'CON ' -and $magic -ne 'PIRS') {
+    Say "That is not an Xbox 360 content package.`n`nDLC is a single LIVE / CON / PIRS file:`n$([IO.Path]::GetFileName($pkg))" 'Error'; return $false
+  }
+  $ctype = '{0:X8}' -f (Read-Be32 $head 0x344)
+  $tid   = '{0:X8}' -f (Read-Be32 $head 0x360)
+  $dest  = Join-Path $Root "user-data\0000000000000000\$tid\$ctype"
+  New-Item -ItemType Directory -Path $dest -Force | Out-Null
+  Copy-Item -LiteralPath $pkg -Destination (Join-Path $dest ([IO.Path]::GetFileName($pkg))) -Force
+  Write-Host "installed DLC $([IO.Path]::GetFileName($pkg)) -> title $tid type $ctype"
+  return $true
+}
+function Offer-Dlc {
+  if ($Quiet) { return }
+  while ($true) {
+    $r = [System.Windows.Forms.MessageBox]::Show(
+      "Any downloadable content (DLC) to install for $Name?`n`nA DLC pack is a single LIVE / CON / PIRS file. Most titles have none - you can skip this.",
+      "$Name - DLC", 'YesNo', 'Question')
+    if ($r -ne 'Yes') { break }
+    $d = New-Object System.Windows.Forms.OpenFileDialog
+    $d.Title = "Select the DLC package"
+    $d.Filter = "Content packages|*.*"
+    if ($d.ShowDialog() -ne 'OK') { continue }
+    if (Install-Dlc $d.FileName) { Say "DLC installed:`n$([IO.Path]::GetFileName($d.FileName))" }
+  }
+}
+
+if ($Dlc) { if (Install-Dlc $Dlc) { exit 0 } else { exit 1 } }
 
 if (-not $Source) {
   $rec = if (Test-Path "$Root\content\SOURCE.txt") { Get-Content "$Root\content\SOURCE.txt" -First 1 } else { "see content\SOURCE.txt" }
@@ -98,5 +140,6 @@ if ($missing.Count -or $bad.Count) {
   Say "Imported into assets\, but it is not the expected rip:`n$summary`n`nFirst problems:`n$first`n`nThe game may still run. The expected source is in content\SOURCE.txt." 'Warning'
   exit 2
 }
+Offer-Dlc
 Say "Game files imported and verified.`n$summary`n`nYou can Play now."
 exit 0

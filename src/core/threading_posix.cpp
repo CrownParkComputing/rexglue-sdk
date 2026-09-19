@@ -1565,10 +1565,18 @@ class PosixThread : public PosixConditionHandle<Thread> {
   void set_name(std::string name) override {
     handle_.WaitStarted();
     Thread::set_name(name);
+#if REX_PLATFORM_ANDROID
+    // Android's pthread_setname_np implementation on some vendor libc
+    // builds corrupts the allocator when a foreign pthread handle is passed
+    // from a worker thread. Keep the logical name for diagnostics, but avoid
+    // the OS call on Android; thread naming is not required for execution.
+    return;
+#else
     if (name.length() > 15) {
       name = name.substr(0, 15);
     }
     handle_.set_name(name);
+#endif
   }
 
   uint32_t system_id() const override { return handle_.system_id(); }

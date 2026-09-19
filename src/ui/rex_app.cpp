@@ -62,7 +62,11 @@ REXCVAR_DEFINE_BOOL(
     window_title_build_stamp, false, "UI",
     "Append the SDK build stamp to the window title. Useful while bringing a title up and telling "
     "two builds apart; noise in anything handed to a player, so off by default.");
+#if REX_PLATFORM_ANDROID
+REXCVAR_DEFINE_STRING(gpu_plugin, "xenos", "GPU",
+#else
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+#endif
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

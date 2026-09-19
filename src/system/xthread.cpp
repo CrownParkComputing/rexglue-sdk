@@ -22,6 +22,11 @@
 #include <rex/literals.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <algorithm>
+#include <cstdio>
+#include <utility>
+#include <vector>
+
 #include <rex/ppc/context.h>
 #include <rex/platform/exceptions.h>
 #include <rex/runtime.h>
@@ -177,9 +182,11 @@ void XThread::set_name(const std::string_view name) {
   thread_name_ = fmt::format("{} ({:08X})", name, handle());
 
   if (thread_) {
+#if !REX_PLATFORM_ANDROID
     // May be getting set before the thread is created.
     // One the thread is ready it will handle it.
     thread_->set_name(thread_name_);
+#endif
   }
 }
 
@@ -440,7 +447,9 @@ X_STATUS XThread::Create() {
     rex::thread::set_current_thread_id(handle());
 
     // Set name immediately, if we have one.
+#if !REX_PLATFORM_ANDROID
     thread_->set_name(thread_name_);
+#endif
 
     PROFILE_THREAD_ENTER(thread_name_.c_str());
     PROFILE_THREAD_CREATED();
@@ -877,6 +886,58 @@ uint8_t XThread::active_cpu() const {
   return pcr.prcb_data.current_cpu;
 }
 
+namespace {
+
+// Host cores ordered fastest first.
+//
+// The console has six identical hardware threads, so mapping guest CPU n onto
+// host core n is exact there and on any homogeneous desktop. On a big.LITTLE
+// phone it is actively harmful: guest CPU 0 carries the title's main thread,
+// and core 0 is the SLOWEST core in the machine. Measured on a Retroid Pocket
+// Flip2 (Snapdragon 865: cpu0-3 at 1.80 GHz in-order, cpu4-6 at 2.42, cpu7 at
+// 2.84) - Geometry Wars 2's main guest thread sat pegged on cpu0 while the
+// prime core idled.
+//
+// So the index is a PREFERENCE ORDER, not a core number: guest CPU 0 gets the
+// fastest core available, and so on down. On a homogeneous host every core
+// reports the same maximum and the order stays the identity mapping, which is
+// what the console-exact behaviour needs.
+const std::vector<uint32_t>& HostCoresBySpeed() {
+  static const std::vector<uint32_t> order = [] {
+    const uint32_t count = uint32_t(rex::thread::logical_processor_count());
+    std::vector<std::pair<uint64_t, uint32_t>> cores;
+    cores.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      uint64_t max_khz = 0;
+#if defined(__linux__)
+      char path[128];
+      std::snprintf(path, sizeof(path),
+                    "/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", i);
+      if (FILE* f = std::fopen(path, "rb")) {
+        if (std::fscanf(f, "%llu", reinterpret_cast<unsigned long long*>(&max_khz)) != 1) {
+          max_khz = 0;
+        }
+        std::fclose(f);
+      }
+#endif
+      cores.emplace_back(max_khz, i);
+    }
+    // Fastest first, and ties keep their core order so a homogeneous host is
+    // left with the identity mapping it had before.
+    std::stable_sort(cores.begin(), cores.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<uint32_t> result;
+    result.reserve(cores.size());
+    for (const auto& core : cores) {
+      result.push_back(core.second);
+    }
+    return result;
+  }();
+  return order;
+}
+
+}  // namespace
+
 void XThread::SetActiveCpu(uint8_t cpu_index) {
   // May be called during thread creation - don't skip if current == new.
 
@@ -896,7 +957,9 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
 
   if (rex::thread::logical_processor_count() >= 6) {
     if (!REXCVAR_GET(ignore_thread_affinities)) {
-      thread_->set_affinity_mask(uint64_t(1) << cpu_index);
+      const std::vector<uint32_t>& order = HostCoresBySpeed();
+      const uint32_t host_core = cpu_index < order.size() ? order[cpu_index] : cpu_index;
+      thread_->set_affinity_mask(uint64_t(1) << host_core);
     }
   } else {
     REXSYS_WARN("Too few processor cores - scheduling will be wonky");

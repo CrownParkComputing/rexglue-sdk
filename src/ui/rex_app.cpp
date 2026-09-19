@@ -11,6 +11,8 @@
 
 #include <rex/rex_app.h>
 
+#include <rex/ppc/func.h>
+
 #include <cstdlib>
 
 #include <rex/assert.h>
@@ -23,6 +25,7 @@
 #include <rex/logging.h>
 #include <rex/ui/overlay/achievement_toast.h>
 #include <rex/ui/overlay/achievements_overlay.h>
+#include <rex/ui/overlay/high_scores_overlay.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
@@ -42,6 +45,10 @@
 
 #include <fmt/format.h>
 #include <imgui.h>
+
+#if REX_PLATFORM_ANDROID
+#include <SDL3/SDL_system.h>
+#endif
 
 #include <algorithm>
 #include <filesystem>
@@ -74,8 +81,26 @@ std::unique_ptr<ui::ImGuiDialog> ReXApp::CreateAchievementsOverlay() {
   if (!runtime_ || !runtime_->kernel_state() || !imgui_drawer_ || !immediate_drawer_) {
     return nullptr;
   }
+  // Closing is deferred out of the draw pass: the dialog is asking to go away
+  // from inside its own OnDraw, and resetting the unique_ptr there would free
+  // the object that is still drawing.
+  auto close_requested = [this]() {
+    app_context().CallInUIThreadDeferred([this]() { achievements_overlay_.reset(); });
+  };
   return std::make_unique<ui::AchievementsOverlayDialog>(
-      imgui_drawer_.get(), immediate_drawer_.get(), runtime_.get(), &achievements());
+      imgui_drawer_.get(), immediate_drawer_.get(), runtime_.get(), &achievements(),
+      std::move(close_requested));
+}
+
+std::unique_ptr<ui::ImGuiDialog> ReXApp::CreateHighScoresOverlay() {
+  if (!runtime_ || !imgui_drawer_) {
+    return nullptr;
+  }
+  auto close_requested = [this]() {
+    app_context().CallInUIThreadDeferred([this]() { high_scores_overlay_.reset(); });
+  };
+  return std::make_unique<ui::HighScoresOverlayDialog>(imgui_drawer_.get(), runtime_.get(),
+                                                       std::move(close_requested));
 }
 
 std::unique_ptr<ui::AchievementNotificationDialog> ReXApp::CreateAchievementNotificationDialog() {
@@ -119,6 +144,14 @@ bool ReXApp::SetupEnvironment() {
   if (!game_data_cvar.empty()) {
     game_dir = game_data_cvar;
   }
+#if REX_PLATFORM_ANDROID
+  if (game_dir.empty()) {
+    if (const char* android_files = SDL_GetAndroidExternalStoragePath();
+        android_files && *android_files) {
+      game_dir = std::filesystem::path(android_files) / "game";
+    }
+  }
+#endif
 
   // User data: cvar override, or platform user directory
   std::filesystem::path user_dir;
@@ -126,7 +159,16 @@ bool ReXApp::SetupEnvironment() {
   if (!user_data_cvar.empty()) {
     user_dir = user_data_cvar;
   } else {
+#if REX_PLATFORM_ANDROID
+    if (const char* android_files = SDL_GetAndroidExternalStoragePath();
+        android_files && *android_files) {
+      user_dir = std::filesystem::path(android_files) / "user";
+    } else {
+      user_dir = rex::filesystem::GetUserFolder() / GetName();
+    }
+#else
     user_dir = rex::filesystem::GetUserFolder() / GetName();
+#endif
   }
 
   // Update data: cvar override, or empty (opt-in)
@@ -261,7 +303,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system());
     if (input_sys) {
       input_sys->SetActiveCallback([this]() {
-        if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_)
+        if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ &&
+            !achievements_overlay_ && !high_scores_overlay_)
           return true;
         return !imgui_drawer_->GetIO().WantCaptureMouse;
       });
@@ -467,7 +510,27 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
     if (achievements_overlay_) {
       achievements_overlay_.reset();
     } else {
+      // One page of the blade at a time; two overlapping centred panels is
+      // just an unreadable pile.
+      high_scores_overlay_.reset();
       achievements_overlay_ = CreateAchievementsOverlay();
+    }
+  });
+  // An open-only action with no key of its own, for the kernel to call when a
+  // title asks to read its leaderboard. The player's F6 toggles; a title
+  // polling XUserReadStats every frame must not, or the page flickers.
+  rex::ui::RegisterBind("bind_high_scores_open", "", "Open high scores overlay", [this] {
+    if (!high_scores_overlay_) {
+      achievements_overlay_.reset();
+      high_scores_overlay_ = CreateHighScoresOverlay();
+    }
+  });
+  rex::ui::RegisterBind("bind_high_scores", "F6", "Toggle high scores overlay", [this] {
+    if (high_scores_overlay_) {
+      high_scores_overlay_.reset();
+    } else {
+      achievements_overlay_.reset();
+      high_scores_overlay_ = CreateHighScoresOverlay();
     }
   });
 
@@ -553,6 +616,9 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   // lock still held by a straggler TerminateTitle left running. Flush (not
   // ShutdownLogging, which frees loggers a straggler may still use); the OS
   // reclaims the rest.
+  // What indirect dispatch cost this session. Reported here rather than in
+  // Runtime::Shutdown because this path never reaches it.
+  rex::runtime::ReportIndirectDispatchStats();
   REXLOG_INFO("Title terminated; hard-exiting process.");
   rex::FlushLogging();
   std::_Exit(0);
@@ -619,6 +685,7 @@ void ReXApp::OnDestroy() {
   }
   achievement_notification_.reset();
   achievements_overlay_.reset();
+  high_scores_overlay_.reset();
   settings_overlay_.reset();
   console_overlay_.reset();
   debug_overlay_.reset();

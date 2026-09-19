@@ -14,11 +14,21 @@ SLUG="$1"; APP_NAME="$2"; LIBMAIN="$3"; SDK_LIBS="$4"; OUT_APK="$5"
 # has to be handed to it here. Space-separated, e.g.
 #   EXTRA_ARGS="--clear_memory_page_state=true --render_target_path_vulkan=fsi"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+ANDROID_WINDOW_WIDTH="${ANDROID_WINDOW_WIDTH:-640}"
+ANDROID_WINDOW_HEIGHT="${ANDROID_WINDOW_HEIGHT:-360}"
+if [ -n "$ANDROID_WINDOW_WIDTH" ] && [ -n "$ANDROID_WINDOW_HEIGHT" ]; then
+    EXTRA_ARGS="--window_width=${ANDROID_WINDOW_WIDTH} --window_height=${ANDROID_WINDOW_HEIGHT} --resolution=640x360 ${EXTRA_ARGS}"
+fi
 # Which GPU backend(s) to ship. "xenos" is full Xenos emulation and is what
 # renders correctly today; "native" translates to real GPU commands with no
 # EDRAM, tiling or resolve emulation. Space-separated to ship both and choose
 # at runtime with --gpu_plugin.
 GPU_PLUGINS="${GPU_PLUGINS:-xenos}"
+TURNIP_ZIP="${TURNIP_ZIP:-}"
+# The launcher icon comes from the title's own artwork. Without one the APK
+# ships no icon resource at all and every launcher falls back to the stock
+# Android robot, which is what "all my ports look the same" looks like.
+ICON_SOURCE="${ICON_SOURCE:-assets/game.png}"
 GPU_PLUGIN_DEFAULT="${GPU_PLUGINS%% *}"   # the activity asks for the first one
 PACKAGE="com.crownpark.rexglue.${SLUG}"
 
@@ -45,10 +55,46 @@ for a in $EXTRA_ARGS; do
     EXTRA_JAVA="${EXTRA_JAVA}        args.add(\"${a}\");
 "
 done
+if [ -n "$TURNIP_ZIP" ]; then
+    EXTRA_JAVA="${EXTRA_JAVA}        String nativeLibs = getApplicationInfo().nativeLibraryDir;
+        args.add(\"--vulkan_loader_library=libvulkan_freedreno.so\");
+        args.add(\"--vulkan_custom_driver_dir=\" + nativeLibs + \"/\");
+        args.add(\"--vulkan_hook_library_dir=\" + nativeLibs);
+"
+fi
 cat > "$WORK/src/${PACKAGE//./\/}/MainActivity.java" <<JAVA
 package ${PACKAGE};
 import org.libsdl.app.SDLActivity;
+import android.os.Bundle;
+import android.view.View;
+import android.view.WindowManager;
 public class MainActivity extends SDLActivity {
+    static {
+        // Android's app linker namespace may hide packaged DSOs that are not a
+        // DT_NEEDED dependency. Preload the optional Mesa driver so the native
+        // Vulkan loader selection can resolve it by soname.
+        try { System.loadLibrary("vulkan_freedreno"); }
+        catch (UnsatisfiedLinkError ignored) { }
+    }
+    private void enterGameMode() {
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().setSustainedPerformanceMode(true);
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+            View.SYSTEM_UI_FLAG_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    }
+    @Override protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        enterGameMode();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused) enterGameMode();
+    }
     @Override protected String[] getLibraries() {
         return new String[] { "main" };
     }
@@ -103,10 +149,15 @@ cat > "$WORK/AndroidManifest.xml" <<MANIFEST
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="34" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.vulkan.version"
+                  android:version="4198400" android:required="true" />
     <application android:label="${APP_NAME}" android:hasCode="true"
-                 android:allowBackup="false"
-                 android:extractNativeLibs="true"
-                 android:debuggable="true">
+                 android:icon="@drawable/ic_launcher"
+                 android:roundIcon="@drawable/ic_launcher"
+                 android:allowBackup="false" android:appCategory="game"
+                 android:largeHeap="true" android:hardwareAccelerated="true"
+                 android:extractNativeLibs="$([ -n "$TURNIP_ZIP" ] && echo true || echo false)"
+                 android:debuggable="${ANDROID_DEBUGGABLE:-false}">
         <!-- The title bar belongs to the ACTIVITY, not to SDL. The fullscreen
              cvar only affects the SDL window, so without this theme the app
              draws under a bar showing the window title and build string.
@@ -115,9 +166,9 @@ cat > "$WORK/AndroidManifest.xml" <<MANIFEST
         <activity android:name=".MainActivity"
                   android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
                   android:exported="true"
-                  android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
+                  android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode"
                   android:launchMode="singleInstance"
-                  android:screenOrientation="landscape">
+                  android:screenOrientation="sensorLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -151,6 +202,16 @@ for so in "$LIBMAIN" "$SDK_LIBS"/librexruntime.so $PLUGIN_SOS; do
     cp "$so" "$WORK/lib/arm64-v8a/"
     "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$(basename "$so")"
 done
+if [ -n "$TURNIP_ZIP" ]; then
+    unzip -p "$TURNIP_ZIP" libvulkan_freedreno.so > "$WORK/lib/arm64-v8a/libvulkan_freedreno.so"
+    [ -s "$WORK/lib/arm64-v8a/libvulkan_freedreno.so" ] || {
+        echo "Turnip package has no libvulkan_freedreno.so" >&2; exit 1;
+    }
+    for hook in libmain_hook.so libhook_impl.so; do
+        cp "$SDK_LIBS/$hook" "$WORK/lib/arm64-v8a/$hook"
+        "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$hook"
+    done
+fi
 # Multi-module titles (Split/Second: launcher + SKIPPER + SPLITSECOND1) keep
 # every recompiled module in its own lib<slug>_<MODULE>.so beside libmain.so.
 # They ride along, and the runtime asks the linker for them by name on Android.
@@ -160,14 +221,33 @@ for so in "$(dirname "$LIBMAIN")"/lib${SLUG}_*.so; do
     "$STRIP" --strip-unneeded "$WORK/lib/arm64-v8a/$(basename "$so")"
 done
 
+echo "==> launcher icon"
+RES_ARGS=()
+if [ -f "$ICON_SOURCE" ]; then
+    python3 "$(dirname "${BASH_SOURCE[0]}")/make_icon.py" "$ICON_SOURCE" "$WORK/res"
+    "$BUILD_TOOLS/aapt2" compile --dir "$WORK/res" -o "$WORK/res.zip"
+    RES_ARGS=("$WORK/res.zip")
+else
+    # Said rather than skipped silently: an APK with the stock robot on it is
+    # the symptom, and this line is the cause.
+    echo "    no artwork at $ICON_SOURCE - shipping without an icon"
+fi
+
 echo "==> aapt2 link"
 "$BUILD_TOOLS/aapt2" link -o "$WORK/base.apk" -I "$PLATFORM_JAR" \
-    --manifest "$WORK/AndroidManifest.xml" --min-sdk-version 30 --target-sdk-version 34
+    --manifest "$WORK/AndroidManifest.xml" --min-sdk-version 30 --target-sdk-version 34 \
+    ${RES_ARGS+"${RES_ARGS[@]}"}
 
 echo "==> assembling"
 cd "$WORK"
-zip -q -r base.apk classes.dex lib
-"$BUILD_TOOLS/zipalign" -f -p 4 base.apk aligned.apk
+zip -q -r base.apk classes.dex
+# Android can mmap uncompressed, page-aligned DSOs straight from the APK.
+# This avoids extraction, duplicate install storage and startup I/O.
+zip -q -0 -r base.apk lib
+# -P 16 is the modern replacement for -p and aligns uncompressed arm64 DSOs
+# for devices with either 4 KB or 16 KB pages. Current zipalign rejects both
+# switches together.
+"$BUILD_TOOLS/zipalign" -P 16 -f 4 base.apk aligned.apk
 
 KEYSTORE="$HOME/.android/debug.keystore"
 if [ ! -f "$KEYSTORE" ]; then

@@ -11,10 +11,12 @@ set -euo pipefail
 PORT="$(cd -- "$1" && pwd)"; SLUG="$2"
 PKG="com.crownpark.rexglue.${SLUG}"
 ADB="${ANDROID_HOME:-$HOME/Android/Sdk}/platform-tools/adb"
+ADB_ARGS=()
+[ -n "${ANDROID_SERIAL:-}" ] && ADB_ARGS=(-s "$ANDROID_SERIAL")
 
-"$ADB" install -r "$PORT/out/android/${SLUG}.apk"
-"$ADB" shell mkdir -p "/sdcard/Android/data/$PKG/files/game" "/sdcard/Android/data/$PKG/files/user"
+"$ADB" "${ADB_ARGS[@]}" install -r "$PORT/out/android/${SLUG}.apk"
+"$ADB" "${ADB_ARGS[@]}" shell mkdir -p "/sdcard/Android/data/$PKG/files/game" "/sdcard/Android/data/$PKG/files/user"
 echo "==> pushing game tree"
-"$ADB" push "$PORT/assets/." "/sdcard/Android/data/$PKG/files/game/" | tail -1
+"$ADB" "${ADB_ARGS[@]}" push "$PORT/assets/." "/sdcard/Android/data/$PKG/files/game/" | tail -1
 echo "==> $PKG ready; launch with:"
-echo "    $ADB shell am start -n $PKG/.MainActivity"
+echo "    $ADB ${ADB_ARGS[*]} shell am start -n $PKG/.MainActivity"

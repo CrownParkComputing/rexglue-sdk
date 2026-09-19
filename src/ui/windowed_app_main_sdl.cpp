@@ -23,6 +23,7 @@
 // hidden visibility, so without the header's export decoration the symbol is
 // present but not findable and the app exits the instant it starts.
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_system.h>
 #endif
 
 #include <rex/cvar.h>
@@ -30,6 +31,13 @@
 #include <rex/platform.h>
 #include <rex/ui/windowed_app.h>
 #include <rex/ui/windowed_app_context_sdl.h>
+
+#if defined(REX_HAS_RAYLIB_DISPLAY) && REX_HAS_RAYLIB_DISPLAY
+#include <atomic>
+#include <thread>
+
+#include "raylib_display.h"
+#endif
 
 #if REX_PLATFORM_WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -46,16 +54,74 @@
 namespace {
 
 int RunWindowedApp(int argc, char** argv) {
+#if REX_PLATFORM_ANDROID
+  // SDL's Java argument bridge is optional on vendor Android builds. Keep the
+  // native entry point self-contained so a port still launches when that
+  // bridge supplies an empty argv: SDL exposes the app-specific external files
+  // directory, which is where the APK deploy script installs game and user
+  // data. These are appended only as fallbacks, so explicit Java/device args
+  // continue to win through the normal cvar precedence rules.
+  std::vector<std::string> android_fallback_args;
+  std::vector<std::string> remaining;
+  const char* android_files = SDL_GetAndroidExternalStoragePath();
+  bool has_game_root = false;
+  bool has_user_root = false;
+  if (android_files && *android_files) {
+    for (int i = 1; i < argc; ++i) {
+      if (!argv[i]) continue;
+      has_game_root |= std::string_view(argv[i]).starts_with("--game_data_root");
+      has_user_root |= std::string_view(argv[i]).starts_with("--user_data_root");
+    }
+    if (!has_game_root)
+      android_fallback_args.emplace_back(std::string("--game_data_root=") + android_files + "/game");
+    if (!has_user_root)
+      android_fallback_args.emplace_back(std::string("--user_data_root=") + android_files + "/user");
+    // 640x360 is the low Android profile. It cuts presentation bandwidth and
+    // keeps the guest output readable when the panel is scaled up by Android.
+    android_fallback_args.emplace_back("--window_width=640");
+    android_fallback_args.emplace_back("--window_height=360");
+    android_fallback_args.emplace_back("--resolution=640x360");
+    std::vector<char*> fallback_argv;
+    fallback_argv.reserve(static_cast<size_t>(argc) + android_fallback_args.size());
+    for (int i = 0; i < argc; ++i) fallback_argv.push_back(argv[i]);
+    for (auto& arg : android_fallback_args) fallback_argv.push_back(arg.data());
+    fallback_argv.push_back(nullptr);
+    argc = static_cast<int>(fallback_argv.size()) - 1;
+    argv = fallback_argv.data();
+    remaining = rex::cvar::Init(argc, argv);
+    rex::cvar::ApplyEnvironment();
+    rex::InitLoggingEarly();
+  }
+#else
   auto remaining = rex::cvar::Init(argc, argv);
   rex::cvar::ApplyEnvironment();
   rex::InitLoggingEarly();
+#endif
 
-  int result;
-  {
+#if defined(REX_HAS_RAYLIB_DISPLAY) && REX_HAS_RAYLIB_DISPLAY
+  // Reaches into the SDL app's context from raylib's on_close callback, which
+  // runs on a different thread - see the comment below on why the two loops
+  // are split across threads at all. Set once app_context exists, cleared
+  // before it is destroyed, so on_close never touches a dangling context.
+  std::atomic<rex::ui::SDLWindowedAppContext*> live_context{nullptr};
+#endif
+
+  // The SDL app's whole lifetime: construct its context, build the app,
+  // initialize it, pump its loop, tear it down. Ordinarily this just runs on
+  // the calling thread; with the raylib display on, it runs on a background
+  // thread instead (below) because SDLWindowedAppContext fixes "the UI
+  // thread" to whichever thread constructs it - IsInUIThread() and
+  // HasQuitFromUIThread() assert on that identity, so the construction has to
+  // happen on the same thread as the loop, not just the loop call.
+  auto run_sdl_app = [&]() -> int {
+    int result;
     rex::ui::SDLWindowedAppContext app_context;
     if (!app_context.Initialize()) {
       return EXIT_FAILURE;
     }
+#if defined(REX_HAS_RAYLIB_DISPLAY) && REX_HAS_RAYLIB_DISPLAY
+    live_context.store(&app_context, std::memory_order_release);
+#endif
 
 #if REX_PLATFORM_WIN32
     // Apartment-threaded COM for shell dialogs.
@@ -77,14 +143,49 @@ int RunWindowedApp(int argc, char** argv) {
 
     result = app->OnInitialize() ? app_context.RunMainMessageLoop() : EXIT_FAILURE;
 
-    app->InvokeOnDestroy();
-  }
-
-#if REX_PLATFORM_WIN32
-  CoUninitialize();
+#if defined(REX_HAS_RAYLIB_DISPLAY) && REX_HAS_RAYLIB_DISPLAY
+    // The SDL app quit on its own (ESC, a crash, the title exiting) - close
+    // the raylib window with it rather than leaving it open, which would
+    // hang the join below forever.
+    live_context.store(nullptr, std::memory_order_release);
+    rex::ui::raylib_display::Stop();
 #endif
 
-  return result;
+    app->InvokeOnDestroy();
+
+#if REX_PLATFORM_WIN32
+    CoUninitialize();
+#endif
+    return result;
+  };
+
+#if defined(REX_HAS_RAYLIB_DISPLAY) && REX_HAS_RAYLIB_DISPLAY
+  if (rex::ui::raylib_display::Enabled()) {
+    // raylib's GLFW window has to be created on the process's real first
+    // thread: creating it from any other thread, in a process where
+    // SDL3/Vulkan already owns a window on the main thread, deadlocks
+    // NVIDIA's proprietary driver - found live running Daytona (see
+    // HANDOVER.md in daytona-recomp), not a hang worth chasing with a mutex,
+    // since the two windows simply cannot both be created off the main
+    // thread in one process on this driver. So the SDL app moves to a
+    // background thread instead, and this thread stays raylib's.
+    int sdl_result = EXIT_SUCCESS;
+    std::thread sdl_thread([&] { sdl_result = run_sdl_app(); });
+    rex::ui::raylib_display::RunOnMainThread([&] {
+      // The raylib window closed on its own (the user closed it) - tell the
+      // SDL app to quit too. RequestDeferredQuit is documented safe from any
+      // thread, which this is: raylib's main thread, not the SDL one.
+      if (rex::ui::SDLWindowedAppContext* ctx =
+              live_context.load(std::memory_order_acquire)) {
+        ctx->RequestDeferredQuit();
+      }
+    });
+    sdl_thread.join();
+    return sdl_result;
+  }
+#endif
+
+  return run_sdl_app();
 }
 
 #if REX_PLATFORM_WIN32

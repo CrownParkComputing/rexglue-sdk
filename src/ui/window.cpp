@@ -19,14 +19,26 @@
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 
+#if REX_PLATFORM_ANDROID
+#include <SDL3/SDL_system.h>
+#endif
+
 #include <imgui.h>
 
+#if REX_PLATFORM_ANDROID
+REXCVAR_DEFINE_INT32(window_width, 640, "UI/Window",
+#else
 REXCVAR_DEFINE_INT32(window_width, 0, "UI/Window",
+#endif
                      "Startup window width in logical pixels (0 = use app default)")
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+#if REX_PLATFORM_ANDROID
+REXCVAR_DEFINE_INT32(window_height, 360, "UI/Window",
+#else
 REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
+#endif
                      "Startup window height in logical pixels (0 = use app default)")
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);

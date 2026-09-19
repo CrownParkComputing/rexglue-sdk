@@ -23,8 +23,7 @@ namespace ui {
 // carried over from Xenia. Only the surface object itself was missing.
 class AndroidNativeWindowSurface final : public Surface {
  public:
-  explicit AndroidNativeWindowSurface(ANativeWindow* window, SDL_Window* sdl_window)
-      : window_(window), sdl_window_(sdl_window) {}
+  explicit AndroidNativeWindowSurface(ANativeWindow* window, SDL_Window* sdl_window);
   TypeIndex GetType() const override { return kTypeIndex_AndroidNativeWindow; }
   ANativeWindow* window() const { return window_; }
 

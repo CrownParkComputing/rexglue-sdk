@@ -99,11 +99,18 @@ REXCVAR_DEFINE_BOOL(gpu_log_memexport, false, "GPU",
 REXCVAR_DEFINE_UINT32(gpu_log_slow_draw_ms, 0, "GPU",
                       "Log draw stages taking at least this many milliseconds (0 disables).\n"
                       "Separates shader/pipeline compilation from texture and buffer uploads.");
+REXCVAR_DEFINE_BOOL(gpu_pass_timing, false, "GPU",
+                    "Time each render pass on the GPU with timestamp queries and report the "
+                    "total in the frame stats. Answers whether a frame is GPU-bound at all - "
+                    "the other columns only ever described the CPU's view of it.");
 REXCVAR_DEFINE_STRING(gpu_frame_stats_path, "", "GPU",
                       "Append per-frame CPU, fence wait and descriptor statistics to a CSV file.");
 REXCVAR_DEFINE_BOOL(vulkan_reuse_texture_descriptors, true, "GPU/Vulkan",
                     "Reuse texture descriptor sets when their layout, image views and samplers\n"
                     "are unchanged. Disable for diagnostic comparison.");
+REXCVAR_DEFINE_BOOL(vulkan_reuse_material_descriptor_sets, true, "GPU/Vulkan",
+                    "Reuse texture descriptor sets for matching non-adjacent materials within a "
+                    "frame. Disable for isolated descriptor-cache benchmarking.");
 REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
                     "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
 REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
@@ -1999,6 +2006,28 @@ bool VulkanCommandProcessor::SetupContext() {
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
 
+  // Timestamps around render passes. Optional: a device that cannot write them
+  // on the graphics queue simply reports no GPU time rather than failing, so
+  // this never blocks a title from running.
+  {
+    const ui::vulkan::VulkanDevice* timestamp_device = GetVulkanDevice();
+    timestamp_period_ns_ = timestamp_device->properties().timestampPeriod;
+    if (timestamp_period_ns_ > 0.0f && timestamp_device->properties().timestampValidBits != 0) {
+      VkQueryPoolCreateInfo timestamp_pool_info = {};
+      timestamp_pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      timestamp_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      timestamp_pool_info.queryCount = kTimestampQueriesPerFrame * kMaxFramesInFlight;
+      if (timestamp_device->functions().vkCreateQueryPool(
+              timestamp_device->device(), &timestamp_pool_info, nullptr,
+              &timestamp_query_pool_) != VK_SUCCESS) {
+        timestamp_query_pool_ = VK_NULL_HANDLE;
+        REXGPU_WARN("VulkanCommandProcessor: no timestamp query pool; GPU pass timing disabled");
+      }
+    } else {
+      REXGPU_WARN("VulkanCommandProcessor: device cannot timestamp the graphics queue");
+    }
+  }
+
   return true;
 }
 
@@ -2349,6 +2378,19 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
     return;
   }
 
+  // Generic bulk path: ranges that touch none of the side-effecting registers
+  // (scratch 0x0578-0x057F, COHER_STATUS_HOST 0x0A31, the DC_LUT write
+  // registers 0x1922-0x1925) nor the extended store past kRegisterCount behave
+  // identically whether written one by one or copied in bulk - per-register
+  // processing only pays the virtual dispatch and hook checks for nothing.
+  if (end_index < RegisterFile::kRegisterCount &&
+      (end_index < XE_GPU_REG_SCRATCH_REG0 || start_index > XE_GPU_REG_SCRATCH_REG7) &&
+      (end_index < XE_GPU_REG_COHER_STATUS_HOST || start_index > XE_GPU_REG_COHER_STATUS_HOST) &&
+      (end_index < XE_GPU_REG_DC_LUT_RW_INDEX || start_index > XE_GPU_REG_DC_LUT_30_COLOR)) {
+    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    return;
+  }
+
   CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
 }
 
@@ -2391,11 +2433,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms,upload_events,upload_pages,upload_ms,render_passes\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms,upload_events,upload_pages,upload_ms,render_passes,rp_breaks_barrier,rp_breaks_query,rp_breaks_forced,b_tex,b_shmem,b_rt,b_other,resolves,gpu_pass_ms,gpu_pass_max_ms,gpu_passes_timed,texture_sets_material_reused\n");
       } else {
         fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f,"
                 "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,"
-                "%llu,%llu,%.3f,%llu\n",
+                "%llu,%llu,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%llu,%llu\n",
                 g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
@@ -2419,7 +2461,17 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 frame_stats_.stage_ms[8], frame_stats_.stage_ms[9],
                 (unsigned long long)frame_stats_.upload_events,
                 (unsigned long long)frame_stats_.upload_pages, frame_stats_.upload_ms,
-                (unsigned long long)frame_stats_.render_passes);
+                (unsigned long long)frame_stats_.render_passes,
+                (unsigned long long)frame_stats_.render_pass_breaks_barrier,
+                (unsigned long long)frame_stats_.render_pass_breaks_query,
+                (unsigned long long)frame_stats_.render_pass_breaks_forced,
+                (unsigned long long)frame_stats_.barrier_source[kBarrierTexture],
+                (unsigned long long)frame_stats_.barrier_source[kBarrierSharedMemory],
+                (unsigned long long)frame_stats_.barrier_source[kBarrierRenderTarget],
+                (unsigned long long)frame_stats_.barrier_source[kBarrierOther],
+                (unsigned long long)frame_stats_.resolves,
+                gpu_pass_total_ms_, gpu_pass_max_ms_, (unsigned long long)gpu_passes_timed_,
+                (unsigned long long)frame_stats_.texture_sets_material_reused);
       }
       fclose(f);
     }
@@ -3302,14 +3354,22 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
   return true;
 }
 
-bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass,
+                                            BarrierSource source) {
   assert_true(submission_open_);
   SplitPendingBarrier();
   if (pending_barriers_.empty()) {
     if (force_end_render_pass) {
+      if (in_render_pass_) ++frame_stats_.render_pass_breaks_forced;
       EndRenderPass();
     }
     return false;
+  }
+  // The real barrier path: a pipeline barrier cannot be recorded inside a
+  // render pass, so every one of them costs the pass's tile store and reload.
+  if (in_render_pass_) {
+    ++frame_stats_.render_pass_breaks_barrier;
+    ++frame_stats_.barrier_source[source];
   }
   EndRenderPass();
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
@@ -3502,6 +3562,23 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
   in_render_pass_ = true;
+
+  if (timestamp_query_pool_ != VK_NULL_HANDLE && REXCVAR_GET(gpu_pass_timing)) {
+    const uint32_t slot_first = (frame_current_ % kMaxFramesInFlight) * kTimestampQueriesPerFrame;
+    // Two queries per pass, and the last pair in the span is left unused so a
+    // frame with more passes than the span holds simply stops timing rather
+    // than writing into the next frame's slot.
+    if (timestamp_query_next_ + 2 <= slot_first + kTimestampQueriesPerFrame) {
+      timestamp_pass_begin_query_ = timestamp_query_next_;
+      deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                                   timestamp_query_pool_,
+                                                   timestamp_pass_begin_query_);
+      timestamp_query_next_ += 2;
+      timestamp_queries_written_[frame_current_ % kMaxFramesInFlight] += 2;
+    } else {
+      timestamp_pass_begin_query_ = UINT32_MAX;
+    }
+  }
 }
 
 void VulkanCommandProcessor::EndRenderPass() {
@@ -3512,6 +3589,12 @@ void VulkanCommandProcessor::EndRenderPass() {
   // Every break costs the render pass's load/store of its attachments, so the
   // count per frame is worth having next to the draw count.
   ++frame_stats_.render_passes;
+  if (timestamp_pass_begin_query_ != UINT32_MAX) {
+    deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                                 timestamp_query_pool_,
+                                                 timestamp_pass_begin_query_ + 1);
+    timestamp_pass_begin_query_ = UINT32_MAX;
+  }
   if (current_render_pass_ == VK_NULL_HANDLE) {
     deferred_command_buffer_.CmdVkEndRendering();
   } else {
@@ -4128,29 +4211,36 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
     // different for some reason (like a race condition with the guest in index
-    // buffer processing in the primitive processor resulting in different host
-    // vertex shader types), the bindings will stay the same.
-    // TODO(Triang3l): Sampler caching and reuse for adjacent draws within one
-    // submission.
+    // buffer processing resulting in a different host vertex shader type), the
+    // bindings will stay the same. Keep the parameter vectors for adjacent
+    // draws using the same shader: MCLA reuses a small set of shaders across
+    // thousands of draws, and rebuilding these vectors was pure CPU work.
     uint32_t samplers_overflowed_count = 0;
     for (uint32_t j = 0; j < 2; ++j) {
       std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>& shader_samplers =
           j ? current_samplers_pixel_ : current_samplers_vertex_;
-      if (!i) {
-        shader_samplers.clear();
-      }
       const VulkanShader* shader = j ? pixel_shader : vertex_shader;
       if (!shader) {
+        shader_samplers.clear();
+        if (j) {
+          current_sampler_pixel_shader_ = nullptr;
+        } else {
+          current_sampler_vertex_shader_ = nullptr;
+        }
         continue;
       }
       const std::vector<VulkanShader::SamplerBinding>& shader_sampler_bindings =
           shader->GetSamplerBindingsAfterTranslation();
-      if (!i) {
+      const VulkanShader*& cached_shader =
+          j ? current_sampler_pixel_shader_ : current_sampler_vertex_shader_;
+      if (!i && cached_shader != shader) {
+        shader_samplers.clear();
         shader_samplers.reserve(shader_sampler_bindings.size());
         for (const VulkanShader::SamplerBinding& shader_sampler_binding : shader_sampler_bindings) {
           shader_samplers.emplace_back(texture_cache_->GetSamplerParameters(shader_sampler_binding),
                                        VK_NULL_HANDLE);
         }
+        cached_shader = shader;
       }
       for (std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& shader_sampler_pair :
            shader_samplers) {
@@ -4352,6 +4442,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   // Ensure vertex buffers are resident.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+  const uint64_t shared_memory_version = shared_memory_->invalidation_version();
   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
     uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
     uint32_t j;
@@ -4384,17 +4475,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
           return false;
       }
       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      // The request itself is the single most expensive thing in the draw path
-      // for a title issuing thousands of draws: it takes the global critical
-      // region and scans the page-validity bitmap, per fetch, per draw. Nothing
-      // can have changed while the fetch constant is the same range AND shared
-      // memory has not invalidated anything since it was made resident, so in
-      // that case skip it. An invalidation - including a CPU rewrite of a
-      // scratch vertex pool - bumps the version and forces the request again.
-      const uint64_t shared_memory_version = shared_memory_->invalidation_version();
+      // A global invalidation is intentionally conservative: a hot streaming
+      // pool may change every frame, but unrelated static vertex ranges remain
+      // resident. Confirm the exact range before sending those static streams
+      // through the deferred upload path again.
       if (state.address == vfetch_constant.address && state.size == vfetch_constant.size &&
-          state.resident_version == shared_memory_version) {
+          (state.resident_version == shared_memory_version ||
+           shared_memory_->RangeResident(vfetch_constant.address << 2,
+                                         vfetch_constant.size << 2))) {
         ++frame_stats_.vfetch_skipped;
+        state.resident_version = shared_memory_version;
         vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
         continue;
       }
@@ -5048,6 +5138,10 @@ bool VulkanCommandProcessor::IssueCopy() {
 
 bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   const bool collect_stats = !REXCVAR_GET(gpu_frame_stats_path).empty();
+  // Counted against the render-pass breaks: each resolve runs compute, which
+  // cannot be recorded inside a render pass, so the two numbers together say
+  // whether the breaks are one per resolve or several.
+  ++frame_stats_.resolves;
   AccumulateCpuTime resolve_timer(collect_stats ? &frame_stats_.resolve_cpu_ms : nullptr);
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -5475,6 +5569,10 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
   if (occlusion_query_pool_ != VK_NULL_HANDLE) {
     dfn.vkDestroyQueryPool(device, occlusion_query_pool_, nullptr);
   }
+  if (timestamp_query_pool_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyQueryPool(device, timestamp_query_pool_, nullptr);
+    timestamp_query_pool_ = VK_NULL_HANDLE;
+  }
 
   occlusion_query_pool_ = VK_NULL_HANDLE;
   occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
@@ -5524,6 +5622,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
     return false;
   }
 
+  if (in_render_pass_) ++frame_stats_.render_pass_breaks_query;
   EndRenderPass();
 
   DeferredCommandBuffer& command_buffer = deferred_command_buffer();
@@ -5549,6 +5648,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
     return false;
   }
 
+  if (in_render_pass_) ++frame_stats_.render_pass_breaks_query;
   EndRenderPass();
 
   DeferredCommandBuffer& command_buffer = deferred_command_buffer();
@@ -5793,6 +5893,44 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     return false;
   }
 
+  if (is_opening_frame && timestamp_query_pool_ != VK_NULL_HANDLE &&
+      REXCVAR_GET(gpu_pass_timing)) {
+    // This frame's slot belonged to the frame kMaxFramesInFlight back, whose
+    // fence has just been awaited above - so its timestamps are ready and
+    // reading them cannot stall. That is the whole reason the results lag:
+    // asking for them any earlier would mean waiting for the GPU to answer.
+    const ui::vulkan::VulkanDevice* ts_device = GetVulkanDevice();
+    const uint32_t slot = uint32_t(frame_current_ % kMaxFramesInFlight);
+    const uint32_t slot_first = slot * kTimestampQueriesPerFrame;
+    const uint32_t written = timestamp_queries_written_[slot];
+    if (written != 0) {
+      uint64_t values[kTimestampQueriesPerFrame];
+      if (ts_device->functions().vkGetQueryPoolResults(
+              ts_device->device(), timestamp_query_pool_, slot_first, written,
+              sizeof(uint64_t) * written, values, sizeof(uint64_t),
+              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        gpu_pass_total_ms_ = 0.0;
+        gpu_pass_max_ms_ = 0.0;
+        gpu_passes_timed_ = 0;
+        for (uint32_t i = 0; i + 1 < written; i += 2) {
+          if (values[i + 1] <= values[i]) {
+            continue;
+          }
+          const double ms =
+              double(values[i + 1] - values[i]) * double(timestamp_period_ns_) / 1000000.0;
+          gpu_pass_total_ms_ += ms;
+          gpu_pass_max_ms_ = std::max(gpu_pass_max_ms_, ms);
+          ++gpu_passes_timed_;
+        }
+      }
+    }
+    timestamp_queries_written_[slot] = 0;
+    timestamp_query_next_ = slot_first;
+    timestamp_pass_begin_query_ = UINT32_MAX;
+    deferred_command_buffer_.CmdVkResetQueryPool(timestamp_query_pool_, slot_first,
+                                                 kTimestampQueriesPerFrame);
+  }
+
   if (is_opening_frame) {
     // Update the completed frame index, also obtaining the actual completed
     // frame number (since the CPU may be actually less than 3 frames behind)
@@ -5847,6 +5985,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
       shared_memory_->UploadHotPages();
     }
     frame_used_async_placeholder_pipeline_ = false;
+    texture_transient_descriptor_sets_current_frame_.clear();
 
     // Reset bindings that depend on transient data.
     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
@@ -6175,6 +6314,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 }
 
 void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+  texture_transient_descriptor_sets_current_frame_.clear();
   texture_transient_descriptor_sets_free_.clear();
   texture_transient_descriptor_sets_used_.clear();
   transient_descriptor_allocator_textures_.Reset();
@@ -7381,39 +7521,43 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   }
   // Vertex shader textures and samplers.
   if (write_vertex_textures) {
-    ++frame_stats_.texture_sets_written;
     VkWriteDescriptorSet* write_textures =
         write_descriptor_sets.data() + write_descriptor_set_count;
+    VkDescriptorSet texture_descriptor_set;
     uint32_t texture_descriptor_set_write_count = WriteTransientTextureBindings(
         true, texture_count_vertex, sampler_count_vertex,
         current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref(),
         descriptor_write_image_info_.data() + vertex_texture_image_info_offset,
-        descriptor_write_image_info_.data() + vertex_sampler_image_info_offset, write_textures);
-    if (!texture_descriptor_set_write_count) {
+        descriptor_write_image_info_.data() + vertex_sampler_image_info_offset, texture_descriptor_set,
+        write_textures);
+    if (texture_descriptor_set == VK_NULL_HANDLE) {
       return false;
     }
+    frame_stats_.texture_sets_written += texture_descriptor_set_write_count != 0;
     write_descriptor_set_count += texture_descriptor_set_write_count;
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
-        write_textures[0].dstSet;
+        texture_descriptor_set;
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
-    ++frame_stats_.texture_sets_written;
     VkWriteDescriptorSet* write_textures =
         write_descriptor_sets.data() + write_descriptor_set_count;
+    VkDescriptorSet texture_descriptor_set;
     uint32_t texture_descriptor_set_write_count = WriteTransientTextureBindings(
         false, texture_count_pixel, sampler_count_pixel,
         current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref(),
         descriptor_write_image_info_.data() + pixel_texture_image_info_offset,
-        descriptor_write_image_info_.data() + pixel_sampler_image_info_offset, write_textures);
-    if (!texture_descriptor_set_write_count) {
+        descriptor_write_image_info_.data() + pixel_sampler_image_info_offset, texture_descriptor_set,
+        write_textures);
+    if (texture_descriptor_set == VK_NULL_HANDLE) {
       return false;
     }
+    frame_stats_.texture_sets_written += texture_descriptor_set_write_count != 0;
     write_descriptor_set_count += texture_descriptor_set_write_count;
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
-        write_textures[0].dstSet;
+        texture_descriptor_set;
   }
   // Write.
   if (write_descriptor_set_count) {
@@ -7457,8 +7601,9 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
     bool is_vertex, uint32_t texture_count, uint32_t sampler_count,
     VkDescriptorSetLayout descriptor_set_layout, const VkDescriptorImageInfo* texture_image_info,
     const VkDescriptorImageInfo* sampler_image_info,
-    VkWriteDescriptorSet* descriptor_set_writes_out) {
+    VkDescriptorSet& descriptor_set_out, VkWriteDescriptorSet* descriptor_set_writes_out) {
   assert_true(frame_open_);
+  descriptor_set_out = VK_NULL_HANDLE;
   if (!texture_count && !sampler_count) {
     return 0;
   }
@@ -7466,6 +7611,27 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
   texture_descriptor_set_layout_key.texture_count = texture_count;
   texture_descriptor_set_layout_key.sampler_count = sampler_count;
   texture_descriptor_set_layout_key.is_vertex = uint32_t(is_vertex);
+  TextureDescriptorSetKey texture_descriptor_set_key;
+  const bool reuse_material_descriptor_sets =
+      REXCVAR_GET(vulkan_reuse_material_descriptor_sets);
+  if (reuse_material_descriptor_sets) {
+    texture_descriptor_set_key.layout = texture_descriptor_set_layout_key;
+    texture_descriptor_set_key.image_info.reserve(texture_count + sampler_count);
+    texture_descriptor_set_key.image_info.insert(texture_descriptor_set_key.image_info.end(),
+                                                  texture_image_info,
+                                                  texture_image_info + texture_count);
+    texture_descriptor_set_key.image_info.insert(texture_descriptor_set_key.image_info.end(),
+                                                  sampler_image_info,
+                                                  sampler_image_info + sampler_count);
+    auto current_frame_descriptor_set_it =
+        texture_transient_descriptor_sets_current_frame_.find(texture_descriptor_set_key);
+    if (current_frame_descriptor_set_it != texture_transient_descriptor_sets_current_frame_.end()) {
+      descriptor_set_out = current_frame_descriptor_set_it->second;
+      ++frame_stats_.texture_sets_reused;
+      ++frame_stats_.texture_sets_material_reused;
+      return 0;
+    }
+  }
   VkDescriptorSet texture_descriptor_set;
   auto textures_free_it =
       texture_transient_descriptor_sets_free_.find(texture_descriptor_set_layout_key);
@@ -7500,6 +7666,11 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
   used_texture_descriptor_set.frame = frame_current_;
   used_texture_descriptor_set.layout = texture_descriptor_set_layout_key;
   used_texture_descriptor_set.set = texture_descriptor_set;
+  if (reuse_material_descriptor_sets) {
+    texture_transient_descriptor_sets_current_frame_.emplace(std::move(texture_descriptor_set_key),
+                                                             texture_descriptor_set);
+  }
+  descriptor_set_out = texture_descriptor_set;
   uint32_t descriptor_set_write_count = 0;
   if (texture_count) {
     VkWriteDescriptorSet& descriptor_set_write =

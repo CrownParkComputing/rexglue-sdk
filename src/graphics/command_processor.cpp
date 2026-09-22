@@ -368,10 +368,15 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // where the guest got it. Scan physical memory for the float4 the block came
   // from: if it sits in the title's static data the value is deliberate, and if
   // it does not, something computed it.
-  if (REXCVAR_GET(scan_guest_u32) && value == REXCVAR_GET(scan_guest_u32)) {
-    static std::once_flag scanned;
-    std::call_once(scanned, [&]() {
-      uint32_t needle = REXCVAR_GET(scan_guest_u32);
+  // Both debug hooks gate on the same slow-path predicate; read the cvars once
+  // per write and take one branch in the common (all hooks off) case.
+  const uint32_t scan_needle = REXCVAR_GET(scan_guest_u32);
+  const int32_t trace_constant = REXCVAR_GET(trace_float_constant);
+  if (scan_needle != 0 || trace_constant >= 0) {
+    if (scan_needle != 0 && value == scan_needle) {
+      static std::once_flag scanned;
+      std::call_once(scanned, [&]() {
+        uint32_t needle = scan_needle;
       uint32_t hits = 0;
       for (uint32_t addr = 0x10000; addr < 0x20000000 && hits < 24; addr += 4) {
         auto* p = memory_->TranslatePhysical<const uint32_t*>(addr);
@@ -386,18 +391,19 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
                     at(-2), at(0), at(1), at(2), at(3));
         ++hits;
       }
-      REXLOG_INFO("[scan] {} hits for {:08X}", hits, needle);
-    });
-  }
-  if (REXCVAR_GET(trace_float_constant) >= 0) {
-    uint32_t traced = uint32_t(REXCVAR_GET(trace_float_constant));
-    uint32_t first = XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * traced;
-    if (index + 8 >= first && index < first + 12) {
-      float as_float;
-      std::memcpy(&as_float, &value, sizeof(as_float));
-      uint32_t constant = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
-      REXLOG_INFO("[constwrite] reg={} c{}.{} = {:.4f}", index, constant,
-                  "xyzw"[(index - XE_GPU_REG_SHADER_CONSTANT_000_X) & 3], as_float);
+        REXLOG_INFO("[scan] {} hits for {:08X}", hits, needle);
+      });
+    }
+    if (trace_constant >= 0) {
+      uint32_t traced = uint32_t(trace_constant);
+      uint32_t first = XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * traced;
+      if (index + 8 >= first && index < first + 12) {
+        float as_float;
+        std::memcpy(&as_float, &value, sizeof(as_float));
+        uint32_t constant = (index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+        REXLOG_INFO("[constwrite] reg={} c{}.{} = {:.4f}", index, constant,
+                    "xyzw"[(index - XE_GPU_REG_SHADER_CONSTANT_000_X) & 3], as_float);
+      }
     }
   }
 
@@ -807,10 +813,16 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  if (!write_one_reg) {
+    // Sequential range: take the bulk path so constant blocks reach the
+    // Vulkan override's copy_and_swap fast path instead of paying one virtual
+    // WriteRegister dispatch per dword.
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
-    uint32_t target_index = write_one_reg ? base_index : base_index + m;
-    WriteRegister(target_index, reg_data);
+    WriteRegister(base_index, reg_data);
   }
 
   return true;

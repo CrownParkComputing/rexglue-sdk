@@ -49,8 +49,10 @@ bool build_eieio(BuilderContext& ctx) {
 }
 
 bool build_db16cyc(BuilderContext& ctx) {
-  // Xenon-specific 16-cycle delay hint, no effect in recompiled code
-  (void)ctx;
+  // Xenon-specific 16-cycle delay hint. The guest uses these as backoff inside
+  // spin-wait loops; emitted as-is the surrounding countdown burns a host core
+  // at full speed. Lower to a scheduler yield so the wait stays cheap.
+  ctx.println("\tstd::this_thread::yield();");
   return true;
 }
 

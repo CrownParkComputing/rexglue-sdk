@@ -43,6 +43,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 
 //=============================================================================
@@ -80,8 +81,8 @@ extern PPCFuncMapping PPCFuncMappings[];
   extern "C" void __imp__##name([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
 #else
 #define DEFINE_REX_FUNC(name)                                       \
-  __attribute__((alias("__imp__" #name)))                           \
-  __attribute__((weak, noinline)) extern "C" REX_FUNC(name);        \
+  extern "C" __attribute__((weak, alias("__imp__" #name)))          \
+      __attribute__((noinline)) REX_FUNC(name);                      \
   REX_EXTERN(__imp__##name)
 #endif
 #endif

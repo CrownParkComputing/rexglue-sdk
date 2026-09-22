@@ -111,6 +111,13 @@ REXCVAR_DEFINE_BOOL(vulkan_reuse_texture_descriptors, true, "GPU/Vulkan",
 REXCVAR_DEFINE_BOOL(vulkan_reuse_material_descriptor_sets, true, "GPU/Vulkan",
                     "Reuse texture descriptor sets for matching non-adjacent materials within a "
                     "frame. Disable for isolated descriptor-cache benchmarking.");
+REXCVAR_DEFINE_BOOL(vulkan_dynamic_constant_buffers, false, "GPU/Vulkan",
+                    "Use VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC for the guest draw constant\n"
+                    "buffers: one persistent descriptor set per uniform pool page, written once,\n"
+                    "instead of a transient descriptor set plus 5 descriptor writes per constant\n"
+                    "change. Latched when the descriptor set layouts are created at device\n"
+                    "initialization (the layout is baked into pipeline layouts), so changing it\n"
+                    "at runtime has no effect until restart.");
 REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
                     "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
 REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
@@ -675,6 +682,13 @@ const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeUniformBuf
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
     SpirvShaderTranslator::kConstantBufferCount* kLinkedTypeDescriptorPoolSetCount};
 
+// Persistent dynamic-constants sets are allocated once per uniform buffer
+// pool page (combination), not per draw, so a fraction of the transient page
+// size is plenty.
+const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeUniformBufferDynamic = {
+    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+    SpirvShaderTranslator::kConstantBufferCount* kConstantsDynamicDescriptorPoolSetCount};
+
 const VkDescriptorPoolSize VulkanCommandProcessor::kDescriptorPoolSizeStorageBuffer = {
     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kLinkedTypeDescriptorPoolSetCount};
 
@@ -696,6 +710,10 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
           static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
               ->vulkan_device(),
           &kDescriptorPoolSizeStorageBuffer, 1, kLinkedTypeDescriptorPoolSetCount),
+      constants_dynamic_descriptor_allocator_(
+          static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
+              ->vulkan_device(),
+          &kDescriptorPoolSizeUniformBufferDynamic, 1, kConstantsDynamicDescriptorPoolSetCount),
       transient_descriptor_allocator_textures_(
           static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
               ->vulkan_device(),
@@ -936,12 +954,19 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
   // Guest draw constants.
+  // vulkan_dynamic_constant_buffers is latched here: the descriptor type in
+  // this layout must match how UpdateBindings writes and binds the constants,
+  // and the layout is baked into pipeline layouts that live as long as the
+  // pipelines referencing them.
+  dynamic_constant_buffers_ = REXCVAR_GET(vulkan_dynamic_constant_buffers);
   VkDescriptorSetLayoutBinding
       descriptor_set_layout_bindings_constants[SpirvShaderTranslator::kConstantBufferCount] = {};
   for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
     VkDescriptorSetLayoutBinding& constants_binding = descriptor_set_layout_bindings_constants[i];
     constants_binding.binding = i;
-    constants_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    constants_binding.descriptorType =
+        dynamic_constant_buffers_ ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                  : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     constants_binding.descriptorCount = 1;
     constants_binding.pImmutableSamplers = nullptr;
   }
@@ -6321,6 +6346,11 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
 
   constants_transient_descriptors_free_.clear();
   constants_transient_descriptors_used_.clear();
+  // The persistent dynamic-constants sets reference uniform buffer pool pages
+  // that are about to be destroyed (this runs before
+  // uniform_buffer_pool_->ClearCache and before the pool itself is destroyed).
+  constants_dynamic_descriptor_sets_.clear();
+  constants_dynamic_descriptor_allocator_.Reset();
   for (std::vector<VkDescriptorSet>& transient_descriptors_free :
        single_transient_descriptors_free_) {
     transient_descriptors_free.clear();
@@ -7245,8 +7275,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
   assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
   if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
-    current_graphics_descriptor_set_values_up_to_date_ &=
-        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
+    // With dynamic constant buffers, the descriptor set contents don't depend
+    // on the constant data, so the values stay up to date - only the dynamic
+    // offsets change, which is handled at bind time further below.
+    if (!dynamic_constant_buffers_) {
+      current_graphics_descriptor_set_values_up_to_date_ &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
+    }
     size_t uniform_buffer_alignment =
         size_t(vulkan_device->properties().minUniformBufferOffsetAlignment);
     // System constants.
@@ -7277,9 +7312,15 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       // dummy buffer.
       size_t float_constants_size =
           sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
-                                                       uniform_buffer_alignment, buffer_info.buffer,
-                                                       buffer_info.offset);
+      // With dynamic constant buffers, the persistent descriptor set covers
+      // the maximum float constant range, so the reservation must be large
+      // enough for offset + range to always fit in the pool page.
+      size_t float_constants_request_size =
+          dynamic_constant_buffers_ ? sizeof(float) * 4 * 256 : float_constants_size;
+      uint8_t* mapping =
+          uniform_buffer_pool_->Request(frame_current_, float_constants_request_size,
+                                        uniform_buffer_alignment, buffer_info.buffer,
+                                        buffer_info.offset);
       if (!mapping) {
         return false;
       }
@@ -7306,9 +7347,14 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
           current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
       size_t float_constants_size =
           sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
-                                                       uniform_buffer_alignment, buffer_info.buffer,
-                                                       buffer_info.offset);
+      // See the vertex float constants above for why the reservation must
+      // cover the maximum range when using dynamic constant buffers.
+      size_t float_constants_request_size =
+          dynamic_constant_buffers_ ? sizeof(float) * 4 * 256 : float_constants_size;
+      uint8_t* mapping =
+          uniform_buffer_pool_->Request(frame_current_, float_constants_request_size,
+                                        uniform_buffer_alignment, buffer_info.buffer,
+                                        buffer_info.offset);
       if (!mapping) {
         return false;
       }
@@ -7361,6 +7407,73 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       std::memcpy(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], kFetchConstantsSize);
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFetch;
+    }
+    if (dynamic_constant_buffers_) {
+      // Maximum range each binding must cover - far below the 64 KB minimum
+      // maxUniformBufferRange, and the requests above reserve the full range
+      // for the float buffers, so offset + range always fits in the pool page.
+      constexpr VkDeviceSize kDynamicConstantBufferRanges[SpirvShaderTranslator::
+                                                              kConstantBufferCount] = {
+          VkDeviceSize(sizeof(SpirvShaderTranslator::SystemConstants)),
+          VkDeviceSize(sizeof(float) * 4 * 256),
+          VkDeviceSize(sizeof(float) * 4 * 256),
+          VkDeviceSize(sizeof(uint32_t) * (8 + 32)),
+          VkDeviceSize(sizeof(uint32_t) * 6 * 32),
+      };
+      // The descriptor set contents only depend on the pool pages backing the
+      // constant buffers (offset 0 plus the maximum range per binding) - write
+      // one persistent set per page combination, and let the bind below select
+      // the actual data through the dynamic offsets. A page may roll over
+      // between the five requests above, so the buffers can differ.
+      ConstantsDescriptorSetBuffersKey constants_buffers_key;
+      VkDescriptorBufferInfo dynamic_buffer_infos[SpirvShaderTranslator::kConstantBufferCount];
+      for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+        constants_buffers_key.buffers[i] = current_constant_buffer_infos_[i].buffer;
+        dynamic_buffer_infos[i].buffer = current_constant_buffer_infos_[i].buffer;
+        dynamic_buffer_infos[i].offset = 0;
+        dynamic_buffer_infos[i].range = kDynamicConstantBufferRanges[i];
+      }
+      auto constants_set_it = constants_dynamic_descriptor_sets_.find(constants_buffers_key);
+      if (constants_set_it != constants_dynamic_descriptor_sets_.end()) {
+        current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
+            constants_set_it->second;
+      } else {
+        VkDescriptorPoolSize constants_dynamic_descriptor_count;
+        constants_dynamic_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        constants_dynamic_descriptor_count.descriptorCount =
+            SpirvShaderTranslator::kConstantBufferCount;
+        VkDescriptorSet constants_descriptor_set = constants_dynamic_descriptor_allocator_.Allocate(
+            descriptor_set_layout_constants_, &constants_dynamic_descriptor_count, 1);
+        if (constants_descriptor_set == VK_NULL_HANDLE) {
+          return false;
+        }
+        VkWriteDescriptorSet write_constants[SpirvShaderTranslator::kConstantBufferCount];
+        for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+          VkWriteDescriptorSet& write_constant = write_constants[i];
+          write_constant.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+          write_constant.pNext = nullptr;
+          write_constant.dstSet = constants_descriptor_set;
+          write_constant.dstBinding = i;
+          write_constant.dstArrayElement = 0;
+          write_constant.descriptorCount = 1;
+          write_constant.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+          write_constant.pImageInfo = nullptr;
+          write_constant.pBufferInfo = &dynamic_buffer_infos[i];
+          write_constant.pTexelBufferView = nullptr;
+        }
+        dfn.vkUpdateDescriptorSets(device, uint32_t(rex::countof(write_constants)),
+                                   write_constants, 0, nullptr);
+        constants_dynamic_descriptor_sets_.emplace(constants_buffers_key,
+                                                   constants_descriptor_set);
+        current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
+            constants_descriptor_set;
+      }
+      current_graphics_descriptor_set_values_up_to_date_ |=
+          UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
+      // The offsets are bind-time state now, so the set must be re-bound with
+      // the new dynamic offsets even if its handle didn't change.
+      current_graphics_descriptor_sets_bound_up_to_date_ &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
     }
   }
 
@@ -7482,8 +7595,11 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   uint32_t write_descriptor_set_bits = 0;
   assert_not_zero(current_graphics_descriptor_set_values_up_to_date_ &
                   (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram));
-  // Constant buffers.
-  if (!(current_graphics_descriptor_set_values_up_to_date_ &
+  // Constant buffers. With dynamic constant buffers, the constants descriptor
+  // set was already taken care of above (persistent, written once per pool
+  // page combination) - no transient allocation or descriptor writes here.
+  if (!dynamic_constant_buffers_ &&
+      !(current_graphics_descriptor_set_values_up_to_date_ &
         (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants))) {
     VkDescriptorSet constants_descriptor_set;
     if (!constants_transient_descriptors_free_.empty()) {
@@ -7578,6 +7694,15 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   }
   uint32_t descriptor_sets_remaining =
       descriptor_sets_needed & ~current_graphics_descriptor_sets_bound_up_to_date_;
+  // With dynamic constant buffers, the constants set carries dynamic offsets,
+  // which the contiguous bind runs below can't supply - bind it separately
+  // with its offsets. The bound-state bit still gates whether this happens,
+  // so unchanged constants don't cause a re-bind.
+  uint32_t constants_dynamic_bind_needed =
+      dynamic_constant_buffers_
+          ? descriptor_sets_remaining & (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants)
+          : 0;
+  descriptor_sets_remaining &= ~constants_dynamic_bind_needed;
   uint32_t descriptor_set_index;
   while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
     uint32_t descriptor_set_mask_tzcnt =
@@ -7591,6 +7716,20 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       break;
     }
     descriptor_sets_remaining &= ~((UINT32_C(1) << descriptor_set_mask_tzcnt) - 1);
+  }
+  if (constants_dynamic_bind_needed) {
+    // The requests already align the offsets to
+    // minUniformBufferOffsetAlignment, as required for dynamic offsets.
+    uint32_t constants_dynamic_offsets[SpirvShaderTranslator::kConstantBufferCount];
+    for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+      constants_dynamic_offsets[i] = uint32_t(current_constant_buffer_infos_[i].offset);
+    }
+    deferred_command_buffer_.CmdVkBindDescriptorSets(
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        current_guest_graphics_pipeline_layout_->GetPipelineLayout(),
+        SpirvShaderTranslator::kDescriptorSetConstants, 1,
+        &current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants],
+        uint32_t(rex::countof(constants_dynamic_offsets)), constants_dynamic_offsets);
   }
   current_graphics_descriptor_sets_bound_up_to_date_ |= descriptor_sets_needed;
 

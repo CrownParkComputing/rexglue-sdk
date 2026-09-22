@@ -195,7 +195,12 @@ class VulkanCommandProcessor : public CommandProcessor {
                               bool skip_if_equal = true);
   // Returns whether any barriers have been submitted - if true is returned, the
   // render pass will also be closed.
-  bool SubmitBarriers(bool force_end_render_pass);
+  // Which subsystem asked, so a frame's barrier count can be attributed.
+  // Every barrier ends the render pass - on a tile-based GPU that is a store
+  // and reload of the attachments - so knowing who asks is the whole question.
+  enum BarrierSource { kBarrierOther = 0, kBarrierTexture, kBarrierSharedMemory,
+                       kBarrierRenderTarget, kBarrierSourceCount };
+  bool SubmitBarriers(bool force_end_render_pass, BarrierSource source = kBarrierOther);
 
   // If not started yet, begins a render pass from the render target cache.
   // Submission must be open.
@@ -307,6 +312,68 @@ class VulkanCommandProcessor : public CommandProcessor {
     }
     bool operator!=(const TextureDescriptorSetLayoutKey& other_key) const {
       return !(*this == other_key);
+    }
+  };
+
+  struct TextureDescriptorSetKey {
+    TextureDescriptorSetLayoutKey layout;
+    std::vector<VkDescriptorImageInfo> image_info;
+
+    struct Hasher {
+      size_t operator()(const TextureDescriptorSetKey& key) const {
+        size_t hash = TextureDescriptorSetLayoutKey::Hasher{}(key.layout);
+        for (const VkDescriptorImageInfo& image_info : key.image_info) {
+          hash ^= std::hash<VkSampler>{}(image_info.sampler) + 0x9e3779b9 + (hash << 6) +
+                  (hash >> 2);
+          hash ^= std::hash<VkImageView>{}(image_info.imageView) + 0x9e3779b9 + (hash << 6) +
+                  (hash >> 2);
+          hash ^= std::hash<VkImageLayout>{}(image_info.imageLayout) + 0x9e3779b9 +
+                  (hash << 6) + (hash >> 2);
+        }
+        return hash;
+      }
+    };
+    bool operator==(const TextureDescriptorSetKey& other_key) const {
+      if (layout != other_key.layout || image_info.size() != other_key.image_info.size()) {
+        return false;
+      }
+      for (size_t i = 0; i < image_info.size(); ++i) {
+        if (image_info[i].sampler != other_key.image_info[i].sampler ||
+            image_info[i].imageView != other_key.image_info[i].imageView ||
+            image_info[i].imageLayout != other_key.image_info[i].imageLayout) {
+          return false;
+        }
+      }
+      return true;
+    }
+  };
+
+  // Pool pages backing the five guest draw constant buffers in one draw. With
+  // vulkan_dynamic_constant_buffers, this identifies a persistent descriptor
+  // set - the set contents only depend on the pages (each binding is written
+  // once with its maximum range), while the per-draw selection happens through
+  // the dynamic offsets passed to vkCmdBindDescriptorSets. A page may roll
+  // over between the five constant buffer requests of one draw, so the buffers
+  // can differ.
+  struct ConstantsDescriptorSetBuffersKey {
+    VkBuffer buffers[SpirvShaderTranslator::kConstantBufferCount];
+
+    struct Hasher {
+      size_t operator()(const ConstantsDescriptorSetBuffersKey& key) const {
+        size_t hash = 0;
+        for (VkBuffer buffer : key.buffers) {
+          hash ^= std::hash<VkBuffer>{}(buffer) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return hash;
+      }
+    };
+    bool operator==(const ConstantsDescriptorSetBuffersKey& other_key) const {
+      for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+        if (buffers[i] != other_key.buffers[i]) {
+          return false;
+        }
+      }
+      return true;
     }
   };
 
@@ -505,13 +572,14 @@ class VulkanCommandProcessor : public CommandProcessor {
   // texture_count, sampler_count (from GetTextureDescriptorSetLayout - may be
   // already available at the moment of the call, no need to locate it again).
   // Returns how many VkWriteDescriptorSet structure instances have been
-  // written, or 0 if there was a failure to allocate the descriptor set or no
+  // written. descriptor_set_out is null only if allocation failed or no
   // bindings were requested.
   uint32_t WriteTransientTextureBindings(bool is_vertex, uint32_t texture_count,
                                          uint32_t sampler_count,
                                          VkDescriptorSetLayout descriptor_set_layout,
                                          const VkDescriptorImageInfo* texture_image_info,
                                          const VkDescriptorImageInfo* sampler_image_info,
+                                         VkDescriptorSet& descriptor_set_out,
                                          VkWriteDescriptorSet* descriptor_set_writes_out);
 
   bool device_lost_ = false;
@@ -588,6 +656,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t submissions = 0;
     uint64_t texture_sets_written = 0;
     uint64_t texture_sets_reused = 0;
+    uint64_t texture_sets_material_reused = 0;
     uint64_t pipelines_created = 0;
     double pipeline_create_ms = 0;
     uint64_t last_swap_us = 0;
@@ -603,7 +672,38 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t upload_pages = 0;
     double upload_ms = 0;
     uint64_t render_passes = 0;
+    // Which of the breaks a barrier caused. A render pass break costs the
+    // tile store and reload of its attachments, so knowing whether they come
+    // from barriers or from somewhere else decides where the work goes.
+    uint64_t render_pass_breaks_barrier = 0;
+    uint64_t render_pass_breaks_query = 0;
+    uint64_t render_pass_breaks_forced = 0;
+    uint64_t barrier_source[kBarrierSourceCount] = {};
+    uint64_t resolves = 0;
+    // GPU time, from timestamps written around each render pass. Without this
+    // the stats describe only the CPU's view, and a frame that is waiting and
+    // a frame that is working look identical. Lags by up to kMaxFramesInFlight
+    // frames: the results are read when the frame's slot comes round again,
+    // which is after its fence, so reading them costs no stall.
+    double gpu_pass_total_ms = 0;
+    double gpu_pass_max_ms = 0;
+    uint64_t gpu_passes_timed = 0;
   } frame_stats_;
+
+  // Timestamps around render passes, enabled by gpu_pass_timing. Two queries
+  // per pass, a separate span per frame in flight.
+  static constexpr uint32_t kTimestampQueriesPerFrame = 256;
+  VkQueryPool timestamp_query_pool_ = VK_NULL_HANDLE;
+  float timestamp_period_ns_ = 0.0f;
+  uint32_t timestamp_query_next_ = 0;
+  // How many queries each frame slot actually wrote. A single "next" index
+  // cannot answer that when the slot is read three frames later: by then the
+  // frames in between have moved it.
+  uint32_t timestamp_queries_written_[kMaxFramesInFlight] = {};
+  uint32_t timestamp_pass_begin_query_ = UINT32_MAX;
+  double gpu_pass_total_ms_ = 0;
+  double gpu_pass_max_ms_ = 0;
+  uint64_t gpu_passes_timed_ = 0;
 
   // Stages of IssueDraw timed into FrameStats::stage_ms. Order matches the
   // sequence of work in the function.
@@ -652,11 +752,30 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
   std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
 
+  // vulkan_dynamic_constant_buffers, latched in Setup when
+  // descriptor_set_layout_constants_ is created - the layout's descriptor type
+  // must match how UpdateBindings writes and binds the constants.
+  bool dynamic_constant_buffers_ = false;
+  static constexpr uint32_t kConstantsDynamicDescriptorPoolSetCount = 256;
+  static const VkDescriptorPoolSize kDescriptorPoolSizeUniformBufferDynamic;
+  // Persistent sets are never recycled individually - they're referenced by
+  // contents that stay valid as long as their uniform pool pages do, so the
+  // pools are only torn down in ClearTransientDescriptorPools together with
+  // the pages.
+  ui::vulkan::LinkedTypeDescriptorSetAllocator constants_dynamic_descriptor_allocator_;
+  std::unordered_map<ConstantsDescriptorSetBuffersKey, VkDescriptorSet,
+                     ConstantsDescriptorSetBuffersKey::Hasher>
+      constants_dynamic_descriptor_sets_;
+
   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_textures_;
   std::deque<UsedTextureTransientDescriptorSet> texture_transient_descriptor_sets_used_;
   std::unordered_map<TextureDescriptorSetLayoutKey, std::vector<VkDescriptorSet>,
                      TextureDescriptorSetLayoutKey::Hasher>
       texture_transient_descriptor_sets_free_;
+  // Descriptor contents are immutable after creation. Reuse descriptors for
+  // non-adjacent draws with identical material bindings until the frame closes.
+  std::unordered_map<TextureDescriptorSetKey, VkDescriptorSet, TextureDescriptorSetKey::Hasher>
+      texture_transient_descriptor_sets_current_frame_;
 
   std::unique_ptr<VulkanSharedMemory> shared_memory_;
 
@@ -844,6 +963,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Currently used samplers.
   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_vertex_;
   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> current_samplers_pixel_;
+  const VulkanShader* current_sampler_vertex_shader_ = nullptr;
+  const VulkanShader* current_sampler_pixel_shader_ = nullptr;
 
   // Cache render pass currently started in the command buffer with the
   // framebuffer. For dynamic rendering, current_render_pass_ is VK_NULL_HANDLE

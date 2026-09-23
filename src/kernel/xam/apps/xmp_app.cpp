@@ -545,9 +545,17 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
     }
     case 0x0007003D: {
       // XMPCaptureOutput - not sure how this works :/
-      REXKRNL_DEBUG("XMPCaptureOutput(...)");
-      assert_always("XMP output not unimplemented");
-      return X_E_FAIL;
+      // Geometry Wars 2 calls this during startup and aborts on the assert.
+      // Report success without capturing: the title's own music path keeps
+      // playing, XMP capture simply delivers silence.
+      static bool capture_warned = false;
+      if (!capture_warned) {
+        capture_warned = true;
+        REXKRNL_WARN(
+            "XMPCaptureOutput unimplemented - succeeding without capturing "
+            "audio (GW2 startup path)");
+      }
+      return X_E_SUCCESS;
     }
   }
   REXKRNL_ERROR(

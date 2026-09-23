@@ -427,13 +427,50 @@ u32 RtlTryEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
 }
 
 void RtlLeaveCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
-  assert_true(cs->owning_thread == XThread::GetCurrentThread()->guest_object());
+  // Retail hardware performs no ownership check here. Geometry Wars 2 trips
+  // this assert on startup (likely an inlined CRT fast path managing the CS
+  // struct directly, bypassing our Enter import), so warn once with the
+  // details and continue with the hardware behavior instead of aborting.
+  const uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
+  if (cs->owning_thread != cur_thread) {
+    static bool leave_owner_warned = false;
+    if (!leave_owner_warned) {
+      leave_owner_warned = true;
+      REXKRNL_WARN(
+          "RtlLeaveCriticalSection: non-owner leave cs={:08X} owner={:08X} "
+          "current={:08X} recursion={} lock_count={} - continuing anyway",
+          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(cs.host_address())),
+          static_cast<uint32_t>(cs->owning_thread), cur_thread,
+          static_cast<int32_t>(cs->recursion_count),
+          static_cast<int32_t>(cs->lock_count));
+    }
+  }
 
   // Drop recursion count - if it isn't zero we still have the lock.
-  assert_true(cs->recursion_count > 0);
+  // Over-release tolerance: the same GW2 path leaves with recursion_count
+  // already at 0. Windows/ReactOS LeaveCriticalSection has no assert here
+  // either; clamp instead of aborting, and only touch the lock if it is
+  // actually held (lock_count >= 0; -1 means unlocked).
+  if (cs->recursion_count <= 0) {
+    static bool recursion_warned = false;
+    if (!recursion_warned) {
+      recursion_warned = true;
+      REXKRNL_WARN(
+          "RtlLeaveCriticalSection: over-release cs={:08X} owner={:08X} "
+          "current={:08X} lock_count={} - clamping",
+          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(cs.host_address())),
+          static_cast<uint32_t>(cs->owning_thread), cur_thread,
+          static_cast<int32_t>(cs->lock_count));
+    }
+    cs->owning_thread = 0;
+    cs->recursion_count = 0;
+    if (cs->lock_count >= 0 &&
+        rex::thread::atomic_dec(&cs->lock_count) != -1) {
+      xeKeSetEvent(reinterpret_cast<X_KEVENT*>(cs.host_address()), 1, 0);
+    }
+    return;
+  }
   if (--cs->recursion_count != 0) {
-    assert_true(cs->recursion_count >= 0);
-
     rex::thread::atomic_dec(&cs->lock_count);
     return;
   }

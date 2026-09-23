@@ -19,6 +19,25 @@
 
 namespace rex::ui {
 
+/**
+ * How much to scale ImGui's font for a display of this height.
+ *
+ * ImGui's built-in font is a desk size: legible at 1080p on a monitor an arm's
+ * length away, and far too small on a 1440p ultrawide or on a TV across a
+ * room. Everything the player reads while the game is up - the rails, the
+ * achievements list - is drawn through this, so the two agree with each other
+ * and grow together instead of each carrying its own hand-tuned multiplier.
+ *
+ * Referenced to 540 lines, which puts 1080p at 2.0 and leaves a small handheld
+ * panel near 1.0. Clamped so neither a tiny nor an enormous mode is unusable.
+ */
+inline float UiFontScale(float display_height) {
+  const float scale = display_height / 540.0f;
+  if (scale < 1.0f) return 1.0f;
+  if (scale > 4.0f) return 4.0f;
+  return scale;
+}
+
 struct AchievementsStyle {
   ImVec4 unlocked_title{0.45f, 1.00f, 0.55f, 1.00f};
   ImVec4 unlocked_desc{0.70f, 0.85f, 0.72f, 1.00f};
@@ -30,11 +49,17 @@ struct AchievementsStyle {
   ImVec4 progress_bar{0.30f, 0.80f, 0.40f, 1.00f};
   ImVec4 unlocked_icon_tint{1.00f, 1.00f, 1.00f, 1.00f};
   ImVec4 locked_icon_tint{0.45f, 0.45f, 0.45f, 0.80f};
-  ImVec2 window_padding{14.0f, 12.0f};
-  ImVec2 item_spacing{8.0f, 6.0f};
-  float icon_size = 44.0f;
+  ImVec2 window_padding{18.0f, 16.0f};
+  ImVec2 item_spacing{10.0f, 8.0f};
+  float icon_size = 56.0f;
   float row_rounding = 3.0f;
 };
+// NOTE: this struct is embedded by value in objects a port compiles for
+// itself, so adding a field to it breaks every port binary that is not rebuilt
+// against the new header - and the failure does not surface anywhere near
+// here (a stale port binary dies inside glibc thread-priority assertions).
+// Anything new that only this overlay needs belongs beside the overlay, not
+// in here.
 
 struct ToastStyle {
   /// Alpha is the fade envelope, applied on top of these at draw time.

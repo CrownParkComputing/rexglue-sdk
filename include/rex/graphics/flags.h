@@ -15,9 +15,12 @@
 
 // GPU Core
 REXCVAR_DECLARE(bool, vsync);
+REXCVAR_DECLARE(int32_t, vsync_fps_cap);
 REXCVAR_DECLARE(bool, clear_memory_page_state);
 REXCVAR_DECLARE(bool, half_pixel_offset);
 REXCVAR_DECLARE(bool, async_shader_compilation);
+REXCVAR_DECLARE(std::string, texture_swizzle_override);
+REXCVAR_DECLARE(bool, texture_identity_swizzle);
 REXCVAR_DECLARE(bool, log_texture_swizzles);
 REXCVAR_DECLARE(bool, log_draw_shaders);
 REXCVAR_DECLARE(uint32_t, log_draw_texture);

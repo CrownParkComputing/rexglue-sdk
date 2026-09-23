@@ -25,6 +25,7 @@ set(REXUI_OVERLAY_SOURCES
     overlay/achievement_icon_cache.cpp
     overlay/achievement_toast.cpp
     overlay/achievements_overlay.cpp
+    overlay/high_scores_overlay.cpp
     overlay/debug_overlay.cpp
     overlay/side_panels.cpp
     overlay/console_overlay.cpp
@@ -44,6 +45,7 @@ set(REXUI_VULKAN_SOURCES
     vulkan/vulkan_instance.cpp
     vulkan/vulkan_mem_alloc.cpp
     vulkan/vulkan_presenter.cpp
+    vulkan/presenter_streamer.cpp
     vulkan/vulkan_provider.cpp
     vulkan/vulkan_submission_tracker.cpp
     vulkan/vulkan_upload_buffer_pool.cpp
@@ -81,6 +83,10 @@ else()
     set(REXUI_PLATFORM_SOURCES
         surface_gnulinux.cpp
     )
+    option(REXGLUE_ENABLE_RAYLIB_DISPLAY "In-process raylib display/input endpoint (REX_RAYLIB_DISPLAY=1)" ON)
+    if(REXGLUE_ENABLE_RAYLIB_DISPLAY)
+        list(APPEND REXUI_PLATFORM_SOURCES raylib_display.cpp)
+    endif()
 endif()
 
 # Combine sources
@@ -99,6 +105,9 @@ if(REXGLUE_USE_D3D12)
 endif()
 
 add_library(rexui OBJECT ${REXUI_SOURCES})
+if(ANDROID)
+    target_link_libraries(rexui PUBLIC adrenotools)
+endif()
 add_library(rex::ui ALIAS rexui)
 
 rex_target_pch(rexui <rex/math.h>)
@@ -172,6 +181,22 @@ elseif(UNIX AND NOT APPLE)
         ${X11_XCB_LIBRARIES}
         ${WAYLAND_LIBRARIES}
     )
+
+    if(REXGLUE_ENABLE_RAYLIB_DISPLAY)
+        # raylib: built once from ~/raylib-src; the build-linux-pic tree is a
+        # POSITION_INDEPENDENT_CODE build so the static lib can go into
+        # librexruntime.so (the plain build-linux tree used by tools/rayview
+        # is not PIC).
+        set(RAYLIB_SRC "$ENV{HOME}/raylib-src" CACHE PATH "raylib source checkout")
+        add_library(raylib STATIC IMPORTED)
+        set_target_properties(raylib PROPERTIES
+            IMPORTED_LOCATION "${RAYLIB_SRC}/build-linux-pic/raylib/libraylib.a"
+            INTERFACE_INCLUDE_DIRECTORIES "${RAYLIB_SRC}/src")
+        target_link_libraries(rexui PUBLIC
+            raylib m pthread dl rt GL X11 Xrandr Xinerama Xi Xcursor Xext
+        )
+        target_compile_definitions(rexui PRIVATE REX_HAS_RAYLIB_DISPLAY=1)
+    endif()
 elseif(APPLE)
     target_link_libraries(rexui PRIVATE "-framework CoreFoundation")
 endif()
@@ -184,4 +209,3 @@ endif()
 if(REXGLUE_USE_D3D12)
     target_link_libraries(rexui PUBLIC dxc-headers)
 endif()
-

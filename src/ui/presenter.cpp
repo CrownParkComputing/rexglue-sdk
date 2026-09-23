@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 #include <rex/assert.h>
@@ -21,6 +23,13 @@
 #include <rex/ui/presenter.h>
 #include <rex/graphics/present_stats.h>
 #include <rex/ui/window.h>
+#if REX_PLATFORM_GNU_LINUX
+#include <rex/ui/vulkan/presenter_streamer.h>
+#endif
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
 #include <ffx_api/ffx_api.h>
@@ -31,6 +40,16 @@ REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
 
 // Host UI side rails reserve space without changing guest viewports or HUD coordinates.
+// A margin in millimetres rather than pixels or a percentage: it is a
+// physical distance, meant to clear a handheld's bezel and rounded corners,
+// and the same number has to mean the same gap on a phone and a television.
+REXCVAR_DEFINE_DOUBLE(present_border_mm, 0.0, "UI/Presenter",
+                      "Blank margin all round the guest picture, in millimetres.");
+
+// Written by the presenter, read by the overlay: how much width is free
+// beside the picture, in parts per thousand of the surface width.
+REXCVAR_DEFINE_INT32(present_side_panel_room_permille, 0, "UI/Presenter",
+                     "Width free beside the guest picture, per mille (presenter writes this).");
 REXCVAR_DEFINE_INT32(present_side_panel_percent, 0, "UI/Presenter",
                     "Reserve this percentage of window width on each side for host panels")
     .range(0, 30);
@@ -563,6 +582,157 @@ void Presenter::PaintFromUIThread(bool force_paint) {
   }
 }
 
+// [TEMP DIAG] Dump the presented guest frame as a PPM. Lives here, on the
+// shared presenter, rather than in one backend's command processor: comparing
+// the same frame across GPU plugins is the only way to tell a backend bug from
+// a guest one, and that comparison is worthless if only one backend can dump.
+//   REX_DUMP_FRAME=<prefix>  REX_DUMP_FRAME_EVERY=<n>  REX_DUMP_FRAME_START=<n>
+//   REX_DUMP_FRAME_MAX=<n>
+void Presenter::DumpPresentedFrame() {
+  // REX_DUMP_SHM=<name>: publish every presented guest frame into a
+  // POSIX shared-memory ring for a live consumer (the rexmenu launcher,
+  // which displays the title inside its own raylib window). Zero-copy on
+  // the guest side beyond one memcpy out of the capture; the consumer maps
+  // the segment read-only and uploads the newest buffer to a texture. The
+  // ring is lock-free on a single producer / single consumer pair: the
+  // producer never waits, it just advances write_index, and the consumer
+  // reads the buffer at the sequence number it saw. A torn (skipped) frame
+  // is detected by sequence numbers and costs nothing - the consumer keeps
+  // showing the previous texture until a clean frame arrives.
+#if !defined(__ANDROID__)
+  static const char* shm_name = getenv("REX_DUMP_SHM");
+  bool direct_gpu = false;
+#if REX_PLATFORM_GNU_LINUX
+  direct_gpu = vulkan::PresenterStreamHasConsumer();
+#endif
+  if (shm_name && *shm_name && !direct_gpu) {
+    struct ShmHeader {
+      uint32_t magic;         // 'RGSH'
+      uint32_t version;       // 1
+      uint32_t width;
+      uint32_t height;
+      uint32_t stride;
+      uint32_t buffer_count;  // power of two
+      uint32_t buffer_size;   // stride * height
+      std::atomic<uint64_t> sequence;  // incremented on every published frame
+    };
+    constexpr uint32_t kShmMagic = 0x48534752u;  // 'RGSH' little-endian
+    constexpr uint32_t kShmVersion = 1;
+    constexpr uint32_t kShmBuffers = 4;
+    auto align_up = [](size_t v, size_t a) {
+      return (v + a - 1) / a * a;
+    };
+    struct Mapping {
+      int fd = -1;
+      ShmHeader* header = nullptr;
+      uint8_t* buffers = nullptr;
+      size_t size = 0;
+      ~Mapping() {
+        if (header) munmap(header, size);
+        if (fd >= 0) ::close(fd);
+      }
+    };
+    static Mapping mapping;
+    if (!mapping.header) {
+      // One attempt: create (or reuse) the segment on the first presented
+      // frame. The consumer may have created it first (as rexmenu does) or
+      // not; either way the producer sizes it and fills the header in.
+      std::string name = shm_name;
+      if (!name.empty() && name[0] != '/') name.insert(name.begin(), '/');
+      int fd = shm_open(name.c_str(), O_CREAT | O_RDWR, 0600);
+      if (fd >= 0) {
+        // Probe one capture to learn the geometry before sizing the file.
+        RawImage probe;
+        if (CaptureGuestOutput(probe) && probe.width && probe.height) {
+          const size_t buffer_size = probe.stride * probe.height;
+          const size_t total =
+              sizeof(ShmHeader) + size_t(kShmBuffers) * buffer_size;
+          if (ftruncate(fd, off_t(total)) == 0) {
+            void* mem = mmap(nullptr, total, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, fd, 0);
+            if (mem != MAP_FAILED) {
+              mapping.fd = fd;
+              mapping.size = total;
+              mapping.header = reinterpret_cast<ShmHeader*>(mem);
+              mapping.buffers = reinterpret_cast<uint8_t*>(mem) + sizeof(ShmHeader);
+              auto* h = mapping.header;
+              h->magic = kShmMagic;
+              h->version = kShmVersion;
+              h->width = probe.width;
+              h->height = probe.height;
+              h->stride = uint32_t(probe.stride);
+              h->buffer_count = kShmBuffers;
+              h->buffer_size = uint32_t(buffer_size);
+              h->sequence = 0;
+              REXLOG_INFO("presenter: shm ring '{}' publishing {}x{} (stride {})",
+                          name, probe.width, probe.height, probe.stride);
+            }
+          }
+        }
+        if (!mapping.header) ::close(fd);
+      }
+    }
+    if (mapping.header) {
+      RawImage image;
+      if (CaptureGuestOutput(image) && image.width && image.height) {
+        auto* h = mapping.header;
+        if (image.width == h->width && image.height == h->height &&
+            image.stride == h->stride) {
+          const uint64_t seq = h->sequence + 1;
+          uint8_t* dst = mapping.buffers + (seq & (kShmBuffers - 1)) * h->buffer_size;
+          const uint8_t* src = image.data.data();
+          for (uint32_t y = 0; y < image.height; ++y) {
+            std::memcpy(dst + size_t(y) * h->stride,
+                        src + size_t(y) * image.stride, size_t(image.width) * 4);
+          }
+          // Publish: sequence is the only synchronization the consumer needs
+          // (relaxed is enough - the consumer treats a partially visible
+          // sequence as "no new frame" and keeps the previous texture).
+          h->sequence.store(seq, std::memory_order_release);
+        }
+      }
+    }
+  }
+#endif  // !defined(__ANDROID__)
+
+  static const char* dump_prefix = getenv("REX_DUMP_FRAME");
+  if (!dump_prefix) {
+    return;
+  }
+  static const uint32_t dump_every =
+      getenv("REX_DUMP_FRAME_EVERY") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_EVERY"))) : 150u;
+  static const uint32_t dump_start =
+      getenv("REX_DUMP_FRAME_START") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_START"))) : 0u;
+  static const uint32_t dump_max =
+      getenv("REX_DUMP_FRAME_MAX") ? uint32_t(atoi(getenv("REX_DUMP_FRAME_MAX"))) : 12u;
+  static uint32_t counter = 0;
+  static uint32_t dumped = 0;
+  const uint32_t n = counter++;
+  if (dumped >= dump_max || n < dump_start || !dump_every || (n % dump_every) != 0) {
+    return;
+  }
+  RawImage image;
+  if (!CaptureGuestOutput(image)) {
+    return;
+  }
+  char path[512];
+  snprintf(path, sizeof(path), "%s_%04u.ppm", dump_prefix, n);
+  FILE* f = fopen(path, "wb");
+  if (!f) {
+    return;
+  }
+  fprintf(f, "P6\n%u %u\n255\n", image.width, image.height);
+  for (uint32_t y = 0; y < image.height; ++y) {
+    const uint8_t* row = image.data.data() + size_t(y) * image.stride;
+    for (uint32_t x = 0; x < image.width; ++x) {
+      fwrite(row + size_t(x) * 4, 1, 3, f);
+    }
+  }
+  fclose(f);
+  ++dumped;
+  REXLOG_INFO("presenter: dumped frame {} to {} ({}x{})", n, path, image.width, image.height);
+}
+
 bool Presenter::RefreshGuestOutput(
     uint32_t frontbuffer_width, uint32_t frontbuffer_height, uint32_t display_aspect_ratio_x,
     uint32_t display_aspect_ratio_y,
@@ -584,6 +754,7 @@ bool Presenter::RefreshGuestOutput(
       return false;
     }
     guest_output_active_last_refresh_ = true;
+    DumpPresentedFrame();
   } else {
     // Request presenting a blank image if there was a true image previously,
     // but not now.
@@ -1012,15 +1183,56 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
   // the console render target, viewport or safe area, and never crops its HUD.
   const uint32_t side_percent = uint32_t(std::clamp(REXCVAR_GET(present_side_panel_percent), 0, 30));
   if (side_percent) {
-    const uint32_t inset = host_rt_width * side_percent / 100;
-    const uint32_t available_width = host_rt_width - inset * 2;
-    output_width = available_width;
-    output_height = rescale_unsigned(output_width, properties.display_aspect_ratio_y,
-                                    properties.display_aspect_ratio_x);
-    if (output_height > host_rt_height) {
-      output_height = host_rt_height;
-      output_width = rescale_unsigned(output_height, properties.display_aspect_ratio_x,
-                                      properties.display_aspect_ratio_y);
+    // The picture comes first and the rails take what it does not need.
+    // Sizing the rails at a fixed share of the width and fitting the guest
+    // into the remainder made the game small with black above and below on
+    // any display wider than the guest's aspect; a wide screen has the room
+    // for both at full height.
+    output_height = host_rt_height;
+    output_width = rescale_unsigned(output_height, properties.display_aspect_ratio_x,
+                                    properties.display_aspect_ratio_y);
+    // A rail narrower than this cannot be read, so on a display with no room
+    // to spare the picture gives way instead.
+    const uint32_t min_rail = host_rt_width * side_percent / 100;
+    if (output_width + min_rail * 2 > host_rt_width) {
+      output_width = host_rt_width - std::min(min_rail * 2, host_rt_width - 1);
+      output_height = rescale_unsigned(output_width, properties.display_aspect_ratio_y,
+                                       properties.display_aspect_ratio_x);
+      if (output_height > host_rt_height) {
+        output_height = host_rt_height;
+        output_width = rescale_unsigned(output_height, properties.display_aspect_ratio_x,
+                                        properties.display_aspect_ratio_y);
+      }
+    }
+    flow.output_x = int32_t(host_rt_width - output_width) / 2;
+    flow.output_y = int32_t(host_rt_height - output_height) / 2;
+    // What is left each side, so the overlay draws its rails exactly there
+    // and never over the picture. Parts per thousand of the width, which is
+    // resolution- and DPI-independent.
+    REXCVAR_SET(present_side_panel_room_permille,
+                int32_t(uint64_t(host_rt_width - output_width) * 500 / host_rt_width));
+  } else {
+    REXCVAR_SET(present_side_panel_room_permille, 0);
+  }
+
+  // A physical margin all round, inside whatever the fit above chose. The
+  // picture keeps its aspect ratio: it shrinks to fit the inset box rather
+  // than being cropped to it.
+  const double border_mm = REXCVAR_GET(present_border_mm);
+  if (border_mm > 0.0) {
+    const uint32_t dpi = window_ ? window_->GetDpi() : 96;
+    const uint32_t border = uint32_t(border_mm * double(dpi) / 25.4 + 0.5);
+    const uint32_t box_w = host_rt_width > border * 2 ? host_rt_width - border * 2 : 1;
+    const uint32_t box_h = host_rt_height > border * 2 ? host_rt_height - border * 2 : 1;
+    if (output_width > box_w || output_height > box_h) {
+      // Whichever side is tighter decides the scale.
+      if (uint64_t(box_w) * output_height < uint64_t(box_h) * output_width) {
+        output_height = uint32_t(uint64_t(output_height) * box_w / std::max(output_width, 1u));
+        output_width = box_w;
+      } else {
+        output_width = uint32_t(uint64_t(output_width) * box_h / std::max(output_height, 1u));
+        output_height = box_h;
+      }
     }
     flow.output_x = int32_t(host_rt_width - output_width) / 2;
     flow.output_y = int32_t(host_rt_height - output_height) / 2;

@@ -265,6 +265,16 @@ class DeferredCommandBuffer {
   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
 
+  // A GPU-side timestamp, so the frame stats can tell a frame that is waiting
+  // from one that is working - CPU-side timing alone cannot.
+  void CmdVkWriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, uint32_t query) {
+    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
+        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
+    args.stage = stage;
+    args.query_pool = query_pool;
+    args.query = query;
+  }
+
   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
@@ -374,6 +384,7 @@ class DeferredCommandBuffer {
     kVkPipelineBarrier,
     kVkPushConstants,
     kVkResetQueryPool,
+    kVkWriteTimestamp,
     kVkSetBlendConstants,
     kVkSetDepthBias,
     kVkSetScissor,
@@ -524,6 +535,12 @@ class DeferredCommandBuffer {
     VkQueryPool query_pool;
     uint32_t first_query;
     uint32_t query_count;
+  };
+
+  struct ArgsVkWriteTimestamp {
+    VkPipelineStageFlagBits stage;
+    VkQueryPool query_pool;
+    uint32_t query;
   };
 
   struct ArgsVkPipelineBarrier {

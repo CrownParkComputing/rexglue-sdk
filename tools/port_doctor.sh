@@ -7,7 +7,7 @@
 # Every check here exists because a title failed it and the cause took hours to
 # find:
 #
-#   render path      Shift 2 loses most of its text and grows a blob of another
+#   render path      some titles lose most of their text and grow a blob of another
 #                    render target on "host"; RRU and Split/Second need "fsi"
 #                    for their colour grade; MCLA is 25% faster on "host".
 #                    Nothing about the symptom says which - compare the frames.

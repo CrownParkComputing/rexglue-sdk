@@ -47,6 +47,12 @@ REXCVAR_DEFINE_BOOL(gpu_skip_tile_replay, false, "GPU",
                     "per-EDRAM-tile replay (diagnostic).");
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 
+REXCVAR_DEFINE_INT32(vsync_fps_cap, 0, "GPU",
+                     "Pace the guest vblank at this rate when vsync is on, instead of the\n"
+                     "title's reported video mode refresh. 0 = use the video mode. The\n"
+                     "launcher's FPS cap selection drives this.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
                     "Disable for minor CPU overhead reduction, but may break memory coherency.")

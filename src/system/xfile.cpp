@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <rex/filesystem/vfs.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -211,6 +212,28 @@ X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length, ui
   // TODO: not sure if this is meant to change depending on buffer address?
   // (only game seen using this always seems to use 4096-byte buffers)
   uint32_t page_size = 4096;
+
+  // DIAGNOSTIC, once: the element size of FILE_SEGMENT_ELEMENT is assumed to
+  // be 4 bytes above, on the strength of one title. Dump the first entries raw
+  // so a title that fills 8-byte elements (pointer + ULONGLONG padding) shows
+  // up as alternating pointer / zero words rather than as silently corrupt
+  // streamed data.
+  {
+    static bool dumped = false;
+    if (!dumped) {
+      dumped = true;
+      // Only as many elements as this call can legitimately own: one per
+      // page of the requested length (both 4- and 8-byte stride hypotheses
+      // fit inside pages*2 words), capped at 8.
+      const rex::be<uint32_t>* w = segments;
+      uint32_t pages = (length + page_size - 1) / page_size;
+      uint32_t n = std::min<uint32_t>(8, std::max<uint32_t>(2, pages * 2));
+      uint32_t v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      for (uint32_t i = 0; i < n; ++i) v[i] = uint32_t(w[i]);
+      REXSYS_INFO("[scatter] first call: length={} pages={} words[0..{}]= {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+                  length, pages, n - 1, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    }
+  }
 
   uint32_t read_total = 0;
   uint32_t read_remain = length;

@@ -111,6 +111,10 @@ REXCVAR_DEFINE_BOOL(vulkan_reuse_texture_descriptors, true, "GPU/Vulkan",
 REXCVAR_DEFINE_BOOL(vulkan_reuse_material_descriptor_sets, true, "GPU/Vulkan",
                     "Reuse texture descriptor sets for matching non-adjacent materials within a "
                     "frame. Disable for isolated descriptor-cache benchmarking.");
+REXCVAR_DEFINE_BOOL(vulkan_texture_binding_fast_path, true, "GPU/Vulkan",
+                    "Skip texture image view resolution and descriptor comparisons entirely "
+                    "when the shaders, fetch constants, texture binding epoch, layouts and "
+                    "samplers all match the previous draw. Disable for diagnostic comparison.");
 REXCVAR_DEFINE_BOOL(vulkan_dynamic_constant_buffers, false, "GPU/Vulkan",
                     "Use VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC for the guest draw constant\n"
                     "buffers: one persistent descriptor set per uniform pool page, written once,\n"
@@ -2452,17 +2456,23 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     // frame that is ending here.
     pipeline_cache_->TakeDrawTimeCreationStats(frame_stats_.pipelines_created,
                                                frame_stats_.pipeline_create_ms);
+    pipeline_cache_->TakePipelineStateCacheStats(frame_stats_.pipeline_state_hits,
+                                                 frame_stats_.pipeline_state_lookups);
+    if (texture_cache_) {
+      texture_cache_->TakeFetchWriteStats(frame_stats_.tex_fetch_writes,
+                                          frame_stats_.tex_fetch_writes_unchanged);
+    }
     shared_memory_->TakeUploadStats(frame_stats_.upload_events, frame_stats_.upload_pages,
                                     frame_stats_.upload_ms);
     uint64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     if (FILE* f = fopen(stats_path.c_str(), "a")) {
       if (!frame_stats_.last_swap_us) {
-        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms,upload_events,upload_pages,upload_ms,render_passes,rp_breaks_barrier,rp_breaks_query,rp_breaks_forced,b_tex,b_shmem,b_rt,b_other,resolves,gpu_pass_ms,gpu_pass_max_ms,gpu_passes_timed,texture_sets_material_reused\n");
+        fprintf(f, "swap,frame_ms,draw_cpu_ms,fence_wait_ms,draws,submissions,texture_sets_written,texture_sets_reused,resolve_cpu_ms,readback_sync_ms,readback_copy_ms,readback_count,readback_bytes,pipelines_created,pipeline_create_ms,translate_ms,primsampler_ms,texupload_ms,pipeline_ms,bindings_ms,vbuffers_ms,submit_ms,ownership_ms,memexport_draws,full_shared_requests,vfetch_requests,vfetch_skipped,vfetch_ms,primproc_ms,shadertrans_ms,upload_events,upload_pages,upload_ms,render_passes,rp_breaks_barrier,rp_breaks_query,rp_breaks_forced,b_tex,b_shmem,b_rt,b_other,resolves,gpu_pass_ms,gpu_pass_max_ms,gpu_passes_timed,texture_sets_material_reused,texture_sets_binding_fast_path,pipeline_state_hits,pipeline_state_lookups,tex_fetch_writes,tex_fetch_unchanged\n");
       } else {
         fprintf(f, "%u,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.3f,"
                 "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%.3f,%.3f,%.3f,"
-                "%llu,%llu,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%llu,%llu\n",
+                "%llu,%llu,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
                 g_draw_trace_swap_count,
                 double(now_us - frame_stats_.last_swap_us) / 1000.0,
                 frame_stats_.draw_cpu_ms, frame_stats_.fence_wait_ms,
@@ -2496,7 +2506,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                 (unsigned long long)frame_stats_.barrier_source[kBarrierOther],
                 (unsigned long long)frame_stats_.resolves,
                 gpu_pass_total_ms_, gpu_pass_max_ms_, (unsigned long long)gpu_passes_timed_,
-                (unsigned long long)frame_stats_.texture_sets_material_reused);
+                (unsigned long long)frame_stats_.texture_sets_material_reused,
+                (unsigned long long)frame_stats_.texture_sets_binding_fast_path,
+                (unsigned long long)frame_stats_.pipeline_state_hits,
+                (unsigned long long)frame_stats_.pipeline_state_lookups,
+                (unsigned long long)frame_stats_.tex_fetch_writes,
+                (unsigned long long)frame_stats_.tex_fetch_writes_unchanged);
       }
       fclose(f);
     }
@@ -4460,7 +4475,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
-  if (!UpdateBindings(vertex_shader, pixel_shader)) {
+  if (!UpdateBindings(vertex_shader, pixel_shader, vertex_shader_translation,
+                      pixel_shader_translation)) {
     return draw_fail("update_bindings");
   }
   log_slow_stage("bindings", kDrawStageBindings);
@@ -7216,7 +7232,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 }
 
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
-                                            const VulkanShader* pixel_shader) {
+                                            const VulkanShader* pixel_shader,
+                                            const VulkanShader::VulkanTranslation* vertex_translation,
+                                            const VulkanShader::VulkanTranslation* pixel_translation) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -7327,14 +7345,20 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       buffer_info.range = VkDeviceSize(float_constants_size);
       for (uint32_t i = 0; i < 4; ++i) {
         uint64_t float_constant_map_entry = current_float_constant_map_vertex_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
+        const uint32_t* float_constants_base =
+            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8)];
+        while (float_constant_map_entry) {
+          // Copy whole runs of consecutive constants with one memcpy apiece -
+          // shader constant maps are mostly dense runs.
+          uint32_t float_constant_index = rex::tzcnt(float_constant_map_entry);
+          uint32_t run_length =
+              rex::tzcnt(~(float_constant_map_entry >> float_constant_index));
+          std::memcpy(mapping, float_constants_base + (float_constant_index << 2),
+                      size_t(run_length) * sizeof(float) * 4);
+          mapping += size_t(run_length) * sizeof(float) * 4;
+          uint64_t run_mask =
+              run_length >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << run_length) - 1);
+          float_constant_map_entry &= ~(run_mask << float_constant_index);
         }
       }
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
@@ -7361,14 +7385,19 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       buffer_info.range = VkDeviceSize(float_constants_size);
       for (uint32_t i = 0; i < 4; ++i) {
         uint64_t float_constant_map_entry = current_float_constant_map_pixel_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
+        const uint32_t* float_constants_base =
+            &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8)];
+        while (float_constant_map_entry) {
+          // Same run-based copy as the vertex shader constants above.
+          uint32_t float_constant_index = rex::tzcnt(float_constant_map_entry);
+          uint32_t run_length =
+              rex::tzcnt(~(float_constant_map_entry >> float_constant_index));
+          std::memcpy(mapping, float_constants_base + (float_constant_index << 2),
+                      size_t(run_length) * sizeof(float) * 4);
+          mapping += size_t(run_length) * sizeof(float) * 4;
+          uint64_t run_mask =
+              run_length >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << run_length) - 1);
+          float_constant_map_entry &= ~(run_mask << float_constant_index);
         }
       }
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
@@ -7503,83 +7532,321 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // a texture may have been reloaded, or its view/swizzle may have changed.
   bool write_vertex_textures = texture_count_vertex || sampler_count_vertex;
   bool write_pixel_textures = texture_count_pixel || sampler_count_pixel;
-  descriptor_write_image_info_.clear();
-  descriptor_write_image_info_.reserve(
-      (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
-      (write_pixel_textures ? texture_count_pixel + sampler_count_pixel : 0));
-  size_t vertex_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && texture_count_vertex) {
-    for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-          texture_binding.fetch_constant, texture_binding.dimension,
-          bool(texture_binding.is_signed));
-      descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
-                                              ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                              : VK_IMAGE_LAYOUT_UNDEFINED;
+
+  const VkDescriptorSetLayout texture_set_layout_vertex =
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref();
+  const VkDescriptorSetLayout texture_set_layout_pixel =
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref();
+
+  // Stable-binding fast path: skip the texture cache lookups when every input
+  // to the resolution matches a recently seen binding state. Only the fetch
+  // slots the shader translations actually read participate - unrelated slots
+  // churn constantly as the world streams in. Per-slot binding epochs cover
+  // everything the fetch words don't - uploads, invalidations and view
+  // destruction all bump them (see VulkanTextureCache::texture_binding_epoch).
+  uint32_t texture_sets_required = 0;
+  if (write_vertex_textures) {
+    texture_sets_required |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
+  }
+  if (write_pixel_textures) {
+    texture_sets_required |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
+  }
+  uint32_t fast_path_entry_index = UINT32_MAX;
+  const bool binding_fast_path_enabled =
+      REXCVAR_GET(vulkan_texture_binding_fast_path) &&
+      REXCVAR_GET(vulkan_reuse_texture_descriptors);
+  // Computed lazily, only when the MRU scan runs; the insert path stores it.
+  uint64_t draw_binding_key_hash = 0;
+  if (binding_fast_path_enabled) {
+    auto entry_matches_deep = [&](uint32_t i) {
+      TextureBindingFastPathEntry& entry = texture_binding_fast_path_[i];
+      if (!entry.valid || entry.vertex_translation != vertex_translation ||
+          entry.pixel_translation != pixel_translation ||
+          entry.layout_vertex != texture_set_layout_vertex ||
+          entry.layout_pixel != texture_set_layout_pixel ||
+          entry.samplers_vertex != current_samplers_vertex_ ||
+          entry.samplers_pixel != current_samplers_pixel_) {
+        return false;
+      }
+      for (uint32_t slot : entry.used_slots) {
+        if (entry.slot_epochs[slot] != texture_cache_->texture_binding_epoch(slot) ||
+            std::memcmp(&entry.fetch_words[slot * 6],
+                        &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6],
+                        6 * sizeof(uint32_t))) {
+          return false;
+        }
+      }
+      return true;
+    };
+    // The previous draw's entry first, deep-compared directly - consecutive
+    // repeats are the common case, and they are not worth a hash. The hash is
+    // computed only when scanning the rest of the MRU, where it prefilters
+    // the deep compare.
+    if (texture_binding_fast_path_last_ != UINT32_MAX &&
+        entry_matches_deep(texture_binding_fast_path_last_)) {
+      fast_path_entry_index = texture_binding_fast_path_last_;
+    } else {
+      // One hash over every key component, used as a cheap prefilter for the
+      // scan. The same computation runs at insert, so a mismatch always means
+      // miss.
+      draw_binding_key_hash = UINT64_C(0xCBF29CE484222325);
+      auto key_mix = [](uint64_t& h, uint64_t v) { h = (h ^ v) * UINT64_C(0x100000001B3); };
+      key_mix(draw_binding_key_hash, reinterpret_cast<uintptr_t>(vertex_translation));
+      key_mix(draw_binding_key_hash, reinterpret_cast<uintptr_t>(pixel_translation));
+      key_mix(draw_binding_key_hash, reinterpret_cast<uintptr_t>(texture_set_layout_vertex));
+      key_mix(draw_binding_key_hash, reinterpret_cast<uintptr_t>(texture_set_layout_pixel));
+      auto key_mix_fetch_constant = [&](uint32_t fetch_constant) {
+        const uint32_t* words =
+            &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + fetch_constant * 6];
+        for (uint32_t k = 0; k < 6; ++k) {
+          key_mix(draw_binding_key_hash, words[k]);
+        }
+        key_mix(draw_binding_key_hash, texture_cache_->texture_binding_epoch(fetch_constant));
+      };
+      for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
+        key_mix_fetch_constant(texture_binding.fetch_constant);
+      }
+      for (const VulkanShader::SamplerBinding& sampler_binding : samplers_vertex) {
+        key_mix_fetch_constant(sampler_binding.fetch_constant);
+      }
+      if (textures_pixel) {
+        for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
+          key_mix_fetch_constant(texture_binding.fetch_constant);
+        }
+      }
+      if (samplers_pixel) {
+        for (const VulkanShader::SamplerBinding& sampler_binding : *samplers_pixel) {
+          key_mix_fetch_constant(sampler_binding.fetch_constant);
+        }
+      }
+      auto key_mix_samplers =
+          [&](const std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>& pairs) {
+            for (const auto& pair : pairs) {
+              key_mix(draw_binding_key_hash, pair.first.value);
+              key_mix(draw_binding_key_hash, reinterpret_cast<uintptr_t>(pair.second));
+            }
+          };
+      key_mix_samplers(current_samplers_vertex_);
+      key_mix_samplers(current_samplers_pixel_);
+
+      for (uint32_t i = 0; i < kTextureBindingFastPathEntries; ++i) {
+        if (i != texture_binding_fast_path_last_ &&
+            texture_binding_fast_path_[i].valid &&
+            texture_binding_fast_path_[i].key_hash == draw_binding_key_hash &&
+            entry_matches_deep(i)) {
+          fast_path_entry_index = i;
+          break;
+        }
+      }
+    }
+    if (fast_path_entry_index != UINT32_MAX) {
+      texture_binding_fast_path_[fast_path_entry_index].last_used =
+          ++texture_binding_fast_path_clock_;
     }
   }
-  size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_vertex_textures && sampler_count_vertex) {
-    for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-         current_samplers_vertex_) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.sampler = sampler_pair.second;
-    }
-  }
-  size_t pixel_texture_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && texture_count_pixel) {
-    for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-          texture_binding.fetch_constant, texture_binding.dimension,
-          bool(texture_binding.is_signed));
-      descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
-                                              ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                              : VK_IMAGE_LAYOUT_UNDEFINED;
-    }
-  }
-  size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
-  if (write_pixel_textures && sampler_count_pixel) {
-    for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
-         current_samplers_pixel_) {
-      VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-      descriptor_image_info.sampler = sampler_pair.second;
+  // A hit on the entry used by the immediately previous draw can skip the
+  // descriptor comparison as well: the descriptor sets still hold exactly its
+  // contents (the value bits are cleared at frame open and whenever a set was
+  // rewritten). Any other entry only skips the resolution - the comparison
+  // below still decides whether the sets need rewriting for its contents.
+  bool bindings_fast_path_hit = false;
+  bool bindings_resolution_cached = false;
+  if (fast_path_entry_index != UINT32_MAX) {
+    if (fast_path_entry_index == texture_binding_fast_path_last_ &&
+        (current_graphics_descriptor_set_values_up_to_date_ & texture_sets_required) ==
+            texture_sets_required) {
+      bindings_fast_path_hit = true;
+    } else {
+      bindings_resolution_cached = true;
     }
   }
 
-  auto texture_descriptors_changed = [&](uint32_t stage, uint32_t set_index,
-                                         VkDescriptorSetLayout layout, size_t offset,
-                                         size_t count) {
-    if (!count) return false;
-    auto& cached = cached_texture_descriptors_[stage];
-    auto first = descriptor_write_image_info_.begin() + offset;
-    uint32_t set_bit = uint32_t(1) << set_index;
-    bool same = REXCVAR_GET(vulkan_reuse_texture_descriptors) &&
-                (current_graphics_descriptor_set_values_up_to_date_ & set_bit) &&
-                cached.layout == layout && cached.images.size() == count &&
-                std::equal(cached.images.begin(), cached.images.end(), first,
-                           [](const VkDescriptorImageInfo& a, const VkDescriptorImageInfo& b) {
-                             return a.sampler == b.sampler && a.imageView == b.imageView &&
-                                    a.imageLayout == b.imageLayout;
-                           });
-    if (same) {
+  // Only meaningful on a fast-path miss, where the descriptor image info
+  // vector is rebuilt; the write path below is unreachable on a hit because
+  // both write flags are cleared there.
+  size_t vertex_texture_image_info_offset = 0;
+  size_t vertex_sampler_image_info_offset = 0;
+  size_t pixel_texture_image_info_offset = 0;
+  size_t pixel_sampler_image_info_offset = 0;
+
+  if (bindings_fast_path_hit) {
+    write_vertex_textures = false;
+    write_pixel_textures = false;
+    if (texture_sets_required &
+        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex)) {
       ++frame_stats_.texture_sets_reused;
-      return false;
+      ++frame_stats_.texture_sets_binding_fast_path;
     }
-    current_graphics_descriptor_set_values_up_to_date_ &= ~set_bit;
-    cached.layout = layout;
-    cached.images.assign(first, first + count);
-    return true;
-  };
-  write_vertex_textures = texture_descriptors_changed(
-      0, SpirvShaderTranslator::kDescriptorSetTexturesVertex,
-      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref(),
-      vertex_texture_image_info_offset, texture_count_vertex + sampler_count_vertex);
-  write_pixel_textures = texture_descriptors_changed(
-      1, SpirvShaderTranslator::kDescriptorSetTexturesPixel,
-      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref(),
-      pixel_texture_image_info_offset, texture_count_pixel + sampler_count_pixel);
+    if (texture_sets_required &
+        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel)) {
+      ++frame_stats_.texture_sets_reused;
+      ++frame_stats_.texture_sets_binding_fast_path;
+    }
+  } else {
+    descriptor_write_image_info_.clear();
+    descriptor_write_image_info_.reserve(
+        (write_vertex_textures ? texture_count_vertex + sampler_count_vertex : 0) +
+        (write_pixel_textures ? texture_count_pixel + sampler_count_pixel : 0));
+    vertex_texture_image_info_offset = 0;
+    vertex_sampler_image_info_offset = texture_count_vertex;
+    pixel_texture_image_info_offset = texture_count_vertex + sampler_count_vertex;
+    pixel_sampler_image_info_offset =
+        pixel_texture_image_info_offset + (write_pixel_textures ? texture_count_pixel : 0);
+    if (bindings_resolution_cached) {
+      // Resolution skipped - reuse the entry's resolved contents; the
+      // comparison below still decides whether the sets need rewriting.
+      descriptor_write_image_info_ =
+          texture_binding_fast_path_[fast_path_entry_index].image_info;
+      if (texture_sets_required &
+          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex)) {
+        ++frame_stats_.texture_sets_binding_fast_path;
+      }
+      if (texture_sets_required &
+          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel)) {
+        ++frame_stats_.texture_sets_binding_fast_path;
+      }
+    } else {
+    if (write_vertex_textures && texture_count_vertex) {
+      for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
+        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+        descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
+            texture_binding.fetch_constant, texture_binding.dimension,
+            bool(texture_binding.is_signed));
+        descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
+                                                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                : VK_IMAGE_LAYOUT_UNDEFINED;
+      }
+    }
+    if (write_vertex_textures && sampler_count_vertex) {
+      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
+           current_samplers_vertex_) {
+        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+        descriptor_image_info.sampler = sampler_pair.second;
+      }
+    }
+    if (write_pixel_textures && texture_count_pixel) {
+      for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
+        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+        descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
+            texture_binding.fetch_constant, texture_binding.dimension,
+            bool(texture_binding.is_signed));
+        descriptor_image_info.imageLayout = descriptor_image_info.imageView != VK_NULL_HANDLE
+                                                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                : VK_IMAGE_LAYOUT_UNDEFINED;
+      }
+    }
+    if (write_pixel_textures && sampler_count_pixel) {
+      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
+           current_samplers_pixel_) {
+        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
+        descriptor_image_info.sampler = sampler_pair.second;
+      }
+    }
+    }
+
+    auto texture_descriptors_changed = [&](uint32_t stage, uint32_t set_index,
+                                           VkDescriptorSetLayout layout, size_t offset,
+                                           size_t count) {
+      if (!count) return false;
+      auto& cached = cached_texture_descriptors_[stage];
+      auto first = descriptor_write_image_info_.begin() + offset;
+      uint32_t set_bit = uint32_t(1) << set_index;
+      bool same = REXCVAR_GET(vulkan_reuse_texture_descriptors) &&
+                  (current_graphics_descriptor_set_values_up_to_date_ & set_bit) &&
+                  cached.layout == layout && cached.images.size() == count &&
+                  std::equal(cached.images.begin(), cached.images.end(), first,
+                             [](const VkDescriptorImageInfo& a, const VkDescriptorImageInfo& b) {
+                               return a.sampler == b.sampler && a.imageView == b.imageView &&
+                                      a.imageLayout == b.imageLayout;
+                             });
+      if (same) {
+        ++frame_stats_.texture_sets_reused;
+        return false;
+      }
+      current_graphics_descriptor_set_values_up_to_date_ &= ~set_bit;
+      cached.layout = layout;
+      cached.images.assign(first, first + count);
+      return true;
+    };
+    write_vertex_textures = texture_descriptors_changed(
+        0, SpirvShaderTranslator::kDescriptorSetTexturesVertex, texture_set_layout_vertex,
+        vertex_texture_image_info_offset, texture_count_vertex + sampler_count_vertex);
+    write_pixel_textures = texture_descriptors_changed(
+        1, SpirvShaderTranslator::kDescriptorSetTexturesPixel, texture_set_layout_pixel,
+        pixel_texture_image_info_offset, texture_count_pixel + sampler_count_pixel);
+
+    if (binding_fast_path_enabled && !bindings_resolution_cached) {
+      // Insert this binding state into the MRU cache now that the resolved
+      // state is known-good: refresh an entry for the same translations and
+      // layouts if there is one, take a free one, or evict the least recently
+      // used. The used-slot list comes from the binding lists of these
+      // translations; only those slots' words and epochs are snapshotted.
+      uint32_t insert_index = UINT32_MAX;
+      uint32_t free_index = UINT32_MAX;
+      uint32_t lru_index = 0;
+      for (uint32_t i = 0; i < kTextureBindingFastPathEntries; ++i) {
+        const TextureBindingFastPathEntry& entry = texture_binding_fast_path_[i];
+        if (!entry.valid) {
+          free_index = i;
+          continue;
+        }
+        if (entry.vertex_translation == vertex_translation &&
+            entry.pixel_translation == pixel_translation &&
+            entry.layout_vertex == texture_set_layout_vertex &&
+            entry.layout_pixel == texture_set_layout_pixel) {
+          insert_index = i;
+          break;
+        }
+        if (texture_binding_fast_path_[lru_index].valid &&
+            entry.last_used < texture_binding_fast_path_[lru_index].last_used) {
+          lru_index = i;
+        }
+      }
+      if (insert_index == UINT32_MAX) {
+        insert_index = free_index != UINT32_MAX ? free_index : lru_index;
+      }
+      TextureBindingFastPathEntry& entry = texture_binding_fast_path_[insert_index];
+      entry.valid = true;
+      entry.last_used = ++texture_binding_fast_path_clock_;
+      entry.key_hash = draw_binding_key_hash;
+      entry.vertex_translation = vertex_translation;
+      entry.pixel_translation = pixel_translation;
+      entry.layout_vertex = texture_set_layout_vertex;
+      entry.layout_pixel = texture_set_layout_pixel;
+      entry.used_slots.clear();
+      for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
+        entry.used_slots.push_back(texture_binding.fetch_constant);
+      }
+      for (const VulkanShader::SamplerBinding& sampler_binding : samplers_vertex) {
+        entry.used_slots.push_back(sampler_binding.fetch_constant);
+      }
+      if (textures_pixel) {
+        for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
+          entry.used_slots.push_back(texture_binding.fetch_constant);
+        }
+      }
+      if (samplers_pixel) {
+        for (const VulkanShader::SamplerBinding& sampler_binding : *samplers_pixel) {
+          entry.used_slots.push_back(sampler_binding.fetch_constant);
+        }
+      }
+      std::sort(entry.used_slots.begin(), entry.used_slots.end());
+      entry.used_slots.erase(std::unique(entry.used_slots.begin(), entry.used_slots.end()),
+                             entry.used_slots.end());
+      for (uint32_t slot : entry.used_slots) {
+        std::memcpy(&entry.fetch_words[slot * 6],
+                    &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + slot * 6], 6 * sizeof(uint32_t));
+        entry.slot_epochs[slot] = texture_cache_->texture_binding_epoch(slot);
+      }
+      entry.samplers_vertex = current_samplers_vertex_;
+      entry.samplers_pixel = current_samplers_pixel_;
+      entry.image_info = descriptor_write_image_info_;
+      fast_path_entry_index = insert_index;
+    }
+    // The descriptor sets now hold this entry's contents, whether they were
+    // rewritten for it or already matched.
+    texture_binding_fast_path_last_ = fast_path_entry_index;
+  }
   // Rebind only replaced descriptor sets or sets disturbed by a layout change.
   current_graphics_descriptor_sets_bound_up_to_date_ &=
       current_graphics_descriptor_set_values_up_to_date_;

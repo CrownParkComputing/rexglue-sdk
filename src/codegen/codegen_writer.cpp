@@ -304,6 +304,105 @@ bool CodegenWriter::write(bool force) {
   out = partition.Serialize();
   SaveCurrentOutData(kPartitionFileName);
 
+  /*
+   * The function boundaries, in XenonRecomp's own TOML shape.
+   *
+   * XenonRecomp's analyser bounds functions from .pdata and by hunting branch
+   * links, and its README is blunt that it "struggles with functions containing
+   * jump tables, since they look like tail calls" - the documented workaround
+   * being to list boundaries by hand. This graph already has them, and not by
+   * guesswork: phase_validate refuses to emit a single line of code while any
+   * branch target is unresolved, so a project that builds has every boundary
+   * proven. Writing them out costs nothing and saves the one part of bringing a
+   * title up on XenonRecomp that has no automatic answer.
+   */
+  {
+    out.clear();
+    println("# Function boundaries discovered and validated by ReXGlue codegen.");
+    println("# Generated for {} - every branch target in this list resolved, or", projectName);
+    println("# codegen would have failed rather than emit anything.");
+    println("functions = [");
+    size_t written = 0;
+    for (const auto* fn : functions) {
+      if (fn->isImport() || fn->size() == 0) {
+        continue;
+      }
+      println("    {{ address = 0x{:08X}, size = 0x{:X} }},", fn->base(), fn->size());
+      ++written;
+    }
+    println("]");
+
+    /* The ABI helpers, which XenonRecomp needs and has no way to find: its
+     * README says "these functions could likely be auto-detected, but there is
+     * currently no mechanism for it". This pipeline detects them already, by
+     * the same byte patterns its documentation lists. */
+    const auto& detected = ctx_.analysisState();
+    auto helper = [&](const char* name, uint32_t address) {
+      if (address) println("{} = 0x{:08X}", name, address);
+    };
+    println("");
+    helper("restgprlr_14_address", detected.restGpr14Address);
+    helper("savegprlr_14_address", detected.saveGpr14Address);
+    helper("restfpr_14_address", detected.restFpr14Address);
+    helper("savefpr_14_address", detected.saveFpr14Address);
+    helper("restvmx_14_address", detected.restVmx14Address);
+    helper("savevmx_14_address", detected.saveVmx14Address);
+    helper("restvmx_64_address", detected.restVmx64Address);
+    helper("savevmx_64_address", detected.saveVmx64Address);
+
+    /*
+     * Deliberately NOT exporting this pipeline's invalid-instruction map.
+     *
+     * The two mean different things by it. Here it is addr -> size: where in
+     * the image the bytes that are not code live. XenonRecomp's
+     * invalid_instructions takes a 32-bit instruction VALUE and skips wherever
+     * that encoding appears. Writing addresses into that field makes it skip
+     * any instruction that happens to encode to one of them, which silently
+     * drops real functions - it dropped five out of Geometry Wars 1, found
+     * only because the link failed on them.
+     */
+
+    SaveCurrentOutData(fmt::format("{}_xenonrecomp.toml", projectName));
+    REXCODEGEN_TRACE("Wrote {} function boundaries for XenonRecomp", written);
+  }
+
+  /*
+   * And the jump tables, in XenonRecomp's switch-table shape.
+   *
+   * Its own analyser finds most of them and misses the rest - it reported six
+   * in Geometry Wars 2 as "a switch jump table with no switch table entry
+   * present", none of which its XenonAnalyse pass had produced. These are the
+   * ones resolved here, where a bctr that cannot be resolved fails the build
+   * rather than being emitted as a guess.
+   *
+   * No `default` key: XenonRecomp's parser reads base, r and labels only, so
+   * writing one would be inventing a value nothing reads.
+   */
+  {
+    out.clear();
+    println("# Jump tables resolved by ReXGlue codegen.");
+    size_t tables = 0;
+    for (const auto* fn : functions) {
+      for (const auto& table : fn->jumpTables()) {
+        if (table.targets.empty()) {
+          continue;
+        }
+        println("");
+        println("[[switch]]");
+        println("base = 0x{:08X}", table.bctrAddress);
+        println("r = {}", static_cast<uint32_t>(table.indexRegister));
+        println("labels = [");
+        for (uint32_t target : table.targets) {
+          println("    0x{:08X},", target);
+        }
+        println("]");
+        ++tables;
+      }
+    }
+    SaveCurrentOutData(fmt::format("{}_switch_tables.toml", projectName));
+    REXCODEGEN_TRACE("Wrote {} jump tables for XenonRecomp", tables);
+  }
+
   REXCODEGEN_TRACE("Recompilation complete.");
 
   // Generate sources.cmake

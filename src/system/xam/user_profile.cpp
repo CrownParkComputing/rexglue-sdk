@@ -157,6 +157,11 @@ void UserProfile::LoadSetting(UserProfile::Setting* setting) {
 
 void UserProfile::SaveSetting(UserProfile::Setting* setting) {
   if (setting->is_title_specific()) {
+    // Logged at info because this is where a title keeps the numbers it wants
+    // to survive a restart - its high score among them. Which id is which is
+    // title-specific and can only be learned by watching one write it.
+    REXSYS_INFO("Profile setting saved: id={:08X} type={} bytes={}", setting->setting_id,
+                static_cast<int>(setting->type), setting->Serialize().size());
     auto serialized_setting = setting->Serialize();
     auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
     std::filesystem::create_directories(content_dir);

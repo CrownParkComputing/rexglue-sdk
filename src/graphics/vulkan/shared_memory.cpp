@@ -304,7 +304,7 @@ bool VulkanSharedMemory::UploadRanges(
                      (upload_page_ranges.back().first + upload_page_ranges.back().second -
                       upload_page_ranges.front().first)
                          << page_size_log2()));
-  command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierSharedMemory);
   stage_took(barrier_ns);
 
   // Mark the whole span valid in one call, before copying rather than per

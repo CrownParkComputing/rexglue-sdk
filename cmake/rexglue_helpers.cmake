@@ -84,6 +84,13 @@ function(rexglue_configure_target target_name)
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")
 
+    # Enables the raylib input thread split in windowed_app_main_sdl.cpp. The
+    # implementation lives in librexruntime.so; the consumer only needs the
+    # define so the entry point compiles the calls in.
+    if(REXGLUE_ENABLE_RAYLIB_DISPLAY)
+        target_compile_definitions(${target_name} PRIVATE REX_HAS_RAYLIB_DISPLAY=1)
+    endif()
+
     if(UNIX AND NOT APPLE)
         set_target_properties(${target_name} PROPERTIES
             INSTALL_RPATH "$ORIGIN"

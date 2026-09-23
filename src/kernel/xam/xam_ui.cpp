@@ -31,9 +31,19 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
 #include <rex/system/xtypes.h>
 #include <rex/thread.h>
 #include <rex/ui/imgui_dialog.h>
+#include <rex/ui/keybinds.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
+
+// Off turns the title's own Achievements menu item back into a no-op, for a
+// title whose menu does not expect the call to succeed.
+REXCVAR_DEFINE_BOOL(achievements_ui, true, "Kernel",
+                    "Let a title's Achievements menu open the achievements overlay");
+// Off leaves the title's Leaderboards item a no-op, for a title that asks to
+// read stats for some reason other than the player opening a leaderboard.
+REXCVAR_DEFINE_BOOL(high_scores_ui, true, "Kernel",
+                    "Let a title's Leaderboards menu open the local high-score page");
 
 namespace rex {
 namespace kernel {
@@ -571,6 +581,60 @@ u32 XamShowCommunitySessionsUI_entry(u32 r3, u32 r4) {
   return X_ERROR_FUNCTION_FAILED;
 }
 
+/*
+ * The title's own Achievements menu item.
+ *
+ * On a console this raised the Guide's achievements blade. Here it opens the
+ * overlay the achievements keybind opens - the same dialog, listing every
+ * achievement in the title's XDBF with its unlock state, gamerscore and icon -
+ * so a game that offers the menu item has it do something.
+ *
+ * Deferred to the UI thread and returned at once rather than dispatched as a
+ * modal through xeXamDispatchDialog: the overlay is a plain ImGuiDialog with no
+ * close callback, so there is no fence for a blade to wait on, and waiting for
+ * one would hang the calling guest thread outright.
+ */
+/*
+ * The title's own Leaderboards menu item.
+ *
+ * Its real screen is a Live screen: it reads through XUserReadStats against a
+ * live session and shows "Please sign in" from the sign-in state alone, and it
+ * cannot be fed local numbers without emulating the service behind it. Claiming
+ * to be signed in to Live only gets further in - it then asks XLiveBase for a
+ * logon id and a friends list and crashes on the handle it never got.
+ *
+ * So the local board is a page of the blade, and the menu item opens that. The
+ * entry point is kept and answered, not removed: a title whose import is
+ * missing does not start at all.
+ */
+uint32_t XamShowLocalHighScores() {
+  if (!REXCVAR_GET(high_scores_ui)) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  auto* kernel = REX_KERNEL_STATE();
+  auto* app_context = kernel && kernel->emulator() ? kernel->emulator()->app_context() : nullptr;
+  if (!app_context) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  app_context->CallInUIThreadDeferred(
+      []() { rex::ui::InvokeBind("bind_high_scores_open"); });
+  return X_ERROR_SUCCESS;
+}
+
+uint32_t XamShowAchievementsUI_entry(uint32_t user_index) {
+  (void)user_index;
+  if (!REXCVAR_GET(achievements_ui)) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  auto* kernel = REX_KERNEL_STATE();
+  auto* app_context = kernel && kernel->emulator() ? kernel->emulator()->app_context() : nullptr;
+  if (!app_context) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  app_context->CallInUIThreadDeferred([]() { rex::ui::InvokeBind("bind_achievements"); });
+  return X_ERROR_SUCCESS;
+}
+
 uint32_t XamShowMessageBoxUIEx_entry() {
   // TODO(tomc): implement properly
   static bool warned = false;
@@ -593,6 +657,7 @@ REX_EXPORT(__imp__XamShowDirtyDiscErrorUI, rex::kernel::xam::XamShowDirtyDiscErr
 REX_EXPORT(__imp__XamShowPartyUI, rex::kernel::xam::XamShowPartyUI_entry)
 REX_EXPORT(__imp__XamShowCommunitySessionsUI, rex::kernel::xam::XamShowCommunitySessionsUI_entry)
 REX_EXPORT(__imp__XamShowMessageBoxUIEx, rex::kernel::xam::XamShowMessageBoxUIEx_entry)
+REX_EXPORT(__imp__XamShowAchievementsUI, rex::kernel::xam::XamShowAchievementsUI_entry)
 
 REX_EXPORT_STUB(__imp__XamIsGuideDisabled);
 REX_EXPORT_STUB(__imp__XamIsMessageBoxActive);
@@ -604,7 +669,6 @@ REX_EXPORT_STUB(__imp__XamNavigate);
 REX_EXPORT_STUB(__imp__XamNavigateBack);
 REX_EXPORT_STUB(__imp__XamOverrideHudOpenType);
 REX_EXPORT_STUB(__imp__XamShowAchievementDetailsUI);
-REX_EXPORT_STUB(__imp__XamShowAchievementsUI);
 REX_EXPORT_STUB(__imp__XamShowAchievementsUIEx);
 REX_EXPORT_STUB(__imp__XamShowAndWaitForMessageBoxEx);
 REX_EXPORT_STUB(__imp__XamShowAvatarAwardGamesUI);

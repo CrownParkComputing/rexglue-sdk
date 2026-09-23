@@ -24,7 +24,12 @@
 #include <rex/memory.h>
 #include <rex/ui/graphics_util.h>
 
-REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, false, "GPU",
+// Default matches upstream (true). Without it an unclipped draw is assumed to
+// touch the whole of EDRAM, so every ownership transfer it triggers copies far
+// more than the draw actually used; it is also the more correct setting - see
+// the last paragraph of the upstream comment below on lossy range ownership
+// transfers corrupting later render targets.
+REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, true, "GPU",
                     "Execute unclipped draw vertex shader on CPU");
 
 REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_with_scissor, false, "GPU",

@@ -25,6 +25,7 @@
 #include <rex/math.h>
 #include <rex/platform.h>
 #include <rex/ui/vulkan/presenter.h>
+#include <rex/ui/vulkan/presenter_streamer.h>
 #include <rex/ui/vulkan/util.h>
 
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
@@ -190,6 +191,9 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
 }
 
 VulkanPresenter::~VulkanPresenter() {
+  // The streamer owns Vulkan objects; shut it down while the device is alive.
+  PresenterStreamShutdown();
+
   // Destroy the swapchain after its images are not used for drawing anymore.
   // This is a confusing part in Vulkan, as vkQueuePresentKHR doesn't signal a
   // fence clearly indicating when it's safe to destroy a swapchain, so we
@@ -354,7 +358,13 @@ bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, V
   source_image_create_info.arrayLayers = 1;
   source_image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
   source_image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  source_image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+  // TRANSFER_DST as well: a backend is allowed to put its finished frame here
+  // with a blit rather than by rendering into it. Without it that blit is
+  // invalid, the image keeps whatever it last held, and the only sign is a
+  // validation message about an incompatible layout - which is how the native
+  // backend came to present a frame of stale colour.
+  source_image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
   source_image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   source_image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1103,6 +1113,13 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
     }
   }
 
+  // GPU-direct frame streaming (REX_PRESENT_STREAM): the image now holds the
+  // newest guest frame; its reads at kGuestOutputInternalAccessMask have
+  // completed by queue submission order before any stream copy submitted
+  // after this point executes.
+  PresenterStreamNotifyImage(vulkan_device_, image_instance.image->image(), frontbuffer_width,
+                             frontbuffer_height);
+
   return refresher_succeeded;
 }
 
@@ -1488,8 +1505,10 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
   image_create_info.arrayLayers = 1;
   image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+  // See the note on the source image above: a backend may blit its frame in.
+  image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            VK_IMAGE_USAGE_STORAGE_BIT;
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   image_create_info.queueFamilyIndexCount = 0;
   image_create_info.pQueueFamilyIndices = nullptr;

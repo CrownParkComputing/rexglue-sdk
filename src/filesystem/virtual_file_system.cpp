@@ -120,6 +120,30 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     return rex::string::utf8_starts_with_case(normalized_path, d->mount_path());
   });
   if (it == devices_.cend()) {
+    // A path with no device prefix at all. Titles write diagnostics this way -
+    // one title logs its physics-model failure to a bare "pmodel_error.txt" -
+    // and refusing the open throws away the one message that says what went
+    // wrong. Land such files on the writable cache partition instead, where
+    // they can be read back after the run.
+    const bool has_device = normalized_path.find(':') != std::string::npos;
+    if (!has_device && !normalized_path.empty() && normalized_path[0] != '\\') {
+      std::string retry = "cache:\\" + normalized_path;
+      // "cache:" is a symbolic link to the real device, and symlinks were
+      // resolved above before this path existed - resolve again or the device
+      // search below never matches.
+      std::string retry_resolved;
+      if (ResolveSymbolicLink(retry, retry_resolved)) {
+        retry = retry_resolved;
+      }
+      auto it2 = std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+        return rex::string::utf8_starts_with_case(retry, d->mount_path());
+      });
+      if (it2 != devices_.cend()) {
+        REXFS_WARN("VFS: '{}' has no device - landing it on {}", path, retry);
+        auto relative = retry.substr((*it2)->mount_path().size());
+        return (*it2)->ResolvePath(relative);
+      }
+    }
     REXFS_WARN("VFS: '{}' -> [no device]", path);
     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
     // not an actual problem nor something we care about.
@@ -216,6 +240,25 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
   Entry* entry = nullptr;
 
   auto base_path = rex::string::utf8_find_base_guest_path(path);
+  // A device-less relative path ("pmodel_error.txt") has no base to resolve a
+  // parent from, so a CREATE of it can never succeed: nothing to hang the new
+  // entry on. ResolvePath lands such paths on the cache partition; do the same
+  // here for the parent so the create has somewhere to go. Titles write their
+  // own diagnostics this way and that file is worth more than the refusal.
+  std::string landed_path;
+  std::string_view open_path = path;
+  if (base_path.empty() && !root_entry && !path.empty() && path.front() != '\\' &&
+      path.find(':') == std::string_view::npos) {
+    // Keep the "cache:" prefix rather than pre-resolving the symlink: the
+    // title's own "cache:\replaycache.rep" creates fine through the normal
+    // path, while the raw \Device\... form failed the parent lookup here
+    // (pmodel_error.txt still came back STATUS_NO_SUCH_FILE). Let the same
+    // machinery serve both.
+    landed_path = "cache:\\" + std::string(path);
+    open_path = landed_path;
+    REXFS_WARN("VFS: '{}' has no device - opening it as '{}'", path, open_path);
+    base_path = rex::string::utf8_find_base_guest_path(open_path);
+  }
   if (!base_path.empty()) {
     parent_entry = !root_entry ? ResolvePath(base_path) : root_entry->ResolvePath(base_path);
     if (!parent_entry) {
@@ -223,10 +266,10 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
       return X_STATUS_NO_SUCH_FILE;
     }
 
-    auto file_name = rex::string::utf8_find_name_from_guest_path(path);
+    auto file_name = rex::string::utf8_find_name_from_guest_path(open_path);
     entry = parent_entry->GetChild(file_name);
   } else {
-    entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
+    entry = !root_entry ? ResolvePath(open_path) : root_entry->GetChild(open_path);
   }
 
   if (entry) {

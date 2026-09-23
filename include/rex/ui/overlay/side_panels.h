@@ -30,10 +30,17 @@ class SidePanelsDialog final : public ImGuiDialog {
  private:
   void OnDraw(ImGuiIO& io) override;
   void DrawRail(ImGuiIO& io, bool right);
+  void DrawLogoBadge(ImGuiIO& io);
   void DrawFps(ImGuiIO& io, bool panels_visible);
+  /// Pad chords for the two toggles, because a handheld has no F8 or F10.
+  void PollPad();
+  void TogglePanels();
+  void ToggleFps();
 
   bool panels_visible_ = true;
   bool fps_visible_ = true;
+  uint16_t last_buttons_ = 0;
+  bool seen_pad_ = false;
   std::unique_ptr<ImmediateTexture> logo_;
   DebugOverlayDialog::FrameStatsProvider stats_;
 };

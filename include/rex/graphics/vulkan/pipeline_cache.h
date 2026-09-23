@@ -99,6 +99,9 @@ class VulkanPipelineCache {
   // frame. Returns the counts accumulated since the previous call and clears
   // them, so a caller can attribute first-use stalls to the frame they land in.
   void TakeDrawTimeCreationStats(uint64_t& count_out, double& milliseconds_out);
+  // PipelineStateInput cache hits and lookups since the previous call
+  // (cleared on read), for the frame-stat CSV. Command processor thread only.
+  void TakePipelineStateCacheStats(uint64_t& hits_out, uint64_t& lookups_out);
   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                     const PipelineLayoutProvider*& pipeline_layout_out,
                                     bool* is_placeholder_out = nullptr) const;
@@ -468,6 +471,66 @@ class VulkanPipelineCache {
 
   // Previously used pipeline, to avoid lookups if the state wasn't changed.
   const std::pair<const PipelineDescription, Pipeline>* last_pipeline_ = nullptr;
+
+  // The exact inputs GetCurrentStateDescription consumes for one draw, masked
+  // down to the fields it actually reads (whole registers carry per-draw
+  // garbage like VGT_DRAW_INITIATOR::num_indices and the blend controls of
+  // render targets absent from the render pass - hashing those misses on
+  // every draw). When a draw's input matches a cached entry exactly, the
+  // description would be rebuilt identically, so the whole register walk and
+  // the description hashtable lookup are skipped. Value-initialized before
+  // filling so the tail padding is zero and both memcmp and the FNV hash over
+  // the raw words are deterministic.
+  //
+  // WARNING: this key must stay in sync with GetCurrentStateDescription. If
+  // that function starts consuming more guest state, the key must grow to
+  // match - otherwise the cache reuses a pipeline built for a different
+  // description. See ConfigurePipeline.
+  struct PipelineStateInput {
+    const void* vertex_shader;  // translation: ucode hash + modification
+    const void* pixel_shader;
+    uint64_t render_pass_key;
+    uint32_t normalized_depth_control;
+    uint32_t normalized_color_mask;
+    // Zero for render targets absent from render_pass_key.
+    uint32_t rb_blendcontrol[4];
+    uint32_t host_primitive_type;
+    uint32_t host_vertex_shader_type;
+    uint32_t tessellation_mode;
+    uint32_t primitive_reset_enabled;
+    // Bits 0..10 of PA_SU_SC_MODE_CNTL (cull_front/cull_back/face/poly_mode/
+    // polymode_front_ptype/polymode_back_ptype).
+    uint32_t pa_su_sc_mode_cntl;
+    // Narrow consumed fields of the remaining registers:
+    //   bits 0..5   VGT_DRAW_INITIATOR::prim_type
+    //   bits 6..7   VGT_OUTPUT_PATH_CNTL::path_select
+    //   bits 8..10  RB_MODECONTROL::edram_mode
+    //   bits 11..13 SQ_PROGRAM_CNTL::vs_export_mode
+    //   bit  14     PA_CL_CLIP_CNTL::clip_disable
+    //   bit  15     RB_SURFACE_INFO::surface_pitch != 0
+    uint32_t misc;
+    uint32_t render_target_path;
+    uint32_t tessellation_wireframe;
+  };
+  // A single-entry cache only helps strictly consecutive repeats; games
+  // alternate materials constantly, so mirror the texture binding fast path:
+  // a small MRU where the most recent entry is deep-compared directly and the
+  // FNV hash is computed only when scanning the rest, where it prefilters the
+  // deep compare. The deep compare decides - a hash collision must never bind
+  // the wrong pipeline. Pipeline pointers are node-stable in pipelines_.
+  static constexpr uint32_t kPipelineStateCacheEntries = 64;
+  struct PipelineStateCacheEntry {
+    PipelineStateInput input;
+    uint64_t input_hash = 0;
+    uint64_t last_used = 0;
+    const Pipeline* pipeline = nullptr;
+    bool valid = false;
+  };
+  PipelineStateCacheEntry pipeline_state_cache_[kPipelineStateCacheEntries] = {};
+  uint64_t pipeline_state_cache_clock_ = 0;
+  uint32_t pipeline_state_cache_last_ = UINT32_MAX;
+  uint64_t pipeline_state_cache_hits_ = 0;
+  uint64_t pipeline_state_cache_lookups_ = 0;
   // <Submission index, pipeline>.
   std::deque<std::pair<uint64_t, VkPipeline>> deferred_destroy_pipelines_;
   std::mutex deferred_destroy_lock_;

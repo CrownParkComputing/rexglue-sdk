@@ -6,7 +6,7 @@ of them is visible in the generated sources the moment codegen finishes:
 
   unresolved call   a recompiled function calls an address codegen never
                     emitted. It builds fine and then kills the title the first
-                    time that path runs. Shift 2 had exactly one, on the
+                    time that path runs. One title had exactly one, on its
                     physics-model error path, and it ended every race start with
                     a black screen.
   undeclared label  the scanner split a function and the halves branch into each

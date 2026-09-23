@@ -10,6 +10,10 @@
  */
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <set>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -640,6 +644,31 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     rt_key.is_depth = rt_bit_index == 0;
     rt_key.resource_format = resource_formats[rt_bit_index];
     if (!interlock_barrier_only) {
+      // [TEMP DIAG] Which render-target configurations a title actually asks
+      // for. A distinct pitch at the same EDRAM base is a distinct key and so a
+      // distinct host render target and render pass - and pass count times
+      // bytes-per-pixel is the tile traffic that bounds a mobile GPU.
+      // [rexnative harvest] The render graph, as a raw acquisition SEQUENCE.
+      //
+      // Records the raw sequence so a tool can test whether a title's frame is
+      // periodic (same render targets, same order, every frame). No frame
+      // counter is plumbed through: if the sequence is periodic, the period
+      // falls out of the data.
+      {
+        static FILE* graph_file = [] () -> FILE* {
+          const char* path = getenv("REXNATIVE_DUMP_RENDERGRAPH");
+          return path ? fopen(path, "w") : nullptr;
+        }();
+        if (graph_file) {
+          static std::mutex graph_mutex;
+          std::lock_guard<std::mutex> lk(graph_mutex);
+          fprintf(graph_file, "%u %u %u %u %u\n",
+                  uint32_t(rt_key.base_tiles), uint32_t(rt_key.pitch_tiles_at_32bpp),
+                  uint32_t(rt_key.resource_format), uint32_t(rt_key.is_depth),
+                  uint32_t(rt_key.msaa_samples));
+          fflush(graph_file);
+        }
+      }
       RenderTarget* render_target = GetOrCreateRenderTarget(rt_key);
       if (!render_target) {
         return false;

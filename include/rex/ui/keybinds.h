@@ -71,6 +71,18 @@ void RegisterBind(std::string_view name, std::string_view default_key, std::stri
 void UnregisterBind(std::string_view name);
 
 /**
+ * Run a registered bind's callback by name, as though its key were pressed.
+ *
+ * For the callers that are not a keyboard: a guest title asking for one of
+ * these screens through the kernel, a pad chord, a console command. The bind
+ * stays the single definition of what that screen is and how it opens.
+ *
+ * @param name  The CVAR name used when registering the bind.
+ * @return      False if no bind of that name is registered, or it was removed.
+ */
+bool InvokeBind(std::string_view name);
+
+/**
  * Process a key-down event against all registered binds.
  *
  * Looks up each bind's current key from its CVAR, parses it, and compares

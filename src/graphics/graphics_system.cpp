@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <rex/graphics/graphics_system.h>
 
 #include <algorithm>
@@ -153,6 +154,17 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         system::X_VIDEO_MODE video_mode;
         kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
         double refresh_rate_hz = std::max(1.0, double(float(video_mode.refresh_rate)));
+        // vsync_fps_cap overrides the title's own reported refresh rate, so a
+        // 60 Hz title can be paced at 30 or 120 without lying to the guest
+        // about its video mode. Only meaningful under vsync - see the cvar.
+        // QUERY, not GET: this file is compiled separately into every GPU
+        // plugin, but vsync_fps_cap's REXCVAR_DEFINE_INT32 (command_processor.cpp)
+        // is only ever part of one of them at build time - a direct GET left
+        // the symbol unresolved for whichever plugin didn't define it, and
+        // for the codegen CLI, which links none of them at all.
+        if (const int32_t fps_cap = REXCVAR_QUERY(int32_t, vsync_fps_cap); fps_cap > 0) {
+          refresh_rate_hz = double(fps_cap);
+        }
         uint64_t guest_tick_frequency = chrono::Clock::guest_tick_frequency();
         uint64_t vsync_interval_ticks =
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
@@ -311,6 +323,17 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   // REXGPU_INFO("Dispatching GPU interrupt at {:08X} w/ mode {} on cpu {}",
   //          interrupt_callback_, source, cpu);
 
+  // Count what actually reaches the guest, per source. A title that pumps
+  // GPU completions through its interrupt handler stalls silently if one
+  // source never fires; these two counters are the cheapest way to see it.
+  {
+    static std::atomic<uint32_t> fired[2] = {0, 0};
+    uint32_t n = ++fired[source & 1];
+    if (n == 1 || n == 100 || n == 1000 || (n % 10000) == 0) {
+      REXGPU_INFO("[irq] source {} dispatched {} times (callback {:08X})", source, n,
+                  interrupt_callback_);
+    }
+  }
   uint64_t args[] = {source, interrupt_callback_data_};
   function_dispatcher_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_, args,
                                          rex::countof(args));

@@ -565,7 +565,9 @@ class VulkanCommandProcessor : public CommandProcessor {
       bool shader_32bit_index_dma, uint32_t compute_memexport_vertex_count,
       const draw_util::ViewportInfo& viewport_info, uint32_t used_texture_mask,
       reg::RB_DEPTHCONTROL normalized_depth_control, uint32_t normalized_color_mask);
-  bool UpdateBindings(const VulkanShader* vertex_shader, const VulkanShader* pixel_shader);
+  bool UpdateBindings(const VulkanShader* vertex_shader, const VulkanShader* pixel_shader,
+                      const VulkanShader::VulkanTranslation* vertex_translation,
+                      const VulkanShader::VulkanTranslation* pixel_translation);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
   // The descriptor set layout must be the one for the given is_vertex,
@@ -644,6 +646,44 @@ class VulkanCommandProcessor : public CommandProcessor {
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     std::vector<VkDescriptorImageInfo> images;
   } cached_texture_descriptors_[2];
+  // Stable-binding fast path for UpdateBindings: everything the texture
+  // descriptor section resolves derives from the shader translations (binding
+  // lists), the fetch constant registers of the slots those translations
+  // actually read (texture addresses and sampler state), the per-slot binding
+  // epochs (uploads, invalidations, view destruction), the pipeline layout's
+  // texture set layouts, and the resolved sampler handles. A small MRU cache
+  // of recent binding states - MCLA alternates between materials rather than
+  // repeating one - skips the texture cache lookups and vector building for
+  // any state seen recently, not just the immediately previous draw. Only
+  // used slots participate in the key - unrelated slots churn constantly as
+  // the world streams in.
+  struct TextureBindingFastPathEntry {
+    bool valid = false;
+    uint64_t last_used = 0;  // MRU clock
+    // Hash over every key component, used as a cheap prefilter before the
+    // deep compare (which still decides on a hash match).
+    uint64_t key_hash = 0;
+    const VulkanShader::VulkanTranslation* vertex_translation = nullptr;
+    const VulkanShader::VulkanTranslation* pixel_translation = nullptr;
+    VkDescriptorSetLayout layout_vertex = VK_NULL_HANDLE;
+    VkDescriptorSetLayout layout_pixel = VK_NULL_HANDLE;
+    std::vector<uint32_t> used_slots;
+    // Only slots in used_slots are meaningful in these two arrays.
+    uint32_t fetch_words[6 * xenos::kTextureFetchConstantCount] = {};
+    uint64_t slot_epochs[xenos::kTextureFetchConstantCount] = {};
+    std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> samplers_vertex;
+    std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>> samplers_pixel;
+    // Resolution results, in UpdateBindings order: vertex textures, vertex
+    // samplers, pixel textures, pixel samplers.
+    std::vector<VkDescriptorImageInfo> image_info;
+  };
+  static constexpr uint32_t kTextureBindingFastPathEntries = 16;
+  TextureBindingFastPathEntry texture_binding_fast_path_[kTextureBindingFastPathEntries];
+  uint64_t texture_binding_fast_path_clock_ = 0;
+  // Entry used by the immediately previous draw - only that entry may skip the
+  // descriptor comparison as well as the resolution, because the descriptor
+  // sets still hold exactly its contents.
+  uint32_t texture_binding_fast_path_last_ = UINT32_MAX;
   struct FrameStats {
     double draw_cpu_ms = 0;
     double fence_wait_ms = 0;
@@ -657,8 +697,13 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint64_t texture_sets_written = 0;
     uint64_t texture_sets_reused = 0;
     uint64_t texture_sets_material_reused = 0;
+    uint64_t texture_sets_binding_fast_path = 0;
     uint64_t pipelines_created = 0;
     double pipeline_create_ms = 0;
+    uint64_t pipeline_state_hits = 0;
+    uint64_t pipeline_state_lookups = 0;
+    uint64_t tex_fetch_writes = 0;
+    uint64_t tex_fetch_writes_unchanged = 0;
     uint64_t last_swap_us = 0;
     // Per-stage CPU time inside IssueDraw, so "the draw path is the cost" can
     // be narrowed to which part of it. Indexed by DrawStage.

@@ -92,22 +92,13 @@ class TextureCache {
   static uint32_t GuestToHostSwizzle(uint32_t guest_swizzle, uint32_t host_format_swizzle);
 
   void TextureFetchConstantWritten(uint32_t index) { TextureFetchConstantsWritten(index, index); }
-  void TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index) {
-    if (first_index > last_index) {
-      uint32_t swap_index = first_index;
-      first_index = last_index;
-      last_index = swap_index;
-    }
-    if (first_index > 31) {
-      return;
-    }
-    if (last_index > 31) {
-      last_index = 31;
-    }
-    uint32_t bit_count = last_index - first_index + 1;
-    uint32_t mask = bit_count == 32 ? UINT32_MAX : ((UINT32_C(1) << bit_count) - 1) << first_index;
-    texture_bindings_in_sync_ &= ~mask;
-  }
+  // Marks slots whose fetch constants actually changed out of sync. Rewriting
+  // a constant with an identical value (games re-poke whole fetch blocks per
+  // material) keeps the slot in sync, so RequestTextures has nothing to redo.
+  void TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index);
+  // Fetch constants seen since the previous call, and how many of them were
+  // unchanged rewrites (cleared on read), for the frame-stat CSV.
+  void TakeFetchWriteStats(uint64_t& writes_out, uint64_t& unchanged_out);
 
   virtual void RequestTextures(uint32_t used_texture_mask);
 
@@ -620,6 +611,12 @@ class TextureCache {
   // Bit vector with bits reset on fetch constant writes to avoid parsing fetch
   // constants again and again.
   uint32_t texture_bindings_in_sync_ = 0;
+  // Raw fetch constants as last walked by RequestTextures, so a rewrite with
+  // an identical value can keep the slot in sync (24 bytes each, no padding).
+  std::array<xenos::xe_gpu_texture_fetch_t, xenos::kTextureFetchConstantCount>
+      texture_fetches_in_sync_ = {};
+  uint64_t texture_fetch_writes_ = 0;
+  uint64_t texture_fetch_writes_unchanged_ = 0;
 };
 
 }  // namespace rex::graphics

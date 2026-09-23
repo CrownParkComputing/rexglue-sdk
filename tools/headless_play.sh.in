@@ -48,7 +48,7 @@ for lib in librexruntime.so librexgpu-xenos.so; do
 done
 cd "$ROOT/out/build/linux"
 
-gamescope --backend headless -W 1280 -H 720 -- env LD_LIBRARY_PATH=. SDL_VIDEODRIVER=x11 \
+gamescope --backend headless -W "${REX_HEADLESS_W:-1280}" -H "${REX_HEADLESS_H:-720}" -r "${REX_HEADLESS_REFRESH:-60}" -- env LD_LIBRARY_PATH=. SDL_VIDEODRIVER=x11 \
   ${GAME_ENV:-} ./@TITLE@ --game_data_root="$ROOT/assets" --gpu_plugin xenos \
   --user_data_root="$ROOT/user-data" --license_mask=1 --mnk_mode --audio_app_name=rexglue-headless ${GAME_ARGS:-} \
   >"$OUT/run.log" 2>&1 &

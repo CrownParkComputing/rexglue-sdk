@@ -18,6 +18,7 @@
 #include <sys/select.h>
 #endif
 
+#include <rex/cvar.h>
 #include <rex/chrono/clock.h>
 #include <rex/kernel/xam/module.h>
 #include <rex/kernel/xam/private.h>
@@ -181,6 +182,22 @@ struct XNetStartupParams {
 };
 
 XNetStartupParams xnet_startup_params = {};
+
+// Xbox Live is gone and cannot come back: the service it talked to no longer
+// exists, so leaderboards, matchmaking and every other online feature have
+// nothing to connect to. Reporting "no network" rather than half-answering is
+// what lets a title take the offline path it already has - the same path a
+// console with the cable out takes - and show its own menus accordingly,
+// greying out leaderboards and multiplayer in its own words instead of hanging
+// on a connection attempt that can never succeed.
+//
+// Local play is unaffected: the signed-in local profile and the achievement
+// store live in xam_user/achievement_manager and are deliberately untouched.
+// Set xbox_live=true to report a link again, for LAN experiments.
+REXCVAR_DEFINE_BOOL(xbox_live, false, "Kernel",
+                    "Allow Xbox Live features. Off (the default): the socket stack still starts "
+                    "but reports no link, which is what a console with the cable out does, so "
+                    "online menus disable themselves and offline play is untouched.");
 
 u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
   if (params) {
@@ -506,6 +523,10 @@ struct XEthernetStatus {
 };
 
 u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
+  // 0 = no link. With Live off this is the whole mechanism: the socket stack
+  // initialises normally, so every object a title builds during network init
+  // exists, and it simply finds no cable. Failing WSAStartup/XNetStartup
+  // instead leaves titles dereferencing the objects they never got.
   return 0;
 }
 

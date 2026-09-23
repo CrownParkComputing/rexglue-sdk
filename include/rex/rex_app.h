@@ -222,6 +222,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// Creates the overlay toggled by bind_achievements. Override to replace the
   /// built-in achievement UI. Returning nullptr disables the overlay.
   virtual std::unique_ptr<ui::ImGuiDialog> CreateAchievementsOverlay();
+  std::unique_ptr<ui::ImGuiDialog> CreateHighScoresOverlay();
 
   /// Creates the achievement notification UI. Override to replace the
   /// built-in toast renderer. Returning nullptr disables notifications.
@@ -309,6 +310,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   std::unique_ptr<ui::ConsoleDialog> console_overlay_;
   std::unique_ptr<ui::SettingsDialog> settings_overlay_;
   std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
+  std::unique_ptr<ui::ImGuiDialog> high_scores_overlay_;
   std::shared_ptr<ui::AchievementNotificationDialog> achievement_notification_;
   uint64_t achievement_notification_listener_ = 0;
   ui::DebugOverlayDialog::FrameStatsProvider frame_stats_provider_;

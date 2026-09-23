@@ -234,8 +234,19 @@ if(REXGLUE_USE_VULKAN)
     add_library(rexgpu-native SHARED ${REXGPU_NATIVE_SOURCES})
     add_library(rex::gpu-native ALIAS rexgpu-native)
 
+    # Explicit opt-in name for the direct Vulkan path while the replacement
+    # translator is developed. This leaves the stable xenos default intact.
+    add_library(rexgpu-transition SHARED ${REXGPU_NATIVE_SOURCES})
+    add_library(rex::gpu-transition ALIAS rexgpu-transition)
+
     set_target_properties(rexgpu-native PROPERTIES
         EXPORT_NAME gpu-native
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+    set_target_properties(rexgpu-transition PROPERTIES
+        EXPORT_NAME gpu-transition
+        OUTPUT_NAME rexgpu-transition
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON
     )
@@ -245,6 +256,7 @@ if(REXGLUE_USE_VULKAN)
     # agree; MSVC already emits no prefix.
     if(WIN32)
         set_target_properties(rexgpu-native PROPERTIES PREFIX "")
+        set_target_properties(rexgpu-transition PROPERTIES PREFIX "")
     endif()
 
     target_include_directories(rexgpu-native PRIVATE
@@ -252,8 +264,17 @@ if(REXGLUE_USE_VULKAN)
         ${REXGLUE_ROOT}/thirdparty/renderdoc
         ${REXGLUE_ROOT}
     )
+    target_include_directories(rexgpu-transition PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${REXGLUE_ROOT}/thirdparty/renderdoc
+        ${REXGLUE_ROOT}
+    )
 
     target_compile_options(rexgpu-native PRIVATE -Wno-unused-variable)
+    target_compile_options(rexgpu-transition PRIVATE
+        -Wno-unused-variable
+        -DREX_GPU_PLUGIN_NAME=\"transition\"
+    )
 
     target_link_libraries(rexgpu-native PRIVATE
         rexruntime
@@ -261,6 +282,18 @@ if(REXGLUE_USE_VULKAN)
         # snappy was inherited from rexgpu-xenos's link list and is used by
         # neither plugin - no source in src/graphics references it. Keeping it
         # was what blocked this plugin from cross-compiling.
+        Vulkan::Headers
+        GPUOpen::VulkanMemoryAllocator
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
+    )
+    target_link_libraries(rexgpu-transition PRIVATE
+        rexruntime
+        xxHash::xxhash
         Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator
         glslang::SPIRV

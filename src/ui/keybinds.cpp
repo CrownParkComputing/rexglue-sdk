@@ -208,6 +208,28 @@ void UnregisterBind(std::string_view name) {
   }
 }
 
+bool InvokeBind(std::string_view name) {
+  /* The callback is copied out and run with the lock released. ProcessKeyEvent
+     can afford to call under the lock because it only ever runs on the UI
+     thread; this is also reachable from a guest thread asking for one of these
+     screens, and a callback that touched the registry would deadlock. */
+  std::function<void()> callback;
+  {
+    std::lock_guard lock(g_binds_mutex);
+    for (auto& entry : g_binds) {
+      if (entry.name == name && entry.callback) {
+        callback = entry.callback;
+        break;
+      }
+    }
+  }
+  if (!callback) {
+    return false;
+  }
+  callback();
+  return true;
+}
+
 bool ProcessKeyEvent(KeyEvent& e) {
   std::lock_guard lock(g_binds_mutex);
   for (auto& entry : g_binds) {

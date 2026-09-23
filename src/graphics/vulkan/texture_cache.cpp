@@ -504,7 +504,7 @@ void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
           false);
     }
-    command_processor_.SubmitBarriers(true);
+    command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierTexture);
     DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
     VkClearColorValue null_image_clear_color = kInvalidTextureFetchFallbackColor;
     for (size_t i = 0; i < rex::countof(null_images); ++i) {
@@ -1606,7 +1606,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                           sizeof(load_constants.host_offset),
                                           &load_constants.host_offset);
       }
-      command_processor_.SubmitBarriers(true);
+      command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierTexture);
       command_buffer.CmdVkDispatch(group_count_x, group_count_y, load_constants.size_blocks[2]);
       load_constants.guest_offset += level_array_slice_stride_bytes_scaled;
       load_constants.host_offset += uint32_t(level_host_layout.slice_size_bytes);
@@ -1706,7 +1706,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                             sizeof(load_constants_float_convert.host_offset),
                                             &load_constants_float_convert.host_offset);
         }
-        command_processor_.SubmitBarriers(true);
+        command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierTexture);
         command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                      load_constants_float_convert.size_blocks[2]);
         load_constants_float_convert.guest_offset += level_array_slice_stride_bytes;
@@ -1738,7 +1738,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
         texture_dst_access_mask, texture_old_layout, texture_new_layout);
   }
-  command_processor_.SubmitBarriers(true);
+  command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierTexture);
   VkBufferImageCopy* copy_regions = command_buffer.CmdCopyBufferToImageEmplace(
       scratch_buffer, vulkan_texture.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       level_last - level_first + 1);
@@ -1789,6 +1789,9 @@ void VulkanTextureCache::UpdateTextureBindingsImpl(uint32_t fetch_constant_mask)
   uint32_t binding_index;
   while (rex::bit_scan_forward(bindings_remaining, &binding_index)) {
     bindings_remaining &= ~(UINT32_C(1) << binding_index);
+    // Resolved views for this slot are changing - any fast-path binding cache
+    // keyed on the old epoch must re-resolve.
+    ++texture_binding_epochs_[binding_index];
     VulkanTextureBinding& vulkan_binding = vulkan_texture_bindings_[binding_index];
     vulkan_binding.Reset();
     const TextureBinding* binding = GetValidTextureBinding(binding_index);
@@ -1840,8 +1843,13 @@ VulkanTextureCache::VulkanTexture::VulkanTexture(VulkanTextureCache& texture_cac
 }
 
 VulkanTextureCache::VulkanTexture::~VulkanTexture() {
-  const VulkanTextureCache& vulkan_texture_cache =
-      static_cast<const VulkanTextureCache&>(texture_cache());
+  VulkanTextureCache& vulkan_texture_cache =
+      static_cast<VulkanTextureCache&>(texture_cache());
+  // This texture's views are about to become invalid wherever it is bound -
+  // force every slot's fast-path binding cache to re-resolve.
+  for (uint64_t& epoch : vulkan_texture_cache.texture_binding_epochs_) {
+    ++epoch;
+  }
   const ui::vulkan::VulkanDevice* const vulkan_device =
       vulkan_texture_cache.command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();

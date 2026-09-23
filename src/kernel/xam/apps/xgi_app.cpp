@@ -11,6 +11,7 @@
 
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
+#include <rex/kernel/xam/private.h>
 #include <rex/thread.h>
 
 namespace rex {
@@ -327,6 +328,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t results_size = memory::load_and_swap<uint32_t>(buffer + 20);
       uint32_t results_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
 
+      // This is what a title's Leaderboards screen reads through, and it is
+      // the only warning we get that the player opened one: GW1 never calls
+      // XamUserCreateStatsEnumerator. Nothing was ever submitted - submission
+      // needs a live session - so the local board is shown over the top.
+      rex::kernel::xam::XamShowLocalHighScores();
       REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                     xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
 

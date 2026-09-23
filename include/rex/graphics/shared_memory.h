@@ -150,7 +150,10 @@ class SharedMemory {
   // Checks if the range has been updated, uploads new data if needed and
   // ensures the host GPU memory backing the range are resident. Returns true if
   // the range has been fully updated and is usable.
-  bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
+  // If ranges_sorted_and_merged is true, ranges must already be sorted and
+  // non-overlapping, avoiding a redundant sort in the deferred draw path.
+  bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count,
+                     bool ranges_sorted_and_merged = false);
   bool RequestRange(uint32_t start, uint32_t length);
 
   // Marks the range and, if not exact_range, potentially its surroundings
@@ -254,6 +257,10 @@ class SharedMemory {
  protected:
   // Called by the backend when it uploads pages, to build the hot set.
   void NotePagesUploaded(uint32_t page_first, uint32_t page_last);
+  // GPU-thread demand, excluding speculative prefetch uploads.
+  void NotePagesRequested(uint32_t page_first, uint32_t page_last) const;
+  mutable std::vector<uint64_t> page_requested_this_frame_;
+  bool uploading_hot_pages_ = false;
 
  private:
 

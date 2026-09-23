@@ -38,6 +38,15 @@ REXCVAR_DEFINE_UINT32(log_draw_texture, 0, "GPU",
 REXCVAR_DEFINE_BOOL(log_draw_shaders, false, "GPU",
                     "Log each distinct (pixel shader, bound texture set) pair drawn. Links a "
                     "texture to the shader that draws it, which no other log does.");
+REXCVAR_DEFINE_STRING(texture_swizzle_override, "", "GPU",
+                      "DIAGNOSTIC. Force every sampled texture's component order to this 4-letter "
+                      "mapping, e.g. BGRA. Letters are RGBA01. Empty leaves the guest's swizzle "
+                      "alone. Sweeping the permutations finds the right order by observation "
+                      "rather than by reasoning about endianness.");
+REXCVAR_DEFINE_BOOL(texture_identity_swizzle, false, "GPU",
+                    "DIAGNOSTIC. Ignore the guest's component swizzle and sample textures in "
+                    "stored order. A colour fault that disappears with this on is in the swizzle "
+                    "path; one that survives is in the shader or the data.");
 REXCVAR_DEFINE_BOOL(log_texture_swizzles, false, "GPU",
                     "Log each distinct (texture, component swizzle) pair bound. The swizzle is not "
                     "part of the texture key, so it is absent from every other texture log - and it "

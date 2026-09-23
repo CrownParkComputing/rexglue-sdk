@@ -476,6 +476,19 @@ u32 XamUserAreUsersFriends_entry(u32 user_index, u32 unk1, u32 unk2, mapped_u32 
   }
 }
 
+/*
+ * A title asking to enumerate stats is a title opening its leaderboard.
+ *
+ * There are no stats to give it - submission needs a live session, so nothing
+ * was ever written - and a title handed an empty enumerator draws an empty
+ * board. The local score page is shown instead and the call is refused, which
+ * is the answer an offline console gives.
+ */
+u32 XamUserCreateStatsEnumerator_entry() {
+  rex::kernel::xam::XamShowLocalHighScores();
+  return X_ERROR_FUNCTION_FAILED;
+}
+
 u32 XamShowSigninUI_entry(u32 unk, u32 unk_mask) {
   // Mask values vary. Probably matching user types? Local/remote?
 
@@ -762,7 +775,7 @@ REX_EXPORT_STUB(__imp__XamUserAddRecentPlayer);
 REX_EXPORT_STUB(__imp__XamUserAllowedToPostToSocialNetwork);
 REX_EXPORT_STUB(__imp__XamUserCreateAvatarAssetEnumerator);
 REX_EXPORT_STUB(__imp__XamUserCreatePlayerEnumerator);
-REX_EXPORT_STUB(__imp__XamUserCreateStatsEnumerator);
+REX_EXPORT(__imp__XamUserCreateStatsEnumerator, rex::kernel::xam::XamUserCreateStatsEnumerator_entry)
 REX_EXPORT_STUB(__imp__XamUserCreateTitlesPlayedEnumerator);
 REX_EXPORT_STUB(__imp__XamUserFlushLogonQueue);
 REX_EXPORT_STUB(__imp__XamUserGetAge);

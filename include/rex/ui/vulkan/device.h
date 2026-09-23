@@ -54,6 +54,11 @@ class VulkanDevice {
     uint32_t deviceID = 0;
     char deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
 
+    // Nanoseconds per timestamp tick, and whether the graphics queue can write
+    // them at all. Zero for either means the device cannot time GPU work, and
+    // the frame stats fall back to the CPU's view of the frame.
+    float timestampPeriod = 0.0f;
+    uint32_t timestampValidBits = 0;
     uint32_t maxImageDimension2D = 4096;
     uint32_t maxImageDimension3D = 256;
     uint32_t maxImageDimensionCube = 4096;
@@ -200,6 +205,10 @@ class VulkanDevice {
     bool ext_1_3_KHR_maintenance4 = false;  // #414
     // Has optional features not implied by this being true.
     bool ext_1_3_KHR_dynamic_rendering = false;  // #55
+    // Memory/semaphore fd export for the presenter frame streamer (external
+    // consumers such as the rexmenu launcher import these via GL).
+    bool ext_KHR_external_memory_fd = false;
+    bool ext_KHR_external_semaphore_fd = false;
   };
 
   const Extensions& extensions() const { return extensions_; }
@@ -221,6 +230,10 @@ class VulkanDevice {
 #include <rex/ui/vulkan/functions/device_1_3_khr_maintenance4.inc>
     // VK_KHR_dynamic_rendering (#55, promoted to 1.3)
 #include <rex/ui/vulkan/functions/device_1_3_khr_dynamic_rendering.inc>
+    // Frame streamer (REX_PRESENT_STREAM) - loaded only when the fd-export
+    // extensions are enabled; may be null otherwise (checked before use).
+    PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR = nullptr;
+    PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = nullptr;
 #undef XE_UI_VULKAN_FUNCTION_PROMOTED
 #undef XE_UI_VULKAN_FUNCTION
   };

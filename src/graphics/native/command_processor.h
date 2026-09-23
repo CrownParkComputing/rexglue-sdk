@@ -379,6 +379,10 @@ class NativeCommandProcessor : public CommandProcessor {
     // This phase rendered no new draws; it re-publishes an earlier resolve of
     // the same EDRAM base to a second address (typically the frontbuffer).
     bool republished = false;
+    // The guest asked this resolve to clear the EDRAM surface afterwards. A
+    // resolve that does NOT clear leaves the surface live, and the draws that
+    // follow composite onto what is already there.
+    bool clears_color = false;
   };
   // Per EDRAM base, the last resolve that actually captured an image, so a
   // later zero-draw resolve of that base can republish it.
@@ -494,6 +498,10 @@ class NativeCommandProcessor : public CommandProcessor {
   // because HDR is being clipped" and "blown out because gamma is missing"
   // (1 = 8_8_8_8_GAMMA, whose conversion flags native never sets).
   uint64_t rt_format_counts_[16] = {};
+  // Colour write mask per issued draw. A draw with mask 0 is issued, binds
+  // its textures and passes every skip check - and writes no pixels at all.
+  uint64_t write_mask_counts_[16] = {};
+  uint64_t blend_enable_draws_ = 0;
   uint64_t resolve_count_ = 0;
   uint32_t resolves_this_frame_ = 0;
   // Bounds resolved-image creation per frame (each is a full VkImage); resolves

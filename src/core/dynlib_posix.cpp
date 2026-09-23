@@ -31,6 +31,11 @@ bool DynamicLibrary::Load(const std::filesystem::path& path, SymbolResolution mo
   return handle_ != nullptr;
 }
 
+void DynamicLibrary::Adopt(void* handle) {
+  Close();
+  handle_ = handle;
+}
+
 void DynamicLibrary::Close() {
   if (handle_) {
     dlclose(handle_);

@@ -36,6 +36,25 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
   }
   const ui::vulkan::VulkanDevice* const vulkan_device =
       static_cast<const VulkanShader&>(shader()).vulkan_device_;
+  // [rexnative harvest] The translated SPIR-V, written out where it is handed
+  // to Vulkan. This is the AOT input: a working emulator run yields exactly the
+  // shaders the title uses, already translated and known-good, so the native
+  // build compiles them in rather than translating at run time. Named by the
+  // same ucode hash dump_shaders uses, so the two harvests line up.
+  {
+    static const char* spirv_dir = getenv("REXNATIVE_DUMP_SPIRV");
+    if (spirv_dir && !translated_binary().empty()) {
+      char path[512];
+      snprintf(path, sizeof(path), "%s/shader_%016llX.%s.spv", spirv_dir,
+               static_cast<unsigned long long>(shader().ucode_data_hash()),
+               shader().type() == xenos::ShaderType::kVertex ? "vert" : "frag");
+      if (FILE* f = fopen(path, "wb")) {
+        fwrite(translated_binary().data(), 1, translated_binary().size(), f);
+        fclose(f);
+      }
+    }
+  }
+
   VkShaderModuleCreateInfo shader_module_create_info;
   shader_module_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   shader_module_create_info.pNext = nullptr;

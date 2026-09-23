@@ -3,6 +3,10 @@ include(${PROJECT_SOURCE_DIR}/cmake/rexglue_vulkan_stack.cmake)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
+if(ANDROID)
+    add_subdirectory(libadrenotools)
+endif()
+
 #=============================================================================
 # Architecture detection
 #=============================================================================

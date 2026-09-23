@@ -1,0 +1,963 @@
+#!/usr/bin/env python3
+"""
+rexnative - end-to-end native recompilation of an Xbox 360 title.
+
+The method: use the working emulator OFFLINE as a data source, not as the
+runtime. Everything the native binary needs is extracted ahead of time and
+baked in, so the shipped binary discovers nothing at run time. Every previous
+attempt had the runtime discover the guest's GPU work as it happened - rexglue
+emulates EDRAM from the PM4 stream, rexgpu-native infers a resolve graph from
+it - and both pay that cost every frame while having to be right about
+semantics they can only guess at.
+
+Stages:
+    ingest     XEX / port -> build description
+    harvest    instrument and drive under the emulator: call frequencies,
+               shaders, render graph, live imports
+    translate  ucode -> SPIR-V, render graph -> static tables      (todo)
+    emit       XenonRecomp C++ for game code only, middleware substituted (todo)
+    link       one native binary                                   (todo)
+    verify     frame-diff against the oracle, boot ladder, device fps (todo)
+"""
+
+import argparse
+import collections
+import glob
+import json
+import os
+import re
+import sys
+
+# A statically linked middleware library is identified by the kernel imports
+# only it can call: nothing but the graphics library talks to the video
+# hardware, and nothing but the audio library talks to XMA.
+SUBSYSTEM_IMPORTS = {
+    "d3d9":  re.compile(r"__imp__(Vd[A-Za-z]+)\b"),
+    "audio": re.compile(r"__imp__(XAudio[A-Za-z]+|XMA[A-Za-z]+)\b"),
+}
+
+FUNC_RE = re.compile(r"PPC_FUNC_IMPL\(__imp__sub_([0-9A-F]{8})\)")
+CALL_RE = re.compile(r"\bsub_([0-9A-F]{8})\(ctx, base\)")
+
+
+def scan_recompiled(ppc_dir):
+    """Call graph and per-subsystem seed functions, from the recompiled sources."""
+    calls = collections.defaultdict(set)
+    seeds = {k: {} for k in SUBSYSTEM_IMPORTS}
+    funcs = set()
+    sources = sorted(glob.glob(os.path.join(ppc_dir, "ppc_recomp.*.cpp")))
+    if not sources:
+        sys.exit("no recompiled sources in " + ppc_dir)
+    for path in sources:
+        cur = None
+        with open(path, errors="ignore") as fh:
+            for line in fh:
+                m = FUNC_RE.search(line)
+                if m:
+                    cur = int(m.group(1), 16)
+                    funcs.add(cur)
+                    continue
+                if cur is None:
+                    continue
+                for name, rx in SUBSYSTEM_IMPORTS.items():
+                    for imp in rx.findall(line):
+                        seeds[name].setdefault(cur, set()).add(imp)
+                for callee in CALL_RE.findall(line):
+                    calls[cur].add(int(callee, 16))
+    return funcs, calls, seeds
+
+
+def callers_of(calls):
+    rev = collections.defaultdict(set)
+    for a, bs in calls.items():
+        for b in bs:
+            rev[b].add(a)
+    return rev
+
+
+def cmd_ingest(args):
+    port = os.path.abspath(args.port)
+    slug = os.path.basename(port)
+    if slug.endswith("-recomp"):
+        slug = slug[: -len("-recomp")]
+
+    ppc_dir = args.ppc or os.path.join(port, "ppc")
+    if not os.path.isdir(ppc_dir):
+        ppc_dir = os.path.join(port, "generated", "default")
+
+    gen = os.path.join(port, "generated", "default")
+    fn_toml = os.path.join(gen, slug + "_xenonrecomp.toml")
+    sw_toml = os.path.join(gen, slug + "_switch_tables.toml")
+
+    out = {
+        "slug": slug,
+        "port": port,
+        "ppc_dir": ppc_dir,
+        "boundaries": fn_toml if os.path.exists(fn_toml) else None,
+        "switch_tables": sw_toml if os.path.exists(sw_toml) else None,
+    }
+    if out["boundaries"]:
+        out["function_count"] = sum(
+            1 for l in open(out["boundaries"], errors="ignore") if "{ address" in l)
+    if out["switch_tables"]:
+        out["switch_table_count"] = sum(
+            1 for l in open(out["switch_tables"], errors="ignore") if l.startswith("[[switch]]"))
+
+    funcs, calls, seeds = scan_recompiled(ppc_dir)
+    out["recompiled_functions"] = len(funcs)
+    out["call_edges"] = sum(len(v) for v in calls.values())
+
+    # What static analysis can say for certain, and what it cannot.
+    #
+    # The seeds are sound: a function that calls VdSwap is in the graphics
+    # library, full stop. What static structure does NOT reliably give is the
+    # library's PUBLIC API - the functions game code calls in through. Measured
+    # on Geometry Wars, a modularity partition of the call graph recovered that
+    # set at 39% recall and 46% precision, while producing a plausible count
+    # (56 against 66 known) that would pass a shallow check.
+    #
+    # The signal that does work is call FREQUENCY from a real run. That is
+    # harvest data, so the partition is only proposed here.
+    out["middleware"] = {}
+    for name, found in seeds.items():
+        out["middleware"][name] = {
+            "seed_functions": ["0x%08X" % a for a in sorted(found)],
+            "seed_imports": sorted({i for s in found.values() for i in s}),
+            "span": ("0x%08X..0x%08X" % (min(found), max(found))) if found else None,
+            "confidence": "seeds are certain; public API needs harvest call-frequency",
+        }
+
+    dest = args.out or os.path.join(port, "out", "rexnative", "ingest.json")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w") as fh:
+        json.dump(out, fh, indent=2)
+
+    print("== rexnative ingest: %s ==" % slug)
+    print("  recompiled functions %d" % out["recompiled_functions"])
+    print("  call edges           %d" % out["call_edges"])
+    if out.get("function_count"):
+        print("  boundaries           %d" % out["function_count"])
+    if out.get("switch_table_count"):
+        print("  switch tables        %d" % out["switch_table_count"])
+    for name, info in out["middleware"].items():
+        n = len(info["seed_functions"])
+        if n:
+            print("  %-6s seeds        %d functions, span %s" % (name, n, info["span"]))
+            shown = " ".join(info["seed_imports"][:4])
+            print("         via          %s%s" % (shown, " ..." if len(info["seed_imports"]) > 4 else ""))
+    print("  -> %s" % dest)
+    print()
+    print("  Public API partition is NOT decided here - static structure gives")
+    print("  39% recall on it. It is resolved in `rexnative harvest`.")
+    return 0
+
+
+def cmd_harvest(args):
+    """Emit call-counting instrumentation over the candidate middleware region.
+
+    Static structure gets the public API wrong (39% recall), but it does not
+    have to be right - it only has to bound what we INSTRUMENT. Call frequency
+    from a real run then decides: once at startup is device creation, once a
+    frame is present, thousands between presents is state or drawing. So a
+    generous candidate region costs nothing but a few hundred counters.
+    """
+    with open(args.ingest) as fh:
+        ing = json.load(fh)
+    sub = ing["middleware"].get(args.subsystem)
+    if not sub or not sub["seed_functions"]:
+        sys.exit("no %s seeds in %s" % (args.subsystem, args.ingest))
+
+    seeds = [int(x, 16) for x in sub["seed_functions"]]
+    lo, hi = min(seeds) - args.pad, max(seeds) + args.pad
+
+    ppc_dir = args.ppc or ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
+    funcs, calls, _ = scan_recompiled(ppc_dir)
+    region = sorted(f for f in funcs if lo <= f <= hi)
+    if not region:
+        sys.exit("candidate region is empty")
+    rev = callers_of(calls)
+    inset = set(region)
+    entry = [f for f in region if rev.get(f, set()) - inset]
+
+    dest = args.out or os.path.join(ing["port"], "out", "rexnative",
+                                    "harvest_%s.cpp" % args.subsystem)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "w") as fh:
+        w = lambda s="": print(s, file=fh)
+        w("// GENERATED by `rexnative harvest` - do not edit.")
+        w("//")
+        w("// A call counter on every function in the %s candidate region" % args.subsystem)
+        w("// 0x%08X..0x%08X - %d functions, %d of them called from outside it."
+          % (lo, hi, len(region), len(entry)))
+        w("//")
+        w("// Hooked through XenonRecomp's weak-alias seam: defining the unprefixed")
+        w("// name wins at link and __imp__ still reaches the original.")
+        w("//")
+        w("// The counts are the partition signal. Static call-graph structure recovers")
+        w("// the public API at only 39% recall, so it is used here purely to BOUND the")
+        w("// region - measured frequency decides what is really API and what is an")
+        w("// internal helper.")
+        w('#include "guest.h"')
+        w("#include <atomic>")
+        w("#include <cstdio>")
+        w("#include <algorithm>")
+        w("#include <vector>")
+        w("#include <utility>")
+        w("#include <functional>")
+        w()
+        w("namespace {")
+        w("struct Counter {")
+        w("    unsigned addr;")
+        w("    std::atomic<unsigned long long> n{0};")
+        w("    std::atomic<bool> wrote_ring{false};")
+        w("};")
+        w("Counter g_counters[] = {")
+        for f in region:
+            w("    {0x%08Xu}," % f)
+        w("};")
+        w("constexpr size_t kCount = sizeof(g_counters) / sizeof(g_counters[0]);")
+        if args.attribute_ring:
+            w("// Which functions actually WRITE the command buffer.")
+            w("//")
+            w("// Static analysis cannot answer this. PM4 goes into the ring through")
+            w("// ordinary stores, so neither a Vd* import scan nor an MMIO scan sees")
+            w("// it - a transitive-reach analysis on Geometry Wars reported 13 of 51")
+            w("// functions touching the GPU, which is an undercount, because the")
+            w("// per-draw functions write packets and were invisible to it.")
+            w("//")
+            w("// So checksum the ring around every call and attribute the change. The")
+            w("// ring is 4 KB, which is nothing next to the work the call itself does.")
+            w("//")
+            w("// The window has to cover the INDIRECT BUFFERS, not just the ring.")
+            w("// Watching the ring alone found only 10 functions, all called 1-4 times:")
+            w("// that is ME_INIT and the IB dispatch packets. The per-draw work is")
+            w("// written into the buffers those packets point at, which sit above the")
+            w("// ring, so a ring-only window misses exactly the functions we care most")
+            w("// about. Strided because this runs on every call of a 17,859-call")
+            w("// function and does not need to be exact - a draw packet is many words,")
+            w("// so every 32nd word still catches it.")
+            w("uint32_t RingChecksum() {")
+            w("    const uint32_t base_addr = RingBase();")
+            w("    if (!base_addr) return 0;")
+            w("    constexpr uint32_t kWindowBytes = %d;" % args.watch_bytes)
+            w("    constexpr uint32_t kStride = %d;" % args.watch_stride)
+            w("    uint32_t h = 2166136261u;")
+            w("    for (uint32_t off = 0; off < kWindowBytes; off += 4u * kStride) {")
+            w("        h = (h ^ gst_r32(base_addr + off)) * 16777619u;")
+            w("    }")
+            w("    return h;")
+            w("}")
+            w()
+        w("}  // namespace")
+        w()
+        for i, f in enumerate(region):
+            w('extern "C" void __imp__sub_%08X(PPCContext&, uint8_t*);' % f)
+            w("void sub_%08X(PPCContext& ctx, uint8_t* base) {" % f)
+            w("    g_counters[%d].n.fetch_add(1, std::memory_order_relaxed);" % i)
+            if args.attribute_ring:
+                w("    const uint32_t before_%d = RingChecksum();" % i)
+                w("    __imp__sub_%08X(ctx, base);" % f)
+                w("    if (RingChecksum() != before_%d)" % i)
+                w("        g_counters[%d].wrote_ring.store(true, std::memory_order_relaxed);" % i)
+            else:
+                w("    __imp__sub_%08X(ctx, base);" % f)
+            w("}")
+        w()
+        w('extern "C" void rexnative_harvest_report() {')
+        w("    // Sort an index, not the array: Counter holds a std::atomic and so is")
+        w("    // neither copyable nor movable, which std::sort requires.")
+        w("    std::vector<std::pair<unsigned long long, unsigned>> live;")
+        w("    for (size_t i = 0; i < kCount; ++i) {")
+        w("        unsigned long long n = g_counters[i].n.load();")
+        w("        if (n) live.emplace_back(n, g_counters[i].addr);")
+        w("    }")
+        w("    std::sort(live.begin(), live.end(), std::greater<>());")
+        w('    fprintf(stderr, "\\n[harvest] %s: %%zu of %%zu functions called\\n", live.size(), kCount);' % args.subsystem)
+        w("    for (const auto& e : live) {")
+        w("        unsigned long long n = e.first;")
+        if args.attribute_ring:
+            w('    fprintf(stderr, "[harvest] functions that WROTE the command buffer:\\n");')
+            w("    for (size_t i = 0; i < kCount; ++i) {")
+            w("        if (!g_counters[i].wrote_ring.load()) continue;")
+            w('        fprintf(stderr, "  sub_%08X %10llu calls  SUBMITS\\n",')
+            w("                g_counters[i].addr,")
+            w("                (unsigned long long)g_counters[i].n.load());")
+            w("    }")
+        w('        const char* band = n >= 1000 ? "per-draw"')
+        w('                         : n >= 100 ? "per-frame"')
+        w('                         : n >= 10  ? "setup"')
+        w('                                    : "once";')
+        w('        fprintf(stderr, "  sub_%08X %10llu  %s\\n", e.second, n, band);')
+        w("    }")
+        w("}")
+        w()
+        w("// Drop-in for d3d_trace.cpp: the host already calls d3d_trace_report() at")
+        w("// exit and on a fault, so aliasing it means no change to main.cpp. The two")
+        w("// files cannot both be linked - they define the same hooks.")
+        w('extern "C" void d3d_trace_report() { rexnative_harvest_report(); }')
+
+    ing.setdefault("harvest", {})[args.subsystem] = {
+        "region": "0x%08X..0x%08X" % (lo, hi),
+        "instrumented": len(region),
+        "api_candidates": len(entry),
+        "source": dest,
+    }
+    with open(args.ingest, "w") as fh:
+        json.dump(ing, fh, indent=2)
+
+    print("== rexnative harvest: %s / %s ==" % (ing["slug"], args.subsystem))
+    print("  candidate region    0x%08X..0x%08X" % (lo, hi))
+    print("  instrumented        %d functions" % len(region))
+    print("  called from outside %d  (public API candidates)" % len(entry))
+    print("  -> %s" % dest)
+    print()
+    print("  Build it into the host and call rexnative_harvest_report() at exit.")
+    print("  Bands decide the partition: per-draw / per-frame / setup / once.")
+    return 0
+
+
+def cmd_translate(args):
+    """Bake harvested SPIR-V into a C++ table the native binary compiles in.
+
+    This is the other half of harvest-and-bake. The shaders were translated once,
+    by a working emulator, and validated; the shipped binary looks them up by the
+    same ucode hash the guest's shader carries. Nothing is translated at run time,
+    so there is no translation cost and no pipeline-compilation hitch.
+
+    Coverage is the honest limit: only shaders exercised by the harvest run are
+    here. An unseen hash at run time must fail loudly rather than fall back
+    silently - a missing shader that renders nothing looks exactly like a bug in
+    something else.
+    """
+    spv = sorted(glob.glob(os.path.join(args.spirv, "*.spv")))
+    if not spv:
+        sys.exit("no .spv files in " + args.spirv)
+
+    entries = []
+    for path in spv:
+        name = os.path.basename(path)
+        m = re.match(r"shader_([0-9A-F]{16})\.(vert|frag)\.spv$", name)
+        if not m:
+            print("  skipping unrecognised " + name)
+            continue
+        entries.append((m.group(1), m.group(2), open(path, "rb").read()))
+    if not entries:
+        sys.exit("no shader files matched shader_<hash>.<stage>.spv")
+
+    dest = args.out
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    with open(dest, "w") as fh:
+        w = lambda t="": print(t, file=fh)
+        w("// GENERATED by `rexnative translate` - do not edit.")
+        w("//")
+        w("// Xenos shader microcode, translated to SPIR-V once by a working emulator")
+        w("// run and baked in. The guest identifies a shader by the hash of its")
+        w("// microcode, which is the key here, so the native binary never translates")
+        w("// anything at run time.")
+        w("//")
+        w("// COVERAGE: %d shaders, from one harvest run. A hash that is not in this" % len(entries))
+        w("// table means the harvest never exercised that shader - look it up and it")
+        w("// returns null, and the caller must treat that as fatal. Falling back")
+        w("// silently would render nothing and look like a bug somewhere else.")
+        w("#include <cstddef>")
+        w("#include <cstdint>")
+        w()
+        w("namespace rexnative {")
+        w()
+        for h, stage, data in entries:
+            words = len(data) // 4
+            w("// %s shader %s - %d bytes" % (stage, h, len(data)))
+            w("static const uint32_t kShader_%s[%d] = {" % (h, words))
+            vals = ["0x%08x" % int.from_bytes(data[i:i+4], "little") for i in range(0, words * 4, 4)]
+            for i in range(0, len(vals), 8):
+                w("    " + ", ".join(vals[i:i+8]) + ",")
+            w("};")
+            w()
+        w("struct ShaderEntry {")
+        w("    uint64_t        ucode_hash;")
+        w("    const uint32_t* spirv;")
+        w("    size_t          word_count;")
+        w("    bool            is_vertex;")
+        w("};")
+        w()
+        w("static const ShaderEntry kShaders[] = {")
+        for h, stage, data in entries:
+            w("    {0x%sull, kShader_%s, %d, %s},"
+              % (h, h, len(data) // 4, "true" if stage == "vert" else "false"))
+        w("};")
+        w("static const size_t kShaderCount = sizeof(kShaders) / sizeof(kShaders[0]);")
+        w()
+        w("// Returns null when the harvest never saw this shader. Callers must treat")
+        w("// that as fatal, not substitute anything.")
+        w("inline const ShaderEntry* FindShader(uint64_t ucode_hash) {")
+        w("    for (size_t i = 0; i < kShaderCount; ++i) {")
+        w("        if (kShaders[i].ucode_hash == ucode_hash) return &kShaders[i];")
+        w("    }")
+        w("    return nullptr;")
+        w("}")
+        w()
+        w("}  // namespace rexnative")
+
+    total = sum(len(d) for _, _, d in entries)
+    nv = sum(1 for _, s2, _ in entries if s2 == "vert")
+    print("== rexnative translate ==")
+    print("  shaders baked   %d  (%d vertex, %d fragment)" % (len(entries), nv, len(entries) - nv))
+    print("  SPIR-V total    %d bytes" % total)
+    print("  -> %s" % dest)
+    print()
+    print("  Coverage is one harvest run. An unseen hash returns null and must be")
+    print("  fatal at the call site - never a silent fallback.")
+    return 0
+
+
+def cmd_rendergraph(args):
+    """Bake the harvested render graph, after proving it is actually static.
+
+    The whole method rests on the frame being the same every time. That is not
+    assumed here - the raw acquisition sequence is searched for a period and the
+    period is verified across the rest of the run. Measured on Geometry Wars the
+    sequence repeats with 100% fidelity (GW1 period 13, GW2 period 73), so the
+    graph can be a compile-time table instead of something inferred per frame.
+
+    If a title is NOT periodic this refuses to emit, because a table that is
+    wrong for some frames is worse than no table.
+    """
+    seq = [l.strip() for l in open(args.sequence) if l.strip()]
+    if len(seq) < 2000:
+        sys.exit("only %d acquisitions - run the harvest longer" % len(seq))
+    start = len(seq) // 2            # skip startup; analyse the settled run
+    win = seq[start:start + 4000]
+
+    period = None
+    for p in range(1, args.max_period):
+        run = 0
+        for i in range(len(win) - p):
+            if win[i] != win[i + p]:
+                break
+            run += 1
+        if run > 400:
+            period = p
+            break
+    if period is None:
+        sys.exit("no period below %d - this title's frame is NOT static, "
+                 "so it must not be baked" % args.max_period)
+
+    tail = seq[start:]
+    matches = sum(1 for i in range(len(tail) - period) if tail[i] == tail[i + period])
+    fidelity = 100.0 * matches / max(len(tail) - period, 1)
+    if fidelity < args.min_fidelity:
+        sys.exit("period %d only holds %.1f%% of the time (need %.1f%%) - not baking"
+                 % (period, fidelity, args.min_fidelity))
+
+    frame = win[:period]
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, "w") as fh:
+        w = lambda t="": print(t, file=fh)
+        w("// GENERATED by `rexnative rendergraph` - do not edit.")
+        w("//")
+        w("// One frame of render-target acquisitions, in order. Harvested from a")
+        w("// working emulator run and VERIFIED periodic: the sequence repeats with")
+        w("// %.1f%% fidelity at a period of %d acquisitions across %d samples." % (fidelity, period, len(tail)))
+        w("//")
+        w("// This is why the native binary needs no EDRAM model. The guest reuses one")
+        w("// EDRAM base and walks the pitch down a chain; emulating that faithfully")
+        w("// means a host render target per pitch and a pass break at every change.")
+        w("// Knowing the whole sequence up front, the targets are allocated once and")
+        w("// the passes are a fixed list.")
+        w("#include <cstddef>")
+        w("#include <cstdint>")
+        w()
+        w("namespace rexnative {")
+        w()
+        w("struct RenderTargetStep {")
+        w("    uint16_t base_tiles;")
+        w("    uint16_t pitch_tiles_at_32bpp;")
+        w("    uint8_t  format;      // xenos::ColorRenderTargetFormat, or depth format")
+        w("    uint8_t  is_depth;")
+        w("    uint8_t  msaa_samples;")
+        w("};")
+        w()
+        w("// The frame, in acquisition order.")
+        w("static const RenderTargetStep kFrame[] = {")
+        for line in frame:
+            b, pi, f, d, m = line.split()
+            w("    {%s, %s, %s, %s, %s}," % (b, pi, f, d, m))
+        w("};")
+        w("static const size_t kFrameSteps = sizeof(kFrame) / sizeof(kFrame[0]);")
+        w()
+        uniq = []
+        for line in frame:
+            if line not in uniq:
+                uniq.append(line)
+        w("// The distinct targets the frame touches - allocate these once, not per pass.")
+        w("static const RenderTargetStep kDistinctTargets[] = {")
+        for line in uniq:
+            b, pi, f, d, m = line.split()
+            w("    {%s, %s, %s, %s, %s}," % (b, pi, f, d, m))
+        w("};")
+        w("static const size_t kDistinctTargetCount = sizeof(kDistinctTargets) / sizeof(kDistinctTargets[0]);")
+        w()
+        w("static const double kHarvestFidelityPercent = %.1f;" % fidelity)
+        w()
+        w("}  // namespace rexnative")
+
+    print("== rexnative rendergraph ==")
+    print("  acquisitions     %d" % len(seq))
+    print("  period           %d  (verified %.1f%% across %d samples)" % (period, fidelity, len(tail)))
+    print("  distinct targets %d" % len(uniq))
+    print("  -> %s" % args.out)
+    return 0
+
+
+def read_counts(path):
+    counts = {}
+    for line in open(path, errors="ignore"):
+        m = re.match(r"\s+sub_([0-9A-F]{8})\s+(\d+)\s+\S+", line)
+        if m:
+            counts[int(m.group(1), 16)] = int(m.group(2))
+    return counts
+
+
+def cmd_emit(args):
+    """Generate the middleware substitution layer.
+
+    The library is not recompiled - its public API functions get strong native
+    definitions, which beat the weak aliases XenonRecomp emits, and its internals
+    then have no callers and are dropped by --gc-sections. Measured on Geometry
+    Wars that is 51 functions to write instead of 752 to translate.
+
+    Every entry starts as a WEAK default that aborts with the address and its
+    measured call frequency. Writing the real one is just defining the strong
+    symbol. Nothing silently no-ops: a D3D9 call that quietly does nothing
+    renders a black screen and looks like a bug three layers away.
+    """
+    with open(args.ingest) as fh:
+        ing = json.load(fh)
+    counts = read_counts(args.counts)
+    if not counts:
+        sys.exit("no call counts in " + args.counts)
+
+    region = ing.get("harvest", {}).get(args.subsystem, {}).get("region")
+    if not region:
+        sys.exit("no harvest region for %s - run `rexnative harvest` first" % args.subsystem)
+    lo, hi = [int(x, 16) for x in region.split("..")]
+
+    ppc_dir = ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
+    funcs, calls, _ = scan_recompiled(ppc_dir)
+    rev = callers_of(calls)
+    inside = {f for f in funcs if lo <= f <= hi}
+    api = sorted((f for f in counts if f in inside and (rev.get(f, set()) - inside)),
+                 key=lambda f: -counts[f])
+
+    if not api:
+        sys.exit("no public API found - was the harvest run long enough?")
+
+    # A function called orders of magnitude more than the next is a poll loop,
+    # not an API rate. Flag it rather than letting it distort the ordering.
+    poll = set()
+    for i in range(len(api) - 1):
+        if counts[api[i]] > 50 * max(counts[api[i + 1]], 1):
+            poll.add(api[i])
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, "w") as fh:
+        w = lambda t="": print(t, file=fh)
+        w("// GENERATED by `rexnative emit` - do not edit the scaffold.")
+        w("//")
+        w("// Substitution layer for the guest's statically linked %s." % args.subsystem)
+        w("// These %d functions are its PUBLIC API - the ones game code calls in" % len(api))
+        w("// through - identified by intersecting call-graph structure with measured")
+        w("// call frequency. The library's %d internal helpers are not listed: with" % (len(counts) - len(api)))
+        w("// the API substituted they have no callers left and --gc-sections drops them.")
+        w("//")
+        w("// Each entry is a STRONG definition, which beats the weak alias XenonRecomp")
+        w("// emits, so the recompiled body is never reached. The default implementation")
+        w("// is weak and FATAL: a D3D9 call that silently does nothing renders black and")
+        w("// looks like a bug somewhere else entirely.")
+        w("//")
+        w("// Implement in the order below - it is measured call frequency, so it is also")
+        w("// the order that gets a frame on screen soonest.")
+        w('#include "guest.h"')
+        w("#include <cstdio>")
+        w("#include <cstdlib>")
+        w("#include <atomic>")
+        w("#include <mutex>")
+        w("#include <set>")
+        w()
+        w("// Define any of these strongly to implement it.")
+        for f in api:
+            band = ("POLL LOOP - not an API rate" if f in poll
+                    else "per-draw" if counts[f] >= 1000
+                    else "per-frame" if counts[f] >= 100
+                    else "setup" if counts[f] >= 10 else "once")
+            w("//   rexnative_%s_%08X   %10d calls  %s" % (args.subsystem, f, counts[f], band))
+        w()
+        w("// Two modes, and the difference matters.")
+        w("//")
+        w("//   default          an unimplemented function falls through to the guest's")
+        w("//                    own recompiled body. Substitution becomes incremental:")
+        w("//                    replace one function, keep a running title, verify,")
+        w("//                    repeat. Without this it is all-or-nothing and nothing")
+        w("//                    runs until all %d are written." % len(api))
+        w("//")
+        w("//   REXNATIVE_STRICT an unimplemented function aborts, naming itself. This")
+        w("//                    is what a shipping build wants: the guest's D3D9 is")
+        w("//                    meant to be gone, so reaching it is a bug, and a")
+        w("//                    graphics call that quietly does nothing renders black")
+        w("//                    and looks like a fault somewhere else entirely.")
+        w()
+        w("namespace {")
+        w("[[noreturn]] void Unimplemented(unsigned addr, unsigned long long calls, const char* band) {")
+        # NB: build these with concatenation rather than %-formatting. The format
+        # string needs a literal backslash-n and literal %08X for the C compiler,
+        # and putting either through Python's % is how they get eaten.
+        nl = chr(92) + "n"
+        w('    fprintf(stderr, "' + nl + '[rexnative] unimplemented ' + args.subsystem
+          + ' sub_%08X (%llu calls in harvest, %s)' + nl + '",')
+        w("            addr, calls, band);")
+        w('    fprintf(stderr, "[rexnative] implement rexnative_' + args.subsystem
+          + '_%08X' + nl + '", addr);')
+        w("    fflush(stderr);")
+        w("    abort();")
+        w("}")
+        w()
+        w("// Report each fall-through once, so the log says exactly which functions")
+        w("// are still the guest's and in what order they were first reached.")
+        w("std::atomic<int> g_fallthrough{0};")
+        w("void NotYet(unsigned addr) {")
+        w("    static std::mutex m;")
+        w("    static std::set<unsigned> seen;")
+        w("    std::lock_guard<std::mutex> lk(m);")
+        w("    if (seen.insert(addr).second) {")
+        w("        g_fallthrough.fetch_add(1);")
+        w('        fprintf(stderr, "[rexnative] still guest: sub_%08X\\n", addr);')
+        w("    }")
+        w("}")
+        w("}  // namespace")
+        w()
+        for f in api:
+            band = ("poll" if f in poll else "per-draw" if counts[f] >= 1000
+                    else "per-frame" if counts[f] >= 100
+                    else "setup" if counts[f] >= 10 else "once")
+            w("// %d calls, %s" % (counts[f], band))
+            w('extern "C" void __imp__sub_%08X(PPCContext&, uint8_t*);' % f)
+            w('extern "C" __attribute__((weak)) void rexnative_%s_%08X(PPCContext& ctx, uint8_t* base) {'
+              % (args.subsystem, f))
+            w("#ifdef REXNATIVE_STRICT")
+            w('    (void)ctx; (void)base;')
+            w('    Unimplemented(0x%08Xu, %dull, "%s");' % (f, counts[f], band))
+            w("#else")
+            w("    NotYet(0x%08Xu);" % f)
+            w("    __imp__sub_%08X(ctx, base);   // the guest's own, until this is written" % f)
+            w("#endif")
+            w("}")
+            w("void sub_%08X(PPCContext& ctx, uint8_t* base) {" % f)
+            w("    rexnative_%s_%08X(ctx, base);" % (args.subsystem, f))
+            w("}")
+            w()
+
+        # The host calls d3d_trace_report() at exit and on a fault, so this file
+        # has to provide it too - it is a drop-in for the same slot. Reporting
+        # coverage here means "how far is the substitution" is answered by the
+        # binary itself rather than by counting source files.
+        w('extern "C" void d3d_trace_report() {')
+        # The COUNT is a runtime value - only the total is known at generation
+        # time. Formatting both here would bake in a zero that always reads as
+        # "fully substituted", which is the most misleading possible default.
+        w('    fprintf(stderr, "\\n[rexnative] %d of ' + str(len(api)) + " "
+          + args.subsystem + ' functions still fall through to the guest\\n",')
+        w("            g_fallthrough.load());")
+        w('    fprintf(stderr, "\\n[rexnative] %s substitution active: %d public API"' % (args.subsystem, len(api)))
+        w('                    " functions, %d guest internals dropped\\n");' % (len(counts) - len(api)))
+        w("}")
+
+    ing.setdefault("emit", {})[args.subsystem] = {
+        "api_functions": len(api), "internals_dropped": len(counts) - len(api),
+        "source": args.out,
+    }
+    with open(args.ingest, "w") as fh:
+        json.dump(ing, fh, indent=2)
+
+    bands = collections.Counter()
+    for f in api:
+        bands["poll" if f in poll else "per-draw" if counts[f] >= 1000
+              else "per-frame" if counts[f] >= 100
+              else "setup" if counts[f] >= 10 else "once"] += 1
+    print("== rexnative emit: %s / %s ==" % (ing["slug"], args.subsystem))
+    print("  public API to implement  %d" % len(api))
+    for b in ("per-draw", "per-frame", "setup", "once", "poll"):
+        if bands[b]:
+            print("    %-10s %3d" % (b, bands[b]))
+    print("  internals dropped        %d  (no callers once the API is substituted)" % (len(counts) - len(api)))
+    print("  -> %s" % args.out)
+    print()
+    print("  All %d are weak and fatal until implemented. Order is by measured" % len(api))
+    print("  frequency, which is also the order that gets a frame soonest.")
+    return 0
+
+
+def cmd_describe(args):
+    """Build an RE dossier for each function that has to be reimplemented.
+
+    The 51 are unnamed, and identifying them from PPC assembly one at a time is
+    the expensive part of the whole project. Most of what you need to recognise
+    a D3D9 entry point is mechanical though - how many arguments it takes,
+    whether it returns anything, which kernel imports it reaches, and which
+    offsets it touches on its first argument. Extracting that turns "read a
+    screenful of assembly" into "check a summary", which is the difference
+    between weeks and days.
+
+    It does NOT name the functions. That still takes judgement - but judgement
+    applied to a summary rather than to raw disassembly.
+    """
+    with open(args.ingest) as fh:
+        ing = json.load(fh)
+    counts = read_counts(args.counts)
+    region = ing.get("harvest", {}).get(args.subsystem, {}).get("region")
+    if not region:
+        sys.exit("run `rexnative harvest` first")
+    lo, hi = [int(x, 16) for x in region.split("..")]
+    ppc_dir = ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
+    funcs, calls, _ = scan_recompiled(ppc_dir)
+    rev = callers_of(calls)
+    inside = {f for f in funcs if lo <= f <= hi}
+    api = sorted((f for f in counts if f in inside and (rev.get(f, set()) - inside)),
+                 key=lambda f: -counts[f])
+
+    # Per-function facts, scraped from the disassembly comments the recompiler
+    # leaves in its output.
+    body = {}
+    cur = None
+    for path in sorted(glob.glob(os.path.join(ppc_dir, "ppc_recomp.*.cpp"))):
+        for line in open(path, errors="ignore"):
+            m = FUNC_RE.search(line)
+            if m:
+                cur = int(m.group(1), 16)
+                body[cur] = []
+                continue
+            if cur is not None and line.lstrip().startswith("// "):
+                body[cur].append(line.strip()[3:])
+
+    ARG = re.compile(r"\br([3-9]|10)\b")
+    LOADST = re.compile(r"\b(lwz|lhz|lbz|stw|sth|stb|lfs|stfs)\s+\w+,\s*(-?\d+)\(r([0-9]+)\)")
+    IMPCALL = re.compile(r"\bbl\s+0x([0-9a-fA-F]+)")
+
+    lines_out = []
+    for f in api:
+        ops = body.get(f, [])
+        # Arity: an argument is a register in r3..r10 READ before anything writes
+        # it. Doing that properly needs the read/write shape of each opcode - a
+        # store's first operand is a SOURCE while a load's is a destination, and
+        # treating them alike is what made an earlier version report 8 arguments
+        # for almost everything.
+        STORES = ("stw", "sth", "stb", "stfs", "stfd", "stwu", "stwx", "stbx", "sthx")
+        NO_DEST = STORES + ("cmplw", "cmplwi", "cmpw", "cmpwi", "b", "bl", "beq",
+                            "bne", "blt", "bgt", "ble", "bge", "bdnz", "blr",
+                            "mtctr", "mtlr", "bctr", "bctrl")
+        written, argc = set(), 0
+        for op in ops[:120]:
+            parts = op.replace(",", " ").split()
+            if not parts:
+                continue
+            mnem = parts[0]
+            regs = [int(m.group(1)) for m in re.finditer(r"\br([0-9]+)\b", op)]
+            if not regs:
+                continue
+            dest = None if mnem in NO_DEST else regs[0]
+            # Everything that is not the destination is read here.
+            for r in regs:
+                if r == dest:
+                    continue
+                if 3 <= r <= 10 and r not in written:
+                    argc = max(argc, r - 2)
+            if dest is not None:
+                written.add(dest)
+            if mnem in ("bl", "bctrl"):
+                # A call clobbers the volatiles, so nothing after it can tell us
+                # about this function's own arguments.
+                break
+        # A return value means r3 is written on the way out and not merely used.
+        returns = any(re.match(r"(?!st)\w+\s+r3\b", op) for op in ops[-14:])
+        # Offsets touched on the first argument - the shape of the object it is
+        # handed, which is usually the strongest identification clue.
+        offs = collections.Counter()
+        for op in ops:
+            m = LOADST.search(op)
+            if m and m.group(3) == "3":
+                offs[int(m.group(2))] += 1
+        imports = sorted({i for i in re.findall(r"__imp__(\w+)", "\n".join(ops))})
+        callees = sorted(c for c in calls.get(f, ()) if c in inside)
+        band = ("per-draw" if counts[f] >= 1000 else "per-frame" if counts[f] >= 100
+                else "setup" if counts[f] >= 10 else "once")
+        lines_out.append({
+            "addr": "0x%08X" % f, "calls": counts[f], "band": band,
+            "instructions": len(ops), "args": argc, "returns_value": returns,
+            "r3_offsets": [o for o, _ in offs.most_common(8)],
+            "kernel_imports": imports,
+            "calls_into_library": ["0x%08X" % c for c in callees[:6]],
+        })
+
+    with open(args.out, "w") as fh:
+        json.dump(lines_out, fh, indent=2)
+
+    # A worksheet per function: the summary, then the disassembly. Identifying
+    # 49 unnamed entry points is the expensive part of this project, and doing
+    # it from a file per function beats grepping one 500k-line source each time.
+    if args.bodies:
+        os.makedirs(args.bodies, exist_ok=True)
+        for d in lines_out:
+            f = int(d["addr"], 16)
+            with open(os.path.join(args.bodies, "sub_%08X.asm" % f), "w") as fh:
+                w = lambda t="": print(t, file=fh)
+                w("; sub_%08X" % f)
+                w(";   %d calls in harvest (%s band)" % (d["calls"], d["band"]))
+                w(";   %d instructions, %d argument register(s), %s"
+                  % (d["instructions"], d["args"],
+                     "returns a value in r3" if d["returns_value"] else "returns nothing"))
+                if d["r3_offsets"]:
+                    w(";   touches offsets on its first argument: %s"
+                      % " ".join(str(o) for o in d["r3_offsets"]))
+                if d["kernel_imports"]:
+                    w(";   kernel imports: %s" % " ".join(d["kernel_imports"]))
+                if d["calls_into_library"]:
+                    w(";   calls into the library: %s" % " ".join(d["calls_into_library"]))
+                w(";")
+                w("; Argument registers are r3..r10 in order. An offset off r3 is a field")
+                w("; of the object it was handed, which is usually the strongest clue to")
+                w("; what this entry point is.")
+                w()
+                for i, op in enumerate(body.get(f, [])):
+                    w("%4d  %s" % (i, op))
+        print("  worksheets -> %s/ (%d files)" % (args.bodies, len(lines_out)))
+
+    print("== rexnative describe: %s / %s ==" % (ing["slug"], args.subsystem))
+    print("  %-10s %8s %-10s %4s %4s %5s  %s" % ("addr", "calls", "band", "args", "ret", "insns", "r3 offsets"))
+    for d in lines_out[:args.top]:
+        print("  %-10s %8d %-10s %4d %4s %5d  %s"
+              % (d["addr"], d["calls"], d["band"], d["args"],
+                 "yes" if d["returns_value"] else "-", d["instructions"],
+                 " ".join(str(o) for o in d["r3_offsets"][:6])))
+    print("  ... %d total -> %s" % (len(lines_out), args.out))
+    return 0
+
+
+def cmd_status(args):
+    """Where the pipeline is, read from artifacts rather than a stored flag."""
+    with open(args.ingest) as fh:
+        ing = json.load(fh)
+    print("== rexnative status: %s ==" % ing["slug"])
+    print()
+    print("  stage        state")
+    print("  ingest       %d functions, %d call edges"
+          % (ing.get("recompiled_functions", 0), ing.get("call_edges", 0)))
+    for name, info in sorted(ing.get("middleware", {}).items()):
+        if info["seed_functions"]:
+            print("               %-6s %d seeds, span %s"
+                  % (name, len(info["seed_functions"]), info["span"]))
+    hv = ing.get("harvest", {})
+    if hv:
+        for name, info in sorted(hv.items()):
+            print("  harvest      %-6s %d instrumented, %d API candidates"
+                  % (name, info["instrumented"], info["api_candidates"]))
+    else:
+        print("  harvest      not run")
+    em = ing.get("emit", {})
+    if em:
+        for name, info in sorted(em.items()):
+            api = info["api_functions"]
+            impl = 0
+            if args.impl and os.path.exists(args.impl):
+                src = open(args.impl).read()
+                impl = len(re.findall(r"rexnative_%s_[0-9A-F]{8}\s*\(" % name, src))
+            bar = "#" * int(20 * impl / max(api, 1))
+            print("  emit         %-6s %d API, %d internals dropped"
+                  % (name, api, info["internals_dropped"]))
+            print("  implement    [%-20s] %d/%d native, %d still the guest's"
+                  % (bar, impl, api, api - impl))
+    else:
+        print("  emit         not run")
+    for label, path in (("shaders", args.shaders), ("render graph", args.rendergraph)):
+        if path and os.path.exists(path):
+            txt = open(path).read()
+            if label == "shaders":
+                n = len(re.findall(r"kShader_[0-9A-F]{16}\[", txt))
+                print("  translate    %d shaders baked" % n)
+            else:
+                # Count only the frame, not the distinct-target list that
+                # follows it - both are arrays of the same struct, and counting
+                # both reported 16 steps for a 13-step frame.
+                frame = txt.split("kFrame[] = {", 1)[-1].split("};", 1)[0]
+                n = len(re.findall(r"^    \{\d+, ", frame, re.M))
+                fid = re.search(r"kHarvestFidelityPercent = ([\d.]+)", txt)
+                print("  rendergraph  %d steps, %s%% periodic"
+                      % (n, fid.group(1) if fid else "?"))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="rexnative", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="stage", required=True)
+
+    ing = sub.add_parser("ingest", help="XEX/port -> build description")
+    ing.add_argument("port")
+    ing.add_argument("--ppc")
+    ing.add_argument("--out")
+    ing.set_defaults(func=cmd_ingest)
+
+    hv = sub.add_parser("harvest", help="emit call-counting instrumentation")
+    hv.add_argument("ingest", help="ingest.json from `rexnative ingest`")
+    hv.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
+    hv.add_argument("--pad", type=lambda x: int(x, 0), default=0x8000,
+                    help="widen the seed span this many bytes each way (default 0x8000)")
+    hv.add_argument("--ppc")
+    hv.add_argument("--out")
+    hv.add_argument("--attribute-ring", action="store_true",
+                    help="also record which functions change the command ring")
+    hv.add_argument("--watch-bytes", type=lambda x: int(x, 0), default=0x40000,
+                    help="bytes above the ring base to watch (default 256K, covers the IBs)")
+    hv.add_argument("--watch-stride", type=int, default=32,
+                    help="sample every Nth word (default 32)")
+    hv.set_defaults(func=cmd_harvest)
+
+    tr = sub.add_parser("translate", help="bake harvested SPIR-V into a C++ table")
+    tr.add_argument("--spirv", required=True, help="directory of shader_<hash>.<stage>.spv")
+    tr.add_argument("--out", required=True, help="output .h")
+    tr.set_defaults(func=cmd_translate)
+
+    rg = sub.add_parser("rendergraph", help="bake the render graph, if it is static")
+    rg.add_argument("--sequence", required=True, help="REXNATIVE_DUMP_RENDERGRAPH output")
+    rg.add_argument("--out", required=True)
+    rg.add_argument("--max-period", type=int, default=600)
+    rg.add_argument("--min-fidelity", type=float, default=99.0)
+    rg.set_defaults(func=cmd_rendergraph)
+
+    em = sub.add_parser("emit", help="generate the middleware substitution layer")
+    em.add_argument("--ingest", required=True)
+    em.add_argument("--counts", required=True, help="log containing `rexnative harvest` output")
+    em.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
+    em.add_argument("--out", required=True)
+    em.set_defaults(func=cmd_emit)
+
+    de = sub.add_parser("describe", help="RE dossier for each function to reimplement")
+    de.add_argument("--ingest", required=True)
+    de.add_argument("--counts", required=True)
+    de.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
+    de.add_argument("--out", required=True)
+    de.add_argument("--top", type=int, default=14)
+    de.add_argument("--bodies", help="directory to write one annotated .asm per function")
+    de.set_defaults(func=cmd_describe)
+
+    st = sub.add_parser("status", help="pipeline state, from artifacts")
+    st.add_argument("--ingest", required=True)
+    st.add_argument("--impl", help="hand-written implementations .cpp")
+    st.add_argument("--shaders", help="baked shaders .h")
+    st.add_argument("--rendergraph", help="baked render graph .h")
+    st.set_defaults(func=cmd_status)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

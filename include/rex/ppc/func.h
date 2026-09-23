@@ -31,6 +31,10 @@ using PPCFunc = void(PPCContext& ctx, uint8_t* base);
 
 namespace rex::runtime {
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address);
+
+// Logs how often indirect calls missed their module's dispatch table. Called
+// once at shutdown; see the counters in system/function_dispatcher.cpp.
+void ReportIndirectDispatchStats();
 }  // namespace rex::runtime
 
 //=============================================================================

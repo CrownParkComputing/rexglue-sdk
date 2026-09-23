@@ -2,6 +2,7 @@ set(REXSYSTEM_SOURCES
     runtime.cpp
     embedded_metadata.cpp
     achievement_manager.cpp
+    high_scores.cpp
     achievements.cpp
     kernel_state.cpp
     xmemory.cpp

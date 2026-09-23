@@ -129,6 +129,17 @@ class VulkanTextureCache final : public TextureCache {
                                               length_scaled_alignment_log2);
   }
   VkBuffer scaled_resolve_buffer() const { return scaled_resolve_buffer_; }
+
+  // Per-fetch-slot monotonic counters, bumped whenever a resolved binding
+  // image view for that slot may have changed: the binding was refreshed
+  // (UpdateTextureBindingsImpl) or a texture - and thus its views - was
+  // destroyed (all slots bump, since the texture may be bound anywhere). The
+  // command processor's stable-binding fast path keys its cache on these so a
+  // skipped resolution can never hold a stale VkImageView.
+  uint64_t texture_binding_epoch(uint32_t fetch_constant_index) const {
+    return texture_binding_epochs_[fetch_constant_index];
+  }
+
   void UseScaledResolveBufferForRead();
   void UseScaledResolveBufferForWrite(uint64_t written_start_scaled,
                                       uint64_t written_length_scaled);
@@ -361,6 +372,7 @@ class VulkanTextureCache final : public TextureCache {
   bool null_images_cleared_ = false;
 
   std::array<VulkanTextureBinding, xenos::kTextureFetchConstantCount> vulkan_texture_bindings_;
+  uint64_t texture_binding_epochs_[xenos::kTextureFetchConstantCount] = {};
 
   // Unsupported texture formats used during this frame (for research and
   // testing).

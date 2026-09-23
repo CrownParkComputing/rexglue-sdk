@@ -17,6 +17,8 @@
 #include <rex/input/flags.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
+
+#include <atomic>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/input/nop/nop_input_driver.h>
 #include <rex/input/sdl/sdl_input_driver.h>
@@ -218,7 +220,32 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
 }
 
+namespace {
+std::atomic<bool> g_guest_input_suppressed{false};
+}  // namespace
+
+void SetGuestInputSuppressed(bool suppressed) {
+  g_guest_input_suppressed.store(suppressed, std::memory_order_relaxed);
+}
+
+bool GuestInputSuppressed() {
+  return g_guest_input_suppressed.load(std::memory_order_relaxed);
+}
+
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+  if (GuestInputSuppressed()) {
+    // A connected pad with nothing pressed, not a disconnected one: a title
+    // told its controller had gone away will put up its own "please reconnect"
+    // screen, which is worse than the overlay it was meant to be behind.
+    if (out_state) {
+      *out_state = X_INPUT_STATE{};
+    }
+    return X_ERROR_SUCCESS;
+  }
+  return GetStateRaw(user_index, out_state);
+}
+
+X_RESULT InputSystem::GetStateRaw(uint32_t user_index, X_INPUT_STATE* out_state) {
   std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {

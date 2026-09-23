@@ -41,6 +41,15 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                       "Vulkan render target implementation path")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// There is no exact Vulkan equivalent of the guest's 7e3 colour format, so the
+// default is a 64-bit float target for a 32-bit guest one. On a tile-based
+// mobile GPU that doubles the colour half of every tile store and reload. The
+// cost of the narrower format is alpha: 7e3 carries 2 bits of unorm alpha and
+// B10G11R11 has none, so this is safe only where the title never reads
+// destination alpha. Off by default; enable per title after measuring.
+REXCVAR_DEFINE_BOOL(color_7e3_as_b10g11r11, false, "GPU/Vulkan",
+                    "Store guest 7e3 colour as 32bpp B10G11R11 instead of 64bpp RGBA16F");
+
 // DEFINE_string(
 //     render_target_path_vulkan, "",
 //     "Render target emulation path to use on Vulkan.\n"
@@ -234,9 +243,19 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     // shaders, and the usage of fragment shader interlock, prefer the former
     // for simplicity.
     if (!fsi_path_supported) {
+      // This fallback is the difference between free render target layout
+      // changes and copying between host render targets for every one of
+      // them, so it is warned about rather than silent.
+      REXGPU_WARN(
+          "Fragment shader interlock was asked for but this device does not support it; "
+          "falling back to host render targets, which copies on every render target layout "
+          "change");
       path_ = Path::kHostRenderTargets;
     }
   }
+  REXGPU_INFO("Render target path: {}", path_ == Path::kPixelShaderInterlock
+                                            ? "fsi (pixel shader interlock)"
+                                            : "fbo (host render targets)");
 
   // Format support.
   constexpr VkFormatFeatureFlags kUsedDepthFormatFeatures =
@@ -1282,7 +1301,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 resolve_copy_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 sizeof(copy_shader_constants), &copy_shader_constants);
           }
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
 
           // Invalidate textures and mark the range as scaled if needed.
@@ -1341,7 +1360,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           command_buffer.CmdVkPushConstants(resolve_fsi_clear_pipeline_layout_,
                                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                             sizeof(depth_clear_constants), &depth_clear_constants);
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
           command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
         }
         if (clear_color) {
@@ -1361,7 +1380,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 resolve_fsi_clear_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 sizeof(color_clear_constants), &color_clear_constants);
           }
-          command_processor_.SubmitBarriers(true);
+          command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
           command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
         }
         MarkEdramBufferModified();
@@ -1722,6 +1741,17 @@ bool VulkanRenderTargetCache::IsColor16FormatFloatLike(
 
 VkFormat VulkanRenderTargetCache::GetColorVulkanFormat(
     xenos::ColorRenderTargetFormat format) const {
+  // [TEMP DIAG] Which colour formats a title actually asks for. Bytes per pixel
+  // is the one tiler cost that is not in dispute: a 32bpp guest format stored as
+  // a 64bpp host one multiplies tile traffic, and k_2_10_10_10_FLOAT has no
+  // exact Vulkan equivalent so it lands on R16G16B16A16_SFLOAT.
+  if (getenv("REX_LOG_RT_FORMATS")) {
+    static std::atomic<uint32_t> seen[32] = {};
+    const uint32_t f = uint32_t(format) & 31;
+    if (seen[f].fetch_add(1) == 0) {
+      REXGPU_INFO("RT FORMAT first use: color format {} (guest enum)", f);
+    }
+  }
   switch (format) {
     case xenos::ColorRenderTargetFormat::k_8_8_8_8:
       return VK_FORMAT_R8G8B8A8_UNORM;
@@ -1733,7 +1763,9 @@ VkFormat VulkanRenderTargetCache::GetColorVulkanFormat(
       return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
-      return VK_FORMAT_R16G16B16A16_SFLOAT;
+      // 32bpp instead of 64 halves the colour half of every tile store/reload.
+      return REXCVAR_GET(color_7e3_as_b10g11r11) ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+                                                 : VK_FORMAT_R16G16B16A16_SFLOAT;
     case xenos::ColorRenderTargetFormat::k_16_16:
       return color_rg16_draw_format_fallback_to_float_ ? VK_FORMAT_R16G16_SFLOAT
                                                        : VK_FORMAT_R16G16_SNORM;
@@ -4648,7 +4680,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             host_depth_store_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
             uint32_t(offsetof(HostDepthStoreConstants, rectangle)),
             sizeof(host_depth_store_rectangle_constant), &host_depth_store_rectangle_constant);
-        command_processor_.SubmitBarriers(true);
+        command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
         command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
         MarkEdramBufferModified();
       }
@@ -6135,7 +6167,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
                                           sizeof(uint32_t) * kDumpPushConstantOffsets,
                                           sizeof(last_offsets), &last_offsets);
       }
-      command_processor_.SubmitBarriers(true);
+      command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
       command_buffer.CmdVkDispatch(
           (draw_resolution_scale_x() *
                (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) *

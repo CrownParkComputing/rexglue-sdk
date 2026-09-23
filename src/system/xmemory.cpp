@@ -22,7 +22,10 @@
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <mutex>
+#include <set>
 #include <rex/logging.h>
+#include <rex/system/xthread.h>
 #include <rex/math.h>
 #include <rex/stream.h>
 #include <rex/system/function_dispatcher.h>
@@ -547,10 +550,32 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   uint32_t virtual_address = HostToGuestVirtual(host_address);
   BaseHeap* heap = LookupHeap(virtual_address);
   if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
-    REXSYS_ERROR(
-        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
-        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
-        rex::thread::current_thread_id());
+    // The address alone says "something dereferenced null"; it does not say what.
+    // The guest link register names the caller, which turns 25,000 identical
+    // lines into one address to look up in the generated code. Logged once per
+    // distinct (address, caller) pair so a flood stays readable.
+    uint32_t guest_lr = 0;
+    if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+      if (auto* state = thread->thread_state()) {
+        if (auto* context = state->context()) {
+          guest_lr = static_cast<uint32_t>(context->lr);
+        }
+      }
+    }
+    static std::mutex seen_mutex;
+    static std::set<std::pair<uint32_t, uint32_t>> seen;
+    bool is_new;
+    {
+      std::lock_guard<std::mutex> lock(seen_mutex);
+      is_new = seen.emplace(virtual_address, guest_lr).second;
+    }
+    if (is_new) {
+      REXSYS_ERROR(
+          "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread "
+          "0x{:X}, called from guest 0x{:08X}",
+          is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+          rex::thread::current_thread_id(), guest_lr);
+    }
     return false;
   }
 

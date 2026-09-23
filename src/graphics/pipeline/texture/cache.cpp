@@ -37,6 +37,10 @@ REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
     .range(1, 256)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(texture_fetch_write_memoization, true, "GPU",
+                    "Keep texture bindings in sync across fetch constant rewrites with\n"
+                    "identical values. Disable for diagnostic comparison.");
+
 REXCVAR_DEFINE_INT32(texture_cache_memory_limit_soft, 384, "GPU",
                      "Soft texture cache memory limit (MB)")
     .range(64, 4096)
@@ -511,6 +515,42 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
   return true;
 }
 
+void TextureCache::TextureFetchConstantsWritten(uint32_t first_index, uint32_t last_index) {
+  if (first_index > last_index) {
+    uint32_t swap_index = first_index;
+    first_index = last_index;
+    last_index = swap_index;
+  }
+  if (first_index > 31) {
+    return;
+  }
+  if (last_index > 31) {
+    last_index = 31;
+  }
+  // A rewrite with an identical value must not force RequestTextures to redo
+  // the slot: games re-poke whole fetch blocks per material, and parsing,
+  // swizzle conversion and the TextureKey lookup all produce what the slot
+  // already holds. Only a real change drops the slot out of sync.
+  for (uint32_t index = first_index; index <= last_index; ++index) {
+    ++texture_fetch_writes_;
+    xenos::xe_gpu_texture_fetch_t fetch = register_file().GetTextureFetch(index);
+    if (REXCVAR_GET(texture_fetch_write_memoization) &&
+        !std::memcmp(&fetch, &texture_fetches_in_sync_[index], sizeof(fetch))) {
+      ++texture_fetch_writes_unchanged_;
+      continue;
+    }
+    texture_fetches_in_sync_[index] = fetch;
+    texture_bindings_in_sync_ &= ~(UINT32_C(1) << index);
+  }
+}
+
+void TextureCache::TakeFetchWriteStats(uint64_t& writes_out, uint64_t& unchanged_out) {
+  writes_out = texture_fetch_writes_;
+  unchanged_out = texture_fetch_writes_unchanged_;
+  texture_fetch_writes_ = 0;
+  texture_fetch_writes_unchanged_ = 0;
+}
+
 void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   const auto& regs = register_file();
 
@@ -552,6 +592,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     textures_remaining &= ~index_bit;
     TextureBinding& binding = texture_bindings_[index];
     xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
+    texture_fetches_in_sync_[index] = fetch;
     TextureKey old_key = binding.key;
     uint8_t old_swizzled_signs = binding.swizzled_signs;
     BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
@@ -565,6 +606,34 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     }
     uint32_t old_host_swizzle = binding.host_swizzle;
     binding.host_swizzle = GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
+    if (REXCVAR_GET(texture_identity_swizzle)) {
+      binding.host_swizzle = GetHostFormatSwizzle(binding.key);
+    }
+    {
+      // Only the combination that renders wrong: 32-bit textures whose guest
+      // swizzle is BGRA. The scene's textures are a different combination and
+      // already correct, so a global override would break what works.
+      const bool is_suspect_combo =
+          binding.key.format == xenos::TextureFormat::k_8_8_8_8 &&
+          fetch.swizzle == XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A);
+      const std::string& forced = REXCVAR_GET(texture_swizzle_override);
+      if (is_suspect_combo && forced.size() == 4) {
+        uint32_t swz = 0;
+        bool ok = true;
+        for (uint32_t i = 0; i < 4; ++i) {
+          const char* order = "RGBA01";
+          const char* at = std::strchr(order, forced[i]);
+          if (!at) {
+            ok = false;
+            break;
+          }
+          swz |= static_cast<uint32_t>(at - order) << (3 * i);
+        }
+        if (ok) {
+          binding.host_swizzle = swz;
+        }
+      }
+    }
 
     // The component swizzle is the one part of a binding that can recolour a
     // single texture while leaving every other texture in the scene correct -
@@ -590,9 +659,10 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
           return "RGBA01??"[(swizzle >> (3 * i)) & 0b111];
         };
         REXLOG_INFO(
-            "[texswizzle] {}x{} {} base 0x{:08X} guest {}{}{}{} host {}{}{}{}",
+            "[texswizzle] {}x{} {} base 0x{:08X} endian {} guest {}{}{}{} host {}{}{}{}",
             binding.key.GetWidth(), binding.key.GetHeight(),
             FormatInfo::Get(binding.key.format)->name, binding.key.base_page << 12,
+            static_cast<uint32_t>(fetch.endianness),
             name(fetch.swizzle, 0), name(fetch.swizzle, 1), name(fetch.swizzle, 2),
             name(fetch.swizzle, 3), name(binding.host_swizzle, 0), name(binding.host_swizzle, 1),
             name(binding.host_swizzle, 2), name(binding.host_swizzle, 3));

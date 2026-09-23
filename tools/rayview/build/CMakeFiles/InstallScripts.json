@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/jon/rexglue-vmx/tools/rayview/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -2,7 +2,7 @@
 """Read FMOD FSB4 sound banks: list streams, and extract them as WAV.
 
 Every 360 title built on FMOD keeps its audio in FSB4 banks - Hydro Thunder in
-Audio/Xbox360/*.fsb, Shift 2 in Audio/Music/*.fsb alongside .fev event files -
+Audio/Xbox360/*.fsb, others in Audio/Music/*.fsb alongside .fev event files -
 and the streams inside are almost always XMA2. Reading them on the host is the
 first thing a native audio path needs, and the only way to get ground truth to
 compare a title's own mixer output against.

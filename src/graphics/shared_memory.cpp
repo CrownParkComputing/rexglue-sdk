@@ -57,6 +57,7 @@ void SharedMemory::InitializeCommon() {
   block_uploaded_this_frame_.assign(num_system_page_flags_, 0);
   block_hot_.assign(num_system_page_flags_, 0);
   page_uploaded_this_frame_.assign(num_system_page_flags_, 0);
+  page_requested_this_frame_.assign(num_system_page_flags_, 0);
 
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
@@ -448,7 +449,8 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
   watch_range_first_free_ = range;
 }
 
-bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count) {
+bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count,
+                                 bool ranges_sorted_and_merged) {
   if (ranges == nullptr || !count) {
     return true;
   }
@@ -465,6 +467,7 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     if (start > kBufferSize || (kBufferSize - start) < length) {
       return false;
     }
+    NotePagesRequested(start >> page_size_log2_, (start + length - 1) >> page_size_log2_);
     merged_ranges.emplace_back(start, length);
   }
   if (merged_ranges.empty()) {
@@ -473,26 +476,27 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
 
   SCOPE_profile_cpu_f("gpu");
 
-  std::sort(merged_ranges.begin(), merged_ranges.end(),
-            [](const std::pair<uint32_t, uint32_t>& a, const std::pair<uint32_t, uint32_t>& b) {
-              return a.first < b.first;
-            });
-  size_t merged_write = 0;
-  for (size_t i = 1; i < merged_ranges.size(); ++i) {
-    std::pair<uint32_t, uint32_t>& range_previous = merged_ranges[merged_write];
-    const std::pair<uint32_t, uint32_t>& range_current = merged_ranges[i];
-    uint64_t previous_end = uint64_t(range_previous.first) + uint64_t(range_previous.second);
-    uint64_t current_start = uint64_t(range_current.first);
-    if (current_start <= previous_end) {
-      uint64_t current_end = current_start + uint64_t(range_current.second);
-      if (current_end > previous_end) {
-        range_previous.second = uint32_t(current_end - uint64_t(range_previous.first));
+  if (!ranges_sorted_and_merged) {
+    std::sort(merged_ranges.begin(), merged_ranges.end(),
+              [](const std::pair<uint32_t, uint32_t>& a,
+                 const std::pair<uint32_t, uint32_t>& b) { return a.first < b.first; });
+    size_t merged_write = 0;
+    for (size_t i = 1; i < merged_ranges.size(); ++i) {
+      std::pair<uint32_t, uint32_t>& range_previous = merged_ranges[merged_write];
+      const std::pair<uint32_t, uint32_t>& range_current = merged_ranges[i];
+      uint64_t previous_end = uint64_t(range_previous.first) + uint64_t(range_previous.second);
+      uint64_t current_start = uint64_t(range_current.first);
+      if (current_start <= previous_end) {
+        uint64_t current_end = current_start + uint64_t(range_current.second);
+        if (current_end > previous_end) {
+          range_previous.second = uint32_t(current_end - uint64_t(range_previous.first));
+        }
+      } else {
+        merged_ranges[++merged_write] = range_current;
       }
-    } else {
-      merged_ranges[++merged_write] = range_current;
     }
+    merged_ranges.resize(merged_write + 1);
   }
-  merged_ranges.resize(merged_write + 1);
 
   for (const std::pair<uint32_t, uint32_t>& range : merged_ranges) {
     if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
@@ -640,6 +644,30 @@ bool SharedMemory::FlushDeferredRanges() {
   if (deferred_ranges_.empty()) {
     return true;
   }
+  // Draws commonly reference the same streaming pool through several fetch
+  // constants. Merge before checking residency so duplicate and overlapping
+  // requests do not each scan the shared-memory validity bitmap.
+  std::sort(deferred_ranges_.begin(), deferred_ranges_.end());
+  size_t merged_count = 0;
+  for (const std::pair<uint32_t, uint32_t>& range : deferred_ranges_) {
+    if (!range.second) {
+      continue;
+    }
+    if (merged_count) {
+      std::pair<uint32_t, uint32_t>& previous = deferred_ranges_[merged_count - 1];
+      const uint64_t previous_end = uint64_t(previous.first) + previous.second;
+      if (uint64_t(range.first) <= previous_end) {
+        const uint64_t range_end = uint64_t(range.first) + range.second;
+        if (range_end > previous_end) {
+          previous.second = uint32_t(range_end - previous.first);
+        }
+        continue;
+      }
+    }
+    deferred_ranges_[merged_count++] = range;
+  }
+  deferred_ranges_.resize(merged_count);
+
   // Ranges that are already resident cost only the lock-free bitmap check and
   // the sparse-allocation check; only the rest go through the sorting,
   // merging, locking upload path - and they go through it together, so their
@@ -656,7 +684,7 @@ bool SharedMemory::FlushDeferredRanges() {
     deferred_ranges_[needs_upload++] = range;
   }
   if (needs_upload) {
-    result = RequestRanges(deferred_ranges_.data(), needs_upload) && result;
+    result = RequestRanges(deferred_ranges_.data(), needs_upload, true) && result;
   }
   deferred_ranges_.clear();
   return result;
@@ -724,11 +752,33 @@ void SharedMemory::NotePagesUploaded(uint32_t page_first, uint32_t page_last) {
   }
 }
 
+void SharedMemory::NotePagesRequested(uint32_t page_first, uint32_t page_last) const {
+  if (!REXCVAR_GET(gpu_hot_page_frames) || uploading_hot_pages_ ||
+      page_requested_this_frame_.empty()) {
+    return;
+  }
+  for (uint32_t block = page_first >> 6; block <= (page_last >> 6); ++block) {
+    if (block >= page_requested_this_frame_.size()) {
+      break;
+    }
+    uint64_t bits = UINT64_MAX;
+    if (block == (page_first >> 6)) {
+      bits &= UINT64_MAX << (page_first & 63);
+    }
+    if (block == (page_last >> 6)) {
+      bits &= UINT64_MAX >> (63 - (page_last & 63));
+    }
+    page_requested_this_frame_[block] |= bits;
+  }
+}
+
 void SharedMemory::UploadHotPages() {
   if (hot_upload_ranges_.empty()) {
     return;
   }
+  uploading_hot_pages_ = true;
   RequestRanges(hot_upload_ranges_.data(), hot_upload_ranges_.size());
+  uploading_hot_pages_ = false;
 }
 
 void SharedMemory::OnFrameEnd() {
@@ -737,12 +787,12 @@ void SharedMemory::OnFrameEnd() {
     return;
   }
   hot_upload_ranges_.clear();
-  // A block counts as still hot while it keeps being uploaded: once its watch
-  // is unarmed it can no longer be "dirtied", so upload activity is the only
-  // evidence left that the guest is still writing it.
+  // Only actual renderer demand keeps a hot block alive. Counting prefetch
+  // uploads as demand makes them feed themselves forever as a city streams.
   for (size_t block = 0; block < block_hot_.size(); ++block) {
-    const bool active = block_dirtied_this_frame_[block] ||
-                        (block_hot_[block] && block_uploaded_this_frame_[block]);
+    const bool was_hot = block_hot_[block] != 0;
+    const uint64_t requested = page_requested_this_frame_[block];
+    const bool active = block_dirtied_this_frame_[block] || (was_hot && requested);
     if (active) {
       if (block_dirty_streak_[block] < 255) {
         ++block_dirty_streak_[block];
@@ -758,7 +808,7 @@ void SharedMemory::OnFrameEnd() {
       // Hot blocks are simply dirty every frame: drop their valid bits so they
       // are uploaded once next frame. No mprotect is involved - they are not
       // armed. What was uploaded this frame becomes next frame's batch.
-      const uint64_t uploaded = page_uploaded_this_frame_[block];
+      const uint64_t uploaded = page_uploaded_this_frame_[block] & requested;
       system_page_flags_valid_[block].store(0, std::memory_order_release);
       system_page_flags_valid_and_gpu_written_[block].store(0, std::memory_order_release);
       invalidation_version_.fetch_add(1, std::memory_order_release);
@@ -780,7 +830,15 @@ void SharedMemory::OnFrameEnd() {
         }
       }
     }
+    if (was_hot && !hot) {
+      // Prefetched-but-unused pages have no armed watches. Invalidate them
+      // when cooling so their next real request uploads and arms them again.
+      system_page_flags_valid_[block].store(0, std::memory_order_release);
+      system_page_flags_valid_and_gpu_written_[block].store(0, std::memory_order_release);
+      invalidation_version_.fetch_add(1, std::memory_order_release);
+    }
     page_uploaded_this_frame_[block] = 0;
+    page_requested_this_frame_[block] = 0;
   }
 }
 
@@ -806,6 +864,7 @@ bool SharedMemory::RangeResident(uint32_t start, uint32_t length) const {
   }
   const uint32_t first_page = start >> page_size_log2_;
   const uint32_t last_page = (start + length - 1) >> page_size_log2_;
+  NotePagesRequested(first_page, last_page);
   // No lock: the bitmap is atomic, and this check is taken thousands of times
   // per frame by the draw path while guest threads hold the global critical
   // region for their own memory work. Taking it here made residency checking
@@ -830,6 +889,7 @@ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
   if (start >= kBufferSize || length > kBufferSize - start) return false;
   uint32_t first_page = start >> page_size_log2_;
   uint32_t last_page = (start + length - 1) >> page_size_log2_;
+  NotePagesRequested(first_page, last_page);
   // No lock: the bitmap is atomic, and this check is taken thousands of times
   // per frame by the draw path while guest threads hold the global critical
   // region for their own memory work. Taking it here made residency checking

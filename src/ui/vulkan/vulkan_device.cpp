@@ -171,6 +171,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   bool ext_KHR_portability_subset = false;
   bool ext_1_2_KHR_driver_properties = false;
+  // Required by the presenter frame streamer (REX_PRESENT_STREAM).
+  XE_UI_VULKAN_STRUCT_EXTENSION(KHR_external_memory_fd)
+  XE_UI_VULKAN_STRUCT_EXTENSION(KHR_external_semaphore_fd)
   if (get_physical_device_properties2_supported) {
     // #164. Must be enabled according to the specification if the physical
     // device is a portability subset one.
@@ -401,6 +404,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     const VkQueueFlags queue_unsupported_flags = ~queue_family_properties.queueFlags;
 
     if (!(queue_unsupported_flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
+      if (queue_family_index < first_queue_family_graphics_compute) {
+        // The queue the guest's work runs on is the one whose timestamps mean
+        // anything, so take its valid-bit count alongside choosing it.
+        device->properties_.timestampValidBits = queue_family_properties.timestampValidBits;
+      }
       first_queue_family_graphics_compute =
           std::min(queue_family_index, first_queue_family_graphics_compute);
     }
@@ -516,6 +524,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   // the state that the application must set for the draw depends on which
   // features are enabled.
 
+  device->properties_.timestampPeriod = properties.limits.timestampPeriod;
   device->properties_.apiVersion = properties.apiVersion;
   device->properties_.driverVersion = properties.driverVersion;
   device->properties_.vendorID = properties.vendorID;
@@ -802,6 +811,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   }
   if (device->extensions_.ext_KHR_swapchain) {
 #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
+  }
+  if (device->extensions_.ext_KHR_external_memory_fd ||
+      device->extensions_.ext_KHR_external_semaphore_fd) {
+    functions_loaded &= (dfn.vkGetMemoryFdKHR = PFN_vkGetMemoryFdKHR(
+                             ifn.vkGetDeviceProcAddr(device->device_, "vkGetMemoryFdKHR"))) !=
+                        nullptr;
+    functions_loaded &=
+        (dfn.vkGetSemaphoreFdKHR = PFN_vkGetSemaphoreFdKHR(
+             ifn.vkGetDeviceProcAddr(device->device_, "vkGetSemaphoreFdKHR"))) != nullptr;
   }
 #undef XE_UI_VULKAN_FUNCTION_PROMOTED
 

@@ -25,6 +25,8 @@
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
+
+#include <atomic>
 #include <rex/system/thread_state.h>
 
 // Bringup aid: when set, an indirect call to an unrecompiled address logs the
@@ -73,13 +75,37 @@ static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}", target);
 }
 
+/*
+ * How often a bctr/bctrl missed its module's own dispatch table.
+ *
+ * The generated code resolves an indirect call with one indexed load out of a
+ * flat per-module table and calls through it; this function is only reached
+ * when that load came back null, which means the target is in another module
+ * or is not a function at all. Counted to measure the cost of indirect
+ * dispatch: if a title runs a whole session without coming through here, its
+ * indirect calls are already a load and a call and there is nothing left to
+ * take out.
+ */
+static std::atomic<uint64_t> g_indirect_table_misses{0};
+static std::atomic<uint64_t> g_indirect_cross_module{0};
+
+void ReportIndirectDispatchStats() {
+  const uint64_t misses = g_indirect_table_misses.load(std::memory_order_relaxed);
+  const uint64_t cross = g_indirect_cross_module.load(std::memory_order_relaxed);
+  REXLOG_INFO("[INDIRECT] table misses={} of which resolved cross-module={} unresolved={}", misses,
+              cross, misses - cross);
+}
+
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
+  g_indirect_table_misses.fetch_add(1, std::memory_order_relaxed);
+
   FunctionDispatcher* dispatcher = GetBoundFunctionDispatcher();
   if (!dispatcher) {
     return &InvalidFunctionTrap;
   }
 
   if (PPCFunc* func = dispatcher->GetFunction(guest_address)) {
+    g_indirect_cross_module.fetch_add(1, std::memory_order_relaxed);
     return func;
   }
 

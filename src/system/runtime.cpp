@@ -282,6 +282,9 @@ void Runtime::Shutdown() {
     return;
   }
 
+  // What indirect dispatch cost this session, logged once at shutdown.
+  rex::runtime::ReportIndirectDispatchStats();
+
   if (instance_ == this) {
     instance_ = nullptr;
   }

@@ -1,0 +1,3 @@
+/home/jon/rexglue-vmx/tools/rayview/build/CMakeFiles/rayview.dir
+/home/jon/rexglue-vmx/tools/rayview/build/CMakeFiles/edit_cache.dir
+/home/jon/rexglue-vmx/tools/rayview/build/CMakeFiles/rebuild_cache.dir

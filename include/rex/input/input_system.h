@@ -26,6 +26,20 @@ class Window;
 
 namespace rex::input {
 
+/**
+ * While a system overlay owns the pad, the guest's polls read as "nothing
+ * pressed".
+ *
+ * A blade over a running game has to take the pad with it, or the same press
+ * that scrolls the overlay also moves the menu underneath it and the player
+ * backs out of two things at once. A free function and a file-static flag
+ * rather than a member, because InputSystem is constructed inside the SDK and
+ * held by ports through this header - widening it is an ABI break that does
+ * not announce itself.
+ */
+void SetGuestInputSuppressed(bool suppressed);
+bool GuestInputSuppressed();
+
 class InputSystem : public system::IInputSystem {
  public:
   explicit InputSystem(rex::ui::Window* window);
@@ -45,6 +59,9 @@ class InputSystem : public system::IInputSystem {
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* out_caps);
   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
+  /// The pad as it really is, ignoring GuestInputSuppressed. For the overlay
+  /// that did the suppressing and still has to read the button that closes it.
+  X_RESULT GetStateRaw(uint32_t user_index, X_INPUT_STATE* out_state);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
 

@@ -69,6 +69,10 @@ REXCVAR_DEFINE_BOOL(vulkan_pipeline_background_optimization, false, "GPU/Vulkan"
     "Create complete first-use pipelines without optimization, then optimize in background")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(vulkan_pipeline_state_hash_cache, true, "GPU/Vulkan",
+    "Skip rebuilding the pipeline state description from guest registers when a hash of\n"
+    "all its inputs matches the previous draw. Disable for diagnostic comparison.");
+
 REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
                     "Render tessellation as wireframe")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -1244,6 +1248,138 @@ bool VulkanPipelineCache::ConfigurePipeline(
     storage_write_request_cond_.notify_all();
   }
 
+  // Fast path: the exact inputs to GetCurrentStateDescription below, matched
+  // against a small MRU of recent draws. A match means the description would
+  // be rebuilt identically, so the whole register walk and the description
+  // hashtable lookup are skipped - the atomic reload still observes async
+  // placeholder-to-real hot-swaps.
+  const bool state_hash_cache = REXCVAR_GET(vulkan_pipeline_state_hash_cache);
+  PipelineStateInput state_input = {};
+  uint64_t state_input_hash = 0;
+  bool state_input_hash_computed = false;
+  uint32_t state_cache_index = UINT32_MAX;
+  if (state_hash_cache) {
+    ++pipeline_state_cache_lookups_;
+    state_input.vertex_shader = vertex_shader;
+    state_input.pixel_shader = pixel_shader;
+    state_input.render_pass_key = render_pass_key.key;
+    state_input.normalized_depth_control = normalized_depth_control.value;
+    state_input.normalized_color_mask = normalized_color_mask;
+    const RegisterFile& regs = register_file_;
+    // Only the render targets present in the render pass contribute to the
+    // description; the rest may hold stale per-draw garbage.
+    uint32_t render_pass_color_rts = render_pass_key.depth_and_color_used >> 1;
+    for (uint32_t rt = 0; rt < 4; ++rt) {
+      state_input.rb_blendcontrol[rt] =
+          (render_pass_color_rts & (UINT32_C(1) << rt))
+              ? regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[rt]).value
+              : 0;
+    }
+    state_input.host_primitive_type = uint32_t(primitive_processing_result.host_primitive_type);
+    state_input.host_vertex_shader_type =
+        uint32_t(primitive_processing_result.host_vertex_shader_type);
+    state_input.tessellation_mode = uint32_t(primitive_processing_result.tessellation_mode);
+    state_input.primitive_reset_enabled =
+        primitive_processing_result.host_primitive_reset_enabled ? 1 : 0;
+    state_input.pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>().value & 0x7FF;
+    state_input.misc = uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type) |
+                       (uint32_t(regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select) << 6) |
+                       (uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode) << 8) |
+                       (uint32_t(regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode) << 11) |
+                       (uint32_t(regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) << 14) |
+                       ((regs.Get<reg::RB_SURFACE_INFO>().surface_pitch ? 1u : 0u) << 15);
+    state_input.render_target_path = uint32_t(render_target_cache_.GetPath());
+    state_input.tessellation_wireframe = REXCVAR_GET(vulkan_tessellation_wireframe) ? 1 : 0;
+
+    auto input_matches = [this](const PipelineStateCacheEntry& entry,
+                                const PipelineStateInput& input) {
+      return entry.valid && !std::memcmp(&entry.input, &input, sizeof(input));
+    };
+    auto compute_input_hash = [&]() {
+      uint64_t hash = UINT64_C(0xCBF29CE484222325);
+      static_assert(sizeof(PipelineStateInput) % sizeof(uint64_t) == 0);
+      const uint64_t* words = reinterpret_cast<const uint64_t*>(&state_input);
+      for (size_t w = 0; w < sizeof(PipelineStateInput) / sizeof(uint64_t); ++w) {
+        hash = (hash ^ words[w]) * UINT64_C(0x100000001B3);
+      }
+      state_input_hash = hash;
+      state_input_hash_computed = true;
+    };
+    // The most recent entry is deep-compared directly; the hash is computed
+    // only when scanning the rest of the MRU, where it prefilters the deep
+    // compare.
+    if (pipeline_state_cache_last_ != UINT32_MAX &&
+        input_matches(pipeline_state_cache_[pipeline_state_cache_last_], state_input)) {
+      state_cache_index = pipeline_state_cache_last_;
+    } else {
+      compute_input_hash();
+      for (uint32_t i = 0; i < kPipelineStateCacheEntries; ++i) {
+        if (i != pipeline_state_cache_last_ &&
+            pipeline_state_cache_[i].input_hash == state_input_hash &&
+            input_matches(pipeline_state_cache_[i], state_input)) {
+          state_cache_index = i;
+          break;
+        }
+      }
+    }
+    if (state_cache_index != UINT32_MAX) {
+      PipelineStateCacheEntry& entry = pipeline_state_cache_[state_cache_index];
+      VkPipeline cached_pipeline = entry.pipeline->pipeline.load(std::memory_order_acquire);
+      const PipelineLayoutProvider* cached_pipeline_layout =
+          entry.pipeline->pipeline_layout.load(std::memory_order_acquire);
+      if (cached_pipeline != VK_NULL_HANDLE && cached_pipeline_layout != nullptr) {
+        entry.last_used = ++pipeline_state_cache_clock_;
+        pipeline_state_cache_last_ = state_cache_index;
+        ++pipeline_state_cache_hits_;
+        pipeline_out = cached_pipeline;
+        pipeline_layout_out = cached_pipeline_layout;
+        if (pipeline_handle_out) {
+          *pipeline_handle_out = const_cast<Pipeline*>(entry.pipeline);
+        }
+        return true;
+      }
+      // Still being created asynchronously - fall through to the full path and
+      // refresh the same slot.
+    }
+  }
+  // Records the pipeline the full path resolved for state_input, reusing the
+  // matched slot after an async fall-through or evicting the LRU entry.
+  auto record_state_cache = [&](const Pipeline* pipeline) {
+    if (!state_hash_cache) {
+      return;
+    }
+    if (!state_input_hash_computed) {
+      uint64_t hash = UINT64_C(0xCBF29CE484222325);
+      static_assert(sizeof(PipelineStateInput) % sizeof(uint64_t) == 0);
+      const uint64_t* words = reinterpret_cast<const uint64_t*>(&state_input);
+      for (size_t w = 0; w < sizeof(PipelineStateInput) / sizeof(uint64_t); ++w) {
+        hash = (hash ^ words[w]) * UINT64_C(0x100000001B3);
+      }
+      state_input_hash = hash;
+      state_input_hash_computed = true;
+    }
+    uint32_t index = state_cache_index;
+    if (index == UINT32_MAX) {
+      index = 0;
+      for (uint32_t i = 0; i < kPipelineStateCacheEntries; ++i) {
+        if (!pipeline_state_cache_[i].valid ||
+            pipeline_state_cache_[i].last_used < pipeline_state_cache_[index].last_used) {
+          index = i;
+          if (!pipeline_state_cache_[i].valid) {
+            break;
+          }
+        }
+      }
+    }
+    PipelineStateCacheEntry& entry = pipeline_state_cache_[index];
+    entry.input = state_input;
+    entry.input_hash = state_input_hash;
+    entry.last_used = ++pipeline_state_cache_clock_;
+    entry.pipeline = pipeline;
+    entry.valid = true;
+    pipeline_state_cache_last_ = index;
+  };
+
   PipelineDescription description;
   if (!GetCurrentStateDescription(vertex_shader, pixel_shader, primitive_processing_result,
                                   normalized_depth_control, normalized_color_mask, render_pass_key,
@@ -1302,6 +1438,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
     const PipelineLayoutProvider* found_pipeline_layout =
         it->second.pipeline_layout.load(std::memory_order_acquire);
     last_pipeline_ = &*it;
+    record_state_cache(&it->second);
     pipeline_out = found_pipeline;
     pipeline_layout_out = found_pipeline_layout;
     if (pipeline_handle_out) {
@@ -1374,6 +1511,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
     storage_write_request_cond_.notify_all();
   }
   last_pipeline_ = &pipeline;
+  record_state_cache(&pipeline.second);
   pipeline_out = pipeline.second.pipeline.load(std::memory_order_acquire);
   pipeline_layout_out = pipeline.second.pipeline_layout.load(std::memory_order_acquire);
   if (pipeline_handle_out) {
@@ -1387,6 +1525,14 @@ void VulkanPipelineCache::TakeDrawTimeCreationStats(uint64_t& count_out,
   count_out = draw_time_creation_count_.exchange(0, std::memory_order_relaxed);
   milliseconds_out =
       double(draw_time_creation_ns_.exchange(0, std::memory_order_relaxed)) / 1e6;
+}
+
+void VulkanPipelineCache::TakePipelineStateCacheStats(uint64_t& hits_out,
+                                                      uint64_t& lookups_out) {
+  hits_out = pipeline_state_cache_hits_;
+  lookups_out = pipeline_state_cache_lookups_;
+  pipeline_state_cache_hits_ = 0;
+  pipeline_state_cache_lookups_ = 0;
 }
 
 bool VulkanPipelineCache::IsCreatingPipelines() const {

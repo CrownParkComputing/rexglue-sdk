@@ -26,6 +26,7 @@ set(REXGLUE_INSTALL_TARGETS
 
 if(REXGLUE_USE_VULKAN)
     list(APPEND REXGLUE_INSTALL_TARGETS
+        rexgpu-native rexgpu-transition
         SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler  # glslang
         spirv-tools-headers
     )
@@ -140,6 +141,7 @@ endif()
 install(FILES
     src/ui/windowed_app_main_sdl.cpp
     src/ui/rex_app.cpp
+    src/ui/raylib_display.h
     DESTINATION ${CMAKE_INSTALL_DATADIR}/rexglue
 )
 

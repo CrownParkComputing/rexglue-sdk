@@ -21,11 +21,25 @@
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/presenter.h>
 
+#if REX_PLATFORM_ANDROID
+#include <adrenotools/driver.h>
+#include <dlfcn.h>
+#endif
+
 #if REX_PLATFORM_MAC
 #include "vulkan_moltenvk.h"
 #endif
 
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
+REXCVAR_DEFINE_STRING(vulkan_loader_library, "", "UI/Vulkan",
+                      "Vulkan runtime library to load instead of the platform default")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(vulkan_custom_driver_dir, "", "UI/Vulkan",
+                      "Android private directory containing a custom Vulkan driver")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(vulkan_hook_library_dir, "", "UI/Vulkan",
+                      "Android native library directory containing AdrenoTools hooks")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
 namespace ui {
@@ -75,7 +89,35 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     return nullptr;
   }
 #else
-  loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+  const std::string& requested_loader = REXCVAR_GET(vulkan_loader_library);
+#if REX_PLATFORM_ANDROID
+  const std::string& custom_driver_dir = REXCVAR_GET(vulkan_custom_driver_dir);
+  const std::string& hook_library_dir = REXCVAR_GET(vulkan_hook_library_dir);
+  if (!requested_loader.empty() && !custom_driver_dir.empty() && !hook_library_dir.empty()) {
+    void* custom_loader = adrenotools_open_libvulkan(
+        RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, hook_library_dir.c_str(),
+        custom_driver_dir.c_str(), requested_loader.c_str(), nullptr, nullptr);
+    if (custom_loader) {
+      vulkan_instance->loader_.Adopt(custom_loader);
+      loader_loaded = true;
+      REXLOG_INFO("Loaded custom Vulkan runtime {} through AdrenoTools", requested_loader);
+    } else {
+      REXLOG_WARN("AdrenoTools failed to load custom Vulkan runtime {}", requested_loader);
+    }
+  }
+#endif
+  if (!requested_loader.empty()) {
+    if (!loader_loaded)
+      loader_loaded = vulkan_instance->loader_.Load(requested_loader);
+    if (loader_loaded) {
+      REXLOG_INFO("Loaded requested Vulkan runtime from {}", requested_loader);
+    } else {
+      REXLOG_WARN("Failed to load requested Vulkan runtime {}; falling back to {}",
+                  requested_loader, platform::lib_names::kVulkanLoader);
+    }
+  }
+  if (!loader_loaded)
+    loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
   if (!loader_loaded) {
     REXLOG_ERROR("Failed to load {}", platform::lib_names::kVulkanLoader);
     return nullptr;

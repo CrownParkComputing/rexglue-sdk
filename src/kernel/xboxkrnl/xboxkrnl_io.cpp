@@ -226,7 +226,13 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
 
   *handle_out = handle;
   if (XFAILED(result)) {
-    REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
+    // A failed open is only diagnosable with the mode it was asked for. A
+    // title's own error file that never appears looks like a VFS fault; with
+    // the disposition and root handle visible it is usually a specific branch.
+    REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x} (access={:#x} disp={:#x} options={:#x} root={:#x})",
+                        target_path, result, (uint32_t)desired_access,
+                        (uint32_t)creation_disposition, (uint32_t)create_options,
+                        object_attrs ? (uint32_t)object_attrs->root_directory : 0u);
   } else {
     REXKRNL_IMPORT_RESULT("NtCreateFile", "{:#x} handle={:#x}", result, handle);
   }

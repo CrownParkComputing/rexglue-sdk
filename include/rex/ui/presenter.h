@@ -362,6 +362,9 @@ class Presenter {
   // multiple at the same time, and it should acquire the latest guest output
   // image via ConsumeGuestOutput.
   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
+
+  // [TEMP DIAG] PPM dump of the presented frame, shared by every GPU plugin.
+  void DumpPresentedFrame();
   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
     return guest_output_paint_config_;
   }

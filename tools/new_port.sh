@@ -166,8 +166,8 @@ tools/port_doctor.sh .        # ~6 minutes, no display, nobody at the keyboard
 
 Checks the generated code, then runs the title on each render path and each
 page-coherency setting and reports what each one costs. Every check exists
-because a title failed it and the cause took hours to find by hand: Shift 2
-loses its text on the \`host\` path, Hydro Thunder renders blocky tile-pattern
+because a title failed it and the cause took hours to find by hand: one title
+lost its text on the \`host\` path, Hydro Thunder renders blocky tile-pattern
 garbage with \`clear_memory_page_state=false\`, MCLA is 25% faster on \`host\`.
 Nothing about the symptom says which - compare the frames it captures.
 

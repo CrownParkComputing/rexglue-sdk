@@ -13,6 +13,10 @@
 
 #include <rex/cvar.h>
 
+// Side panels overlay (src/ui/overlay/side_panels.cpp)
+REXCVAR_DECLARE(bool, show_side_panels);
+REXCVAR_DECLARE(bool, show_fps);
+
 // Presenter
 REXCVAR_DECLARE(bool, present_render_pass_clear);
 REXCVAR_DECLARE(bool, show_debug_overlay);

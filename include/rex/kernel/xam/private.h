@@ -21,6 +21,10 @@ bool xeXamIsUIActive();
 
 rex::runtime::Export* RegisterExport_xam(rex::runtime::Export* export_entry);
 
+// Opens the local high-score page. Defined in xam_ui.cpp and called from
+// xam_user.cpp, where a title's request to enumerate stats arrives.
+uint32_t XamShowLocalHighScores();
+
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                       \
   void Register##n##Exports(rex::runtime::ExportResolver* export_resolver, \

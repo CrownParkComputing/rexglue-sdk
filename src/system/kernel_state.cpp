@@ -29,6 +29,7 @@
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/system/kernel_module.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/high_scores.h>
 #include <rex/system/function_dispatcher.h>
 #include <chrono>
 #include <thread>
@@ -319,6 +320,11 @@ void KernelState::LoadAchievementsData() {
     achievement_manager_.SetUnlockSavePath(user_root / "achievements" /
                                            fmt::format("{:08X}.toml", title_id()));
     achievement_manager_.LoadUnlockState();
+
+    // The local score board, keyed the same way so two titles cannot collide.
+    auto& scores = TitleHighScores();
+    scores.SetSavePath(user_root / "highscores" / fmt::format("{:08X}.toml", title_id()));
+    scores.Load();
   }
 }
 

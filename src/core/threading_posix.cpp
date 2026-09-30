@@ -399,9 +399,21 @@ class PosixConditionBase {
     auto predicate = [this, ticket] { return this->signaled_for(ticket); };
 #if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
-    int lock_result = pthread_mutex_lock(native_mutex);
+    // FIX: a zero timeout must be a non-blocking try_lock so worker threads
+    // busy-spinning on NtWaitForSingleObjectEx(_, _, _, &zero) don't pile up
+    // on a held mutex. Without this, every waiter blocks on pthread_mutex_lock
+    // even though the guest asked for no wait.
+    int lock_result;
+    if (timeout == std::chrono::milliseconds(0)) {
+      lock_result = pthread_mutex_trylock(native_mutex);
+    } else {
+      lock_result = pthread_mutex_lock(native_mutex);
+    }
     if (lock_result == EOWNERDEAD) {
       pthread_mutex_consistent(native_mutex);
+    } else if (lock_result == EBUSY) {
+      // Held by another thread; report timeout so caller retries.
+      return WaitResult::kTimeout;
     } else if (lock_result != 0) {
       return WaitResult::kFailed;
     }
@@ -428,6 +440,12 @@ class PosixConditionBase {
       if (timeout == std::chrono::milliseconds::max()) {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
+      } else if (timeout == std::chrono::milliseconds(0)) {
+        // Already verified the predicate under the lock; it was false at that
+        // moment. Since we got here without blocking the lock, the handle is
+        // genuinely unsignaled for us right now - return timeout so the caller
+        // can retry instead of waiting forever.
+        executed = false;
       } else {
         executed = cond_.wait_for(lock, timeout, predicate);
       }
@@ -713,16 +731,20 @@ class PosixCondition<Mutant> : public PosixConditionBase {
   bool Signal() override { return Release(); }
 
   bool Release() {
-    if (owner_ == std::this_thread::get_id() && count_ > 0) {
-      auto lock = std::unique_lock<std::mutex>(mutex_);
-      --count_;
-      // Free to be acquired by another thread
-      if (count_ == 0) {
-        NotifyAll();
-      }
-      return true;
+    auto lock = std::unique_lock<std::mutex>(mutex_);
+    if (count_ == 0) {
+      return false;  // Not acquired by anyone
     }
-    return false;
+    // FIX: in strict Win32 semantics only the owner can release; some titles
+    // call NtReleaseMutant from a thread that wasn't the owner and deadlock
+    // because nobody else can. Decrement to zero so waiters can wake up.
+    // Tracking the precise owner is still recorded in WaitCallback.
+    --count_;
+    if (count_ == 0) {
+      owner_ = std::thread::id();
+      NotifyAll();
+    }
+    return true;
   }
 
   void* native_handle() const override { return const_cast<std::mutex&>(mutex_).native_handle(); }

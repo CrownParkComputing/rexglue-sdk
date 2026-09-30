@@ -277,7 +277,7 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
   }
 
   if (XSUCCEEDED(result)) {
-    if (true || file->is_synchronous()) {
+    if (file->is_synchronous()) {
       // Synchronous.
       {
         uint32_t delay_us = REXCVAR_GET(io_async_read_delay_us);
@@ -322,24 +322,19 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
       // we have written the info out.
       signal_event = true;
     } else {
-      // TODO(benvanik): async.
-
-      // X_STATUS_PENDING if not returning immediately.
-      // XFile is waitable and signalled after each async req completes.
-      // reset the input event (->Reset())
-      /*xeNtReadFileState* call_state = new xeNtReadFileState();
-      XAsyncRequest* request = new XAsyncRequest(
-      state, file,
-      (XAsyncRequest::CompletionCallback)xeNtReadFileCompleted,
-      call_state);*/
-      // result = file->Read(buffer.guest_address(), buffer_length, byte_offset,
-      //                     request);
+      // FIX: real async I/O isn't implemented; signal the event immediately
+      // and return SUCCESS so workers spinning on NtWaitForSingleObjectEx don't
+      // deadlock. Games that expect overlapping completion are still getting
+      // synchronous behaviour, just inside the runtime rather than queued.
+      uint32_t bytes_read = 0;
+      result = file->Read(buffer.guest_address(), buffer_length,
+                          byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
+                          &bytes_read, apc_context.guest_address());
       if (io_status_block) {
-        io_status_block->status = X_STATUS_PENDING;
-        io_status_block->information = 0;
+        io_status_block->status = result;
+        io_status_block->information = bytes_read;
       }
-
-      result = X_STATUS_PENDING;
+      signal_event = true;
     }
   }
 
@@ -386,7 +381,7 @@ u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_r
   }
 
   if (XSUCCEEDED(result)) {
-    if (true || file->is_synchronous()) {
+    if (file->is_synchronous()) {
       // Synchronous.
       uint32_t bytes_read = 0;
       result = file->ReadScatter(segment_array.guest_address(), length,
@@ -473,7 +468,7 @@ u32 NtWriteFile_entry(u32 file_handle, u32 event_handle, u32 apc_routine, mapped
   // Execute write.
   if (XSUCCEEDED(result)) {
     // TODO(benvanik): async path.
-    if (true || file->is_synchronous()) {
+    if (file->is_synchronous()) {
       // Synchronous request.
       uint32_t bytes_written = 0;
       result = file->Write(buffer.guest_address(), buffer_length,

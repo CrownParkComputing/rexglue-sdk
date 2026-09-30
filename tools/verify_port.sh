@@ -38,7 +38,7 @@ for lib in librexruntime.so librexgpu-xenos.so; do
 done
 echo "runtime: $(sha256sum "$ROOT/out/build/linux/librexruntime.so" 2>/dev/null | cut -c1-12)  (sdk install: $(sha256sum "$SDK_LIB" 2>/dev/null | cut -c1-12))" | tee "$OUT/runtime.txt"
 HEADLESS_OUT="$OUT" \
-  GAME_ARGS="--gpu_frame_stats_path=$OUT/frames.csv --log_file=$OUT/run.log --log_max_file_size_mb=200" \
+  GAME_ARGS="--gpu_frame_stats_path=$OUT/frames.csv --log_file=$OUT/run.log --log_max_file_size_mb=200 --vsync_fps_cap=60 --vsync" \
   timeout $((SECS * 4 + 120)) "$ROOT/tools/headless_play.sh" "$SECS" "$SCRIPT" >"$OUT/play.log" 2>&1
 
 python3 - "$OUT" "$TITLE" <<'PY'

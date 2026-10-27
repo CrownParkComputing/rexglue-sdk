@@ -17,6 +17,7 @@
 #include <rex/types.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -93,6 +94,21 @@ u32 XamInputGetCapabilitiesEx_entry(u32 unk, u32 user_index, u32 flags,
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetstate(v=vs.85).aspx
 u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> input_state) {
+  // Cooperative-pause checkpoint: titles poll input every frame, so the
+  // frame-driving thread reaches this promptly after a menu pause request.
+  // Must run before InputSystem::GetState takes device_mutex_ - parking while
+  // holding it would deadlock the menu's own input reads.
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  // GetCurrentThread() asserts on non-kernel threads - IsInThread() returns
+  // null for them instead.
+  if (XThread::IsInThread()) {
+    auto* calling_thread = XThread::GetCurrentThread();
+    if (calling_thread->is_guest_thread()) {
+      calling_thread->ParkIfRequested();
+    }
+  }
+#endif
+
   // Games call this with a NULL state ptr, probably as a query.
   static int call_count = 0;
   if (++call_count <= 5) {

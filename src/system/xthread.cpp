@@ -1058,9 +1058,35 @@ uint32_t XThread::SelfSuspend() {
   suspend_cv_.wait(lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
   return previous;
 }
+
+void XThread::RequestPark() {
+  auto guest_thread = guest_object<X_KTHREAD>();
+  std::lock_guard<std::mutex> lock(suspend_mutex_);
+  guest_thread->suspend_count++;
+}
+
+void XThread::ReleasePark() {
+  auto guest_thread = guest_object<X_KTHREAD>();
+  {
+    std::lock_guard<std::mutex> lock(suspend_mutex_);
+    if (guest_thread->suspend_count > 0) {
+      --guest_thread->suspend_count;
+    }
+  }
+  suspend_cv_.notify_all();
+}
+
+void XThread::ParkIfRequested() {
+  auto guest_thread = guest_object<X_KTHREAD>();
+  std::unique_lock<std::mutex> lock(suspend_mutex_);
+  suspend_cv_.wait(lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
+}
 #endif
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval) {
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  ParkIfRequested();
+#endif
   int64_t timeout_ticks = interval;
   uint32_t timeout_ms;
   if (timeout_ticks > 0) {

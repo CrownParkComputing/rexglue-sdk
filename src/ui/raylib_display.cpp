@@ -188,8 +188,8 @@ PadState GatherPadState(int real_pad) {
 
 // The FPS cap steps this cycles through with left/right - matches rexmenu's
 // desktop menu, so the two aren't teaching two different vocabularies.
-constexpr int kFpsCapValues[] = {0, 30, 60, 120};
-constexpr int kFpsCapCount = 4;
+constexpr int kFpsCapValues[] = {0, 30, 60, 120, 240};
+constexpr int kFpsCapCount = 5;
 
 // vsync_fps_cap's REXCVAR_DEFINE_INT32 lives in command_processor.cpp, which
 // is compiled separately into each GPU plugin - not into rexui, where this

@@ -92,26 +92,39 @@ void HighScoresOverlayDialog::OnDraw(ImGuiIO& io) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    const auto scores = rex::system::TitleHighScores().List();
-    if (scores.empty()) {
+    const auto& board = rex::system::TitleHighScores();
+    const auto views = board.Views();
+    if (views.empty()) {
       // Said plainly rather than left blank: an empty panel reads as a page
       // that failed to load, and the honest answer is that nothing has been
       // scored yet.
       ImGui::TextDisabled("No scores yet.");
       ImGui::TextDisabled("Finish a game and it will appear here.");
-    } else if (ImGui::BeginTable("##scores", 3,
-                                 ImGuiTableFlags_SizingStretchProp |
-                                     ImGuiTableFlags_NoSavedSettings)) {
-      int rank = 1;
-      for (const auto& entry : scores) {
-        ImGui::TableNextColumn();
-        ImGui::TextColored(kRankColor, "%d", rank++);
-        ImGui::TableNextColumn();
-        ImGui::TextColored(kScoreColor, "%llu", static_cast<unsigned long long>(entry.score));
-        ImGui::TableNextColumn();
-        ImGui::TextDisabled("%s", entry.context.c_str());
+    } else {
+      for (const uint32_t view : views) {
+        if (views.size() > 1) {
+          ImGui::PushStyleColor(ImGuiCol_Text, style.header_text);
+          ImGui::Text("Board %u", view);
+          ImGui::PopStyleColor();
+          ImGui::Spacing();
+        }
+        if (ImGui::BeginTable((std::string("##scores") + std::to_string(view)).c_str(), 3,
+                              ImGuiTableFlags_SizingStretchProp |
+                                  ImGuiTableFlags_NoSavedSettings)) {
+          int rank = 1;
+          for (const auto& entry : board.List(view)) {
+            ImGui::TableNextColumn();
+            ImGui::TextColored(kRankColor, "%d", rank++);
+            ImGui::TableNextColumn();
+            ImGui::TextColored(kScoreColor, "%llu",
+                               static_cast<unsigned long long>(entry.score));
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", entry.context.c_str());
+          }
+          ImGui::EndTable();
+        }
+        ImGui::Spacing();
       }
-      ImGui::EndTable();
     }
 
     ImGui::SetWindowFontScale(1.0f);

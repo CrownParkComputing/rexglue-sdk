@@ -12,6 +12,8 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <rex/thread.h>
+#include <chrono>
 #include <algorithm>
 #include <atomic>
 #include <string>
@@ -30,6 +32,7 @@
 #include <rex/runtime.h>
 #include <rex/system/export_resolver.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
 #include <rex/ui/flags.h>
 
@@ -404,6 +407,19 @@ void AppendParam(string::StringBuffer* string_buffer, ppc_ptr_t<BufferScaling> p
 u32 VdCallGraphicsNotificationRoutines_entry(u32 unk0, ppc_ptr_t<BufferScaling> args_ptr) {
   assert_true(unk0 == 1);
 
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  // Cooperative-pause checkpoint: the guest calls this once per swap, so the
+  // frame-driving thread parks within a frame of a menu pause request.
+  // GetCurrentThread() asserts on non-kernel threads - IsInThread() is the
+  // null-returning guard.
+  if (XThread::IsInThread()) {
+    auto* calling_thread = XThread::GetCurrentThread();
+    if (calling_thread->is_guest_thread()) {
+      calling_thread->ParkIfRequested();
+    }
+  }
+#endif
+
   // TODO(benvanik): what does this mean, I forget:
   // callbacks get 0, r3, r4
 
@@ -437,6 +453,14 @@ u32 VdRetrainEDRAM_entry(u32 unk0, u32 unk1, u32 unk2, u32 unk3, u32 unk4, u32 u
   return 0;
 }
 
+REXCVAR_DEFINE_INT32(
+    gpu_max_frames_ahead, -1, "GPU",
+    "How many swaps the guest CPU may issue beyond what the GPU thread has executed before "
+    "VdSwap blocks. A real console's GPU keeps pace with the CPU; a recompiled title's CPU side "
+    "can outrun the emulated GPU by many frames and overwrite double-buffered dynamic vertex data "
+    "(PGR4 crowd skinning palettes, corner indicators) before the GPU consumes it. 0 makes VdSwap "
+    "wait for the GPU to drain completely; -1 disables the throttle.");
+
 void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                   mapped_void fetch_ptr,       // frontbuffer Direct3D 9 texture header fetch
                   mapped_void unk2,            // system writeback ptr
@@ -454,6 +478,37 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   assert(height);
 
   namespace xenos = rex::graphics::xenos;
+
+  // Throttle the CPU to the GPU thread: block until the backlog of unexecuted
+  // swaps is within gpu_max_frames_ahead. Bounded wait so a stalled GPU thread
+  // cannot hang the title.
+  {
+    static std::atomic<uint32_t> swaps_issued{0};
+    const uint32_t issued = swaps_issued.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const int32_t max_ahead = REXCVAR_GET(gpu_max_frames_ahead);
+    if (max_ahead >= 0) {
+      auto* graphics_system = REX_KERNEL_STATE()->emulator()->graphics_system();
+      if (graphics_system && (issued == 1 || graphics_system->SwapsProcessed() != 0)) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        static std::atomic<uint32_t> waits{0};
+        bool waited = false;
+        while (int32_t(issued - 1 - graphics_system->SwapsProcessed()) > max_ahead) {
+          waited = true;
+          if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+          }
+          rex::thread::Sleep(std::chrono::microseconds(200));
+        }
+        if (waited) {
+          uint32_t n = waits.fetch_add(1) + 1;
+          if (n == 1 || n == 100 || (n % 5000) == 0) {
+            REXKRNL_INFO("[VdSwap] throttled the guest to the GPU thread {} times (backlog limit {})",
+                         n, max_ahead);
+          }
+        }
+      }
+    }
+  }
 
   xenos::xe_gpu_texture_fetch_t gpu_fetch;
   memory::copy_and_swap_32_unaligned(&gpu_fetch,

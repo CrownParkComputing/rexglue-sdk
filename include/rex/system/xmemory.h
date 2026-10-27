@@ -322,6 +322,10 @@ class PhysicalHeap : public BaseHeap {
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
+  // Whether the host page holding this guest virtual address is currently
+  // write-watched in this heap. For diagnostics from the access-violation path.
+  bool IsGuestAddressWriteWatched(uint32_t virtual_address) const;
+
  protected:
   bool IsHostPageWriteWatched(uint32_t host_page_number) const override;
 

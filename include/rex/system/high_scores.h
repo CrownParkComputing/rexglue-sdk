@@ -24,6 +24,9 @@ namespace rex::system {
 
 struct HighScore {
   uint64_t score = 0;
+  /// The leaderboard view the score was submitted to; titles with one board
+  /// (most) leave it at 0.
+  uint32_t view = 0;
   /// What the score was made in - a mode name, a level, a lap. Free text
   /// because only the title knows what its score means.
   std::string context;
@@ -41,13 +44,21 @@ class HighScores {
   void Save() const;
 
   /// Records a score if it belongs on the board. Returns true when the board
-  /// changed, so a caller can say so.
-  bool Submit(uint64_t score, std::string context = {});
+  /// changed, so a caller can say so. Top-kMaxEntries is kept per view.
+  bool Submit(uint64_t score, uint32_t view, std::string context = {});
+  bool Submit(uint64_t score, std::string context = {}) {
+    return Submit(score, 0, std::move(context));
+  }
 
   /// Highest first, at most kMaxEntries.
   std::vector<HighScore> List() const;
+  /// One board only: the rows for a single view, highest first.
+  std::vector<HighScore> List(uint32_t view) const;
+  /// Every view that has at least one score, sorted by view id.
+  std::vector<uint32_t> Views() const;
 
   uint64_t Best() const;
+  uint64_t Best(uint32_t view) const;
 
   static constexpr size_t kMaxEntries = 10;
 

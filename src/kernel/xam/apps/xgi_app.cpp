@@ -12,7 +12,10 @@
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
 #include <rex/kernel/xam/private.h>
+#include <rex/system/high_scores.h>
 #include <rex/thread.h>
+
+#include <fmt/format.h>
 
 namespace rex {
 namespace kernel {
@@ -109,8 +112,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 20);
       uint32_t nonce_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
 
-      REXKRNL_DEBUG(
-          "XGISessionCreateImpl({:08X}, {:08X}, {}, {}, {:08X}, {:08X}, "
+      REXKRNL_INFO(
+          "[stats-probe] XGISessionCreateImpl({:08X}, {:08X}, {}, {}, {:08X}, {:08X}, "
           "{:08X})",
           session_ptr, flags, num_slots_public, num_slots_private, user_xuid, session_info_ptr,
           nonce_ptr);
@@ -123,7 +126,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      REXKRNL_DEBUG("[stats-probe] XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       return X_E_SUCCESS;
     }
@@ -136,7 +139,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
       bool is_local = xuid_array_ptr == 0;
 
-      REXKRNL_DEBUG("{}({:08X}, {}, {}, {:08X}, {:08X})",
+      REXKRNL_DEBUG("[stats-probe] {}({:08X}, {}, {}, {:08X}, {:08X})",
                     is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
       return X_E_SUCCESS;
@@ -148,7 +151,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      REXKRNL_DEBUG("[stats-probe] XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       return X_STATUS_SUCCESS;
     }
@@ -160,7 +163,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      REXKRNL_DEBUG("[stats-probe] XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       return X_E_SUCCESS;
     }
@@ -333,34 +336,138 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       // XamUserCreateStatsEnumerator. Nothing was ever submitted - submission
       // needs a live session - so the local board is shown over the top.
       rex::kernel::xam::XamShowLocalHighScores();
-      REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
+      REXKRNL_DEBUG("[stats-probe] XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                     xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
 
       return X_E_SUCCESS;
     }
     case 0x000B0025: {
-      assert_true(!buffer_length || buffer_length == 20);
+      assert_true(!buffer_length || buffer_length == 20 || buffer_length == 24);
 
       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
-      uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 4);
-      uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 12);
-      uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
+      uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 8);
+      uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 16);
+      uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 20);
 
-      REXKRNL_DEBUG("XSessionWriteStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
-                    views_ptr);
+      REXKRNL_INFO("[stats] XSessionWriteStats xuid={:016X} views={} len={}", xuid, num_views,
+                   buffer_length);
+      REXKRNL_DEBUG("[stats-probe] XSessionWriteStats len={} ({:08X}, {:016X}, {:08X}, {:08X})",
+                    buffer_length, obj_ptr, xuid, num_views, views_ptr);
+      REXKRNL_DEBUG("[stats-probe]   header=[{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}]",
+                    memory::load_and_swap<uint32_t>(buffer + 0),
+                    memory::load_and_swap<uint32_t>(buffer + 4),
+                    memory::load_and_swap<uint32_t>(buffer + 8),
+                    memory::load_and_swap<uint32_t>(buffer + 12),
+                    memory::load_and_swap<uint32_t>(buffer + 16),
+                    buffer_length >= 24 ? memory::load_and_swap<uint32_t>(buffer + 20) : 0);
+
+      // Scores land in the local board (<user_root>/highscores/<TID>.toml).
+      // Header is 24 bytes, 8-aligned: u32 obj_ptr @0, pad @4, u64 xuid @8,
+      // u32 num_views @16, u32 views_ptr @20. Then:
+      // views_ptr -> num_views x XSESSION_VIEW_PROPERTIES { u32 view_id;
+      // u32 num_properties; u32 properties_ptr } (12 bytes), then
+      // properties_ptr -> XUSER_PROPERTY { u32 property_id; pad4;
+      // XUSER_DATA value } (24 bytes; XUSER_DATA = u8 type @8, union @16:
+      // i32/i64/double/float/FILETIME, or { u32 cb; u32 ptr } for
+      // unicode/binary). Property ids 0x2xxxxxxx are the title's own INT64
+      // scores (0x1xxxxxxx INT32); GW1 submits one view (id 0) with its score
+      // as prop 0x20000003.
+      if (views_ptr && num_views && num_views <= 32) {
+        auto* views = memory_->TranslateVirtual(views_ptr);
+        for (uint32_t v = 0; v < num_views; ++v, views += 12) {
+          const uint32_t view_id = memory::load_and_swap<uint32_t>(views + 0);
+          const uint32_t num_props = memory::load_and_swap<uint32_t>(views + 4);
+          const uint32_t props_ptr = memory::load_and_swap<uint32_t>(views + 8);
+          REXKRNL_DEBUG("[stats-probe]   view={:08X} properties={} @{:08X}", view_id, num_props,
+                        props_ptr);
+          if (!props_ptr || num_props > 64) continue;
+          auto* props = memory_->TranslateVirtual(props_ptr);
+          if (num_props)
+            REXKRNL_DEBUG("[stats-probe]   prop0 raw=[{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}]",
+                          memory::load_and_swap<uint32_t>(props + 0),
+                          memory::load_and_swap<uint32_t>(props + 4),
+                          memory::load_and_swap<uint32_t>(props + 8),
+                          memory::load_and_swap<uint32_t>(props + 12),
+                          memory::load_and_swap<uint32_t>(props + 16),
+                          memory::load_and_swap<uint32_t>(props + 20));
+          for (uint32_t i = 0; i < num_props; ++i, props += 24) {
+            const uint32_t prop_id = memory::load_and_swap<uint32_t>(props + 0);
+            const uint32_t type = props[8];
+            switch (type) {
+              case 1:  // i32
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} i32={}", prop_id,
+                              memory::load_and_swap<int32_t>(props + 16));
+                break;
+              case 2:  // i64
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} i64={}", prop_id,
+                              memory::load_and_swap<int64_t>(props + 16));
+                break;
+              case 3:  // double
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} double={}", prop_id,
+                              memory::load_and_swap<double>(props + 16));
+                break;
+              case 5:  // float
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} float={}", prop_id,
+                              memory::load_and_swap<float>(props + 16));
+                break;
+              case 7:  // datetime (FILETIME)
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} datetime={:016X}", prop_id,
+                              memory::load_and_swap<uint64_t>(props + 16));
+                break;
+              case 4: {  // unicode: { u32 cbData; u32 pbData } @16
+                const uint32_t cb = memory::load_and_swap<uint32_t>(props + 16);
+                const uint32_t ptr = memory::load_and_swap<uint32_t>(props + 20);
+                std::string text;
+                if (ptr && cb && cb <= 512) {
+                  const auto* wchars = memory_->TranslateVirtual(ptr);
+                  for (uint32_t c = 0; c < cb / 2; ++c) {
+                    const uint16_t u = memory::load_and_swap<uint16_t>(wchars + c * 2);
+                    text += (u >= 0x20 && u < 0x7F) ? char(u) : '?';
+                  }
+                }
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} unicode={}bytes \"{}\"", prop_id, cb,
+                              text);
+                break;
+              }
+              case 6: {  // binary: { u32 cbData; u32 pbData } @16
+                const uint32_t cb = memory::load_and_swap<uint32_t>(props + 16);
+                const uint32_t ptr = memory::load_and_swap<uint32_t>(props + 20);
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} binary={}bytes @{:08X}", prop_id, cb,
+                              ptr);
+                break;
+              }
+              default:
+                REXKRNL_DEBUG("[stats-probe]     prop={:08X} type={} raw={:016X}", prop_id, type,
+                              memory::load_and_swap<uint64_t>(props + 16));
+                break;
+            }
+            if (type == 1 || type == 2) {
+              const int64_t value = type == 1
+                                        ? memory::load_and_swap<int32_t>(props + 16)
+                                        : memory::load_and_swap<int64_t>(props + 16);
+              if (value > 0) {
+                const bool changed = rex::system::TitleHighScores().Submit(
+                    static_cast<uint64_t>(value), view_id, fmt::format("prop {:08X}", prop_id));
+                REXKRNL_INFO("[stats] recorded view={} score={} (changed={})", view_id, value,
+                             changed);
+              }
+            }
+          }
+        }
+      }
 
       return X_E_SUCCESS;
     }
     case 0x000B0026: {
-      assert_true(!buffer_length || buffer_length == 20);
+      assert_true(!buffer_length || buffer_length == 20 || buffer_length == 24);
 
       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
-      uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 4);
-      uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 12);
-      uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
+      uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 8);
+      uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 16);
+      uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 20);
 
-      REXKRNL_DEBUG("XSessionFlushStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
-                    views_ptr);
+      REXKRNL_DEBUG("[stats-probe] XSessionFlushStats len={} ({:08X}, {:016X}, {:08X}, {:08X})",
+                   buffer_length, obj_ptr, xuid, num_views, views_ptr);
 
       return X_E_SUCCESS;
     }

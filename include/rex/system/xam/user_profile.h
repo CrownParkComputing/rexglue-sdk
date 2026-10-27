@@ -218,6 +218,13 @@ class UserProfile {
 
   uint64_t xuid() const { return xuid_; }
   std::string name() const { return name_; }
+  // Menu-driven rename. Length follows the console's 15-char gamertag cap so
+  // titles drawing the name into fixed buffers behave the same as retail.
+  void set_name(std::string name) {
+    if (name.empty()) name = "User";
+    if (name.size() > 15) name.resize(15);
+    name_ = std::move(name);
+  }
   uint32_t signin_state() const { return 1; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 

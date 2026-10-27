@@ -890,6 +890,13 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
     auto global_lock = global_critical_region_.Acquire();
 
     auto recomp = FindRecompiledModule(module->path());
+    if (!recomp) {
+      // The loader retains a resolved device path, while generated module
+      // registrations use the guest filename. Match the same registry entry
+      // on unload so its library and dispatch table can be loaded again.
+      // Reference: Alexbeav/rexglue-sdk 210432610aa5.
+      recomp = FindRecompiledModule(rex::string::utf8_find_name_from_guest_path(module->path()));
+    }
     if (recomp) {
       const std::string& key = recomp->guest_path;
       auto cleared_range = function_dispatcher_->UnregisterModule(key);

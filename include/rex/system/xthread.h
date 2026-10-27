@@ -378,6 +378,15 @@ class XThread : public XObject {
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
   // Increment suspend count and block until another thread resumes us.
   uint32_t SelfSuspend();
+  // Cooperative pause (guide-overlay style). RequestPark bumps the guest
+  // suspend count without touching the host thread; the thread parks itself the
+  // next time it reaches a kernel boundary that calls ParkIfRequested (waits,
+  // sleeps, per-frame input polls). Unlike preemptive thread_->Suspend this can
+  // never freeze a guest thread while it holds a host lock, so the requester
+  // (e.g. the UI thread) cannot deadlock against it.
+  void RequestPark();
+  void ReleasePark();
+  void ParkIfRequested();
 #endif
   X_STATUS Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval);
 

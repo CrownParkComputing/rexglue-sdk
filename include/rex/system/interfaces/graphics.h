@@ -66,6 +66,11 @@ class IGraphicsSystem {
     (void)ptr;
     (void)size_log2;
   }
+  // Swaps the GPU command processor has fully executed (see VdSwap's
+  // gpu_max_frames_ahead throttle). Plugins that cannot report it return 0,
+  // which disables the throttle.
+  virtual uint32_t SwapsProcessed() const { return 0; }
+
   virtual void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) {
     (void)ptr;
     (void)block_size_log2;

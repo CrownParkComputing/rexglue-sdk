@@ -23,6 +23,12 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <mutex>
+#include <limits>
+#include <cmath>
+#include <algorithm>
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <cstring>
 #include <set>
 #include <rex/logging.h>
 #include <rex/system/xthread.h>
@@ -39,6 +45,11 @@
 REXCVAR_DEFINE_BOOL(protect_zero, true, "Memory", "Protect the zero page from reads and writes")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(memory_log_write_faults, "", "Memory",
+                      "Diagnostic: physical address range (hex, start-end) whose guest write "
+                      "faults (GPU write watches) log a host backtrace, so the recompiled guest "
+                      "function that writes there can be identified. Logged once per distinct "
+                      "call stack, at most 80 times.");
 REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
                     "Protect released memory to prevent accesses");
 
@@ -579,6 +590,185 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
     return false;
   }
 
+  // Diagnostic: who writes here? (memory_log_write_faults=start-end, physical.)
+  if (is_write) {
+    const std::string& range_spec = REXCVAR_GET(memory_log_write_faults);
+    if (!range_spec.empty()) {
+      static uint32_t range_start = 0, range_end = 0;
+      static bool range_parsed = false;
+      if (!range_parsed) {
+        range_parsed = true;
+        const char* dash = std::strchr(range_spec.c_str(), '-');
+        range_start = uint32_t(std::strtoul(range_spec.c_str(), nullptr, 16));
+        range_end = dash ? uint32_t(std::strtoul(dash + 1, nullptr, 16)) : range_start + 0x1000;
+      }
+      uint32_t fault_physical = GetPhysicalAddress(virtual_address);
+      if (fault_physical >= range_start && fault_physical < range_end) {
+        static std::mutex log_mutex;
+        static std::set<uint64_t> seen_stacks;
+        static uint32_t logged = 0;
+        void* frames[24];
+        int frame_count = backtrace(frames, 24);
+        uint64_t stack_hash = 1469598103934665603ull;
+        for (int i = 1; i < frame_count && i < 8; ++i) {
+          stack_hash = (stack_hash ^ uint64_t(uintptr_t(frames[i]))) * 1099511628211ull;
+        }
+        std::lock_guard<std::mutex> lock(log_mutex);
+        // PGR4 crowd palette packer (sub_823DEDA8 called from 0x823DDB4C): at the
+        // first store of an entry, r6 -> pointer to the source 4x3 float matrices
+        // (stride 48), r8 = 48 * (entries done + 1), r4 = destination entry.
+        // Log the previous entry's source floats next to its packed output.
+        static uint32_t packer_logged = 0;
+        if (packer_logged < 400) {
+          if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+            if (auto* state = thread->thread_state()) {
+              if (auto* context = state->context()) {
+                if (static_cast<uint32_t>(context->lr) == 0x823DDB4Cu) {
+                  uint32_t r6 = context->r6.u32, r8 = context->r8.u32, r4 = context->r4.u32;
+                  const uint8_t* p6 = TranslateVirtual<const uint8_t*>(r6);
+                  uint32_t src_base = 0;
+                  if (p6) {
+                    uint32_t raw;
+                    std::memcpy(&raw, p6, 4);
+                    src_base = rex::byte_swap(raw);
+                  }
+                  if (src_base && r8 == 48) {
+                    // Whole-array scan: how many of the 420 persons have bone
+                    // translations spread over more than 20 units (a person is
+                    // ~1 unit) in the source floats right now, and in the other
+                    // (previous frame's) packed palette buffer.
+                    static uint32_t scans = 0;
+                    if (scans < 150) {
+                      ++scans;
+                      auto h2f = [](uint32_t h) -> float {
+                        uint32_t sgn = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                        float v;
+                        if (e == 0) v = std::ldexp(float(m) / 1024.0f, -14);
+                        else if (e == 31) v = m ? std::numeric_limits<float>::quiet_NaN()
+                                               : std::numeric_limits<float>::infinity();
+                        else v = std::ldexp(1.0f + float(m) / 1024.0f, int(e) - 15);
+                        return sgn ? -v : v;
+                      };
+                      const uint32_t other = (r4 == 0xAA70462Cu) ? 0xAA73A8B0u : 0xAA70462Cu;
+                      uint32_t src_bad = 0, pal_bad = 0, src_first = UINT32_MAX,
+                               pal_first = UINT32_MAX;
+                      std::string src_detail, pal_detail;
+                      for (uint32_t pi = 0; pi < 420; ++pi) {
+                        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+                        float pmn[3] = {1e30f, 1e30f, 1e30f}, pmx[3] = {-1e30f, -1e30f, -1e30f};
+                        std::string sd, pd;
+                        for (uint32_t b = 0; b < 22; ++b) {
+                          const uint8_t* sp =
+                              TranslateVirtual<const uint8_t*>(src_base + (pi * 22 + b) * 48);
+                          const uint8_t* pp =
+                              TranslateVirtual<const uint8_t*>(other + (pi * 22 + b) * 24);
+                          if (!sp || !pp) continue;
+                          float t[3], pt[3];
+                          bool fin = true, pfin = true;
+                          for (int k = 0; k < 3; ++k) {
+                            uint32_t raw;
+                            std::memcpy(&raw, sp + (9 + k) * 4, 4);
+                            raw = rex::byte_swap(raw);
+                            std::memcpy(&t[k], &raw, 4);
+                            uint32_t w;
+                            std::memcpy(&w, pp + 4 + k * 8, 4);
+                            pt[k] = h2f(rex::byte_swap(w) & 0xFFFF);
+                            fin &= std::isfinite(t[k]);
+                            pfin &= std::isfinite(pt[k]);
+                          }
+                          if (fin) for (int k = 0; k < 3; ++k) { mn[k] = std::min(mn[k], t[k]); mx[k] = std::max(mx[k], t[k]); }
+                          if (pfin) for (int k = 0; k < 3; ++k) { pmn[k] = std::min(pmn[k], pt[k]); pmx[k] = std::max(pmx[k], pt[k]); }
+                          if (pi == src_first || (src_first == UINT32_MAX && b < 22)) {
+                            sd += fmt::format(" [{:.0f} {:.0f} {:.0f}]", t[0], t[1], t[2]);
+                          }
+                          if (pi == pal_first || (pal_first == UINT32_MAX && b < 22)) {
+                            pd += fmt::format(" [{:.0f} {:.0f} {:.0f}]", pt[0], pt[1], pt[2]);
+                          }
+                        }
+                        bool sbad = mn[0] < 1e29f && (mx[0] - mn[0] > 20 || mx[1] - mn[1] > 20 || mx[2] - mn[2] > 20);
+                        bool pbad = pmn[0] < 1e29f && (pmx[0] - pmn[0] > 20 || pmx[1] - pmn[1] > 20 || pmx[2] - pmn[2] > 20);
+                        if (sbad) { ++src_bad; if (src_first == UINT32_MAX) { src_first = pi; src_detail = sd; } }
+                        if (pbad) { ++pal_bad; if (pal_first == UINT32_MAX) { pal_first = pi; pal_detail = pd; } }
+                      }
+                      REXSYS_WARN("[PALSCAN] fill {:08X} src_bad={} (first person {}:{}) | prev-pal {:08X} bad={} (first person {}:{})",
+                                  r4, src_bad, src_first, src_detail, other, pal_bad, pal_first, pal_detail);
+                    }
+                  }
+                  if (src_base && r8 >= 48 && false) {
+                    ++packer_logged;
+                    // The whole person: 22 bones of source floats (translation
+                    // = floats 9..11 of each 4x3) and the previous contents of
+                    // the destination entries (last frame's palette).
+                    // Entry k of this call: src_base + 48k, dst_base + 24k. Log the
+                    // whole person (22 bones) that entry k belongs to.
+                    const uint32_t k = (r8 - 48) / 48;
+                    const uint32_t person = k / 22;
+                    const uint32_t src_person = src_base + person * 22 * 48;
+                    const uint32_t dst_person = r4 - k * 24 + person * 22 * 24;
+                    std::string src_t, dst_t;
+                    for (int b = 0; b < 22; ++b) {
+                      const uint8_t* src = TranslateVirtual<const uint8_t*>(src_person + b * 48);
+                      const uint8_t* dst = TranslateVirtual<const uint8_t*>(dst_person + b * 24);
+                      if (src) {
+                        float t[3];
+                        for (int k = 0; k < 3; ++k) {
+                          uint32_t raw;
+                          std::memcpy(&raw, src + (9 + k) * 4, 4);
+                          raw = rex::byte_swap(raw);
+                          std::memcpy(&t[k], &raw, 4);
+                        }
+                        src_t += fmt::format(" [{:.4g} {:.4g} {:.4g}]", t[0], t[1], t[2]);
+                      }
+                      if (dst) {
+                        uint32_t w1, w3, w5;
+                        std::memcpy(&w1, dst + 4, 4);
+                        std::memcpy(&w3, dst + 12, 4);
+                        std::memcpy(&w5, dst + 20, 4);
+                        dst_t += fmt::format(" [{:04X} {:04X} {:04X}]", rex::byte_swap(w1) & 0xFFFF,
+                                             rex::byte_swap(w3) & 0xFFFF, rex::byte_swap(w5) & 0xFFFF);
+                      }
+                    }
+                    REXSYS_WARN("[PALETTE] person {} src {:08X} r8 {} dst {:08X} src_translations:{}",
+                                person, src_person, r8, dst_person, src_t);
+                    REXSYS_WARN("[PALETTE-PREV] person {} dst {:08X} prev_translation_halves:{}",
+                                person, dst_person, dst_t);
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (logged < 80 && seen_stacks.insert(stack_hash).second) {
+          ++logged;
+          std::string where;
+          for (int i = 1; i < frame_count && i < 14; ++i) {
+            Dl_info info;
+            if (dladdr(frames[i], &info) && info.dli_fname) {
+              const char* slash = std::strrchr(info.dli_fname, '/');
+              where += fmt::format(" {}+0x{:x}", slash ? slash + 1 : info.dli_fname,
+                                   uintptr_t(frames[i]) - uintptr_t(info.dli_fbase));
+              if (info.dli_sname) {
+                where += fmt::format("({})", info.dli_sname);
+              }
+            } else {
+              where += fmt::format(" {}", fmt::ptr(frames[i]));
+            }
+          }
+          uint32_t guest_lr = 0;
+          if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+            if (auto* state = thread->thread_state()) {
+              if (auto* context = state->context()) {
+                guest_lr = static_cast<uint32_t>(context->lr);
+              }
+            }
+          }
+          REXSYS_WARN("[WRITEFAULT] guest {:08X} phys {:08X} lr {:08X} stack:{}", virtual_address,
+                      fault_physical, guest_lr, where);
+        }
+      }
+    }
+  }
+
   // Access violation callbacks from the guest are triggered when the global
   // critical region mutex is locked once.
   //
@@ -638,10 +828,45 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
           reinterpret_cast<uintptr_t>(host_address) & ~(uintptr_t(host_page_size - 1));
       if (rex::memory::Protect(reinterpret_cast<void*>(page_base), host_page_size,
                                rex::memory::PageAccess::kReadWrite, nullptr)) {
-        REXSYS_WARN(
-            "Recovered stale physical page protection for guest {:08X} (host {:016X}, "
-            "guest_protect {:08X})",
-            virtual_address, static_cast<uint64_t>(page_base), guest_protect);
+        // The page was host-protected but no write watch claimed it, so the
+        // GPU shared-memory cache may still hold it as valid. Handing write
+        // access back silently would leave every later guest write to this
+        // page invisible to the GPU (stale dynamic vertex/index data: geometry
+        // that stops updating until something else happens to re-upload the
+        // page). Tell the invalidation callbacks the page is dirty so the next
+        // draw re-uploads it. The lock is held by the caller.
+        uint32_t physical_address = GetPhysicalAddress(virtual_address);
+        uint32_t guest_lr = 0;
+        if (auto* thread = rex::system::XThread::GetCurrentThread()) {
+          if (auto* state = thread->thread_state()) {
+            if (auto* context = state->context()) {
+              guest_lr = static_cast<uint32_t>(context->lr);
+            }
+          }
+        }
+        if (physical_address != UINT32_MAX) {
+          const uint32_t page_offset =
+              uint32_t(reinterpret_cast<uintptr_t>(host_address) - page_base);
+          const uint32_t physical_page = physical_address - page_offset;
+          for (auto invalidation_callback : physical_memory_invalidation_callbacks_) {
+            invalidation_callback->first(invalidation_callback->second, physical_page,
+                                         uint32_t(host_page_size), true);
+          }
+          REXSYS_WARN(
+              "Recovered stale physical page protection for guest {:08X} (host {:016X}, "
+              "guest_protect {:08X}, phys {:08X}, lr {:08X}); watched A/C/E={}{}{}; "
+              "invalidated for GPU",
+              virtual_address, static_cast<uint64_t>(page_base), guest_protect, physical_address,
+              guest_lr,
+              heaps_.vA0000000.IsGuestAddressWriteWatched(0xA0000000u + physical_address) ? 1 : 0,
+              heaps_.vC0000000.IsGuestAddressWriteWatched(0xC0000000u + physical_address) ? 1 : 0,
+              heaps_.vE0000000.IsGuestAddressWriteWatched(0xE0000000u + physical_address) ? 1 : 0);
+        } else {
+          REXSYS_WARN(
+              "Recovered stale physical page protection for guest {:08X} (host {:016X}, "
+              "guest_protect {:08X}); no physical address, GPU NOT invalidated",
+              virtual_address, static_cast<uint64_t>(page_base), guest_protect);
+        }
         return true;
       }
     }
@@ -2453,6 +2678,14 @@ std::unique_lock<std::recursive_mutex> PhysicalHeap::AcquireHostPageReconcileLoc
     lock = rex::thread::global_critical_region::AcquireDirect();
   }
   return lock;
+}
+
+bool PhysicalHeap::IsGuestAddressWriteWatched(uint32_t virtual_address) const {
+  if (virtual_address < heap_base_ || virtual_address - heap_base_ >= heap_size_) {
+    return false;
+  }
+  return IsHostPageWriteWatched((virtual_address - heap_base_ + host_address_offset()) /
+                                system_page_size_);
 }
 
 bool PhysicalHeap::IsHostPageWriteWatched(uint32_t host_page_number) const {

@@ -277,8 +277,12 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
   }
 
   if (XSUCCEEDED(result)) {
-    if (file->is_synchronous()) {
-      // Synchronous.
+    {
+      // Complete host reads inline for both guest handle modes, while retaining
+      // the guest asynchronous completion contract (IOSB/event/APC + PENDING).
+      // Splitting async handles into a separate success-only path dropped APCs
+      // and left FM4 rereading the same UI texture block indefinitely.
+      // This follows Xenia's common NtReadFile completion path.
       {
         uint32_t delay_us = REXCVAR_GET(io_async_read_delay_us);
         if (delay_us && !file->is_synchronous()) {
@@ -298,7 +302,7 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
       if ((uint32_t)apc_routine_ptr & ~1) {
-        if (apc_context && result == X_STATUS_SUCCESS) {
+        if (result == X_STATUS_SUCCESS) {
           auto thread = XThread::GetCurrentThread();
           uint32_t apc_routine = static_cast<uint32_t>(apc_routine_ptr) & ~1u;
           uint32_t apc_ctx = apc_context.guest_address();
@@ -314,26 +318,12 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
         }
       }
 
-      if (!file->is_synchronous() && result != X_STATUS_END_OF_FILE) {
+      if (!file->is_synchronous() && XSUCCEEDED(result)) {
         result = X_STATUS_PENDING;
       }
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
-      signal_event = true;
-    } else {
-      // FIX: real async I/O isn't implemented; signal the event immediately
-      // and return SUCCESS so workers spinning on NtWaitForSingleObjectEx don't
-      // deadlock. Games that expect overlapping completion are still getting
-      // synchronous behaviour, just inside the runtime rather than queued.
-      uint32_t bytes_read = 0;
-      result = file->Read(buffer.guest_address(), buffer_length,
-                          byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
-                          &bytes_read, apc_context.guest_address());
-      if (io_status_block) {
-        io_status_block->status = result;
-        io_status_block->information = bytes_read;
-      }
       signal_event = true;
     }
   }
@@ -465,48 +455,31 @@ u32 NtWriteFile_entry(u32 file_handle, u32 event_handle, u32 apc_routine, mapped
     result = X_STATUS_INVALID_HANDLE;
   }
 
-  // Execute write.
+  // The host file backend writes synchronously even when the guest opened
+  // an asynchronous handle. Complete the operation here in both cases:
+  // returning PENDING without issuing a write leaves saves waiting forever.
   if (XSUCCEEDED(result)) {
-    // TODO(benvanik): async path.
-    if (file->is_synchronous()) {
-      // Synchronous request.
-      uint32_t bytes_written = 0;
-      result = file->Write(buffer.guest_address(), buffer_length,
-                           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
-                           &bytes_written, apc_context.guest_address());
+    uint32_t bytes_written = 0;
+    result = file->Write(buffer.guest_address(), buffer_length,
+                         byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
+                         &bytes_written, apc_context.guest_address());
 
-      if (io_status_block) {
-        io_status_block->status = result;
-        io_status_block->information = static_cast<uint32_t>(bytes_written);
-      }
-
-      // Queue the APC callback. It must be delivered via the APC mechanism even
-      // though were are completing immediately.
-      // Low bit probably means do not queue to IO ports.
-      if ((uint32_t)apc_routine & ~1) {
-        if (apc_context) {
-          auto thread = XThread::GetCurrentThread();
-          thread->EnqueueApc(static_cast<uint32_t>(apc_routine) & ~1u, apc_context.guest_address(),
-                             io_status_block.guest_address(), 0);
-        }
-      }
-
-      if (!file->is_synchronous()) {
-        result = X_STATUS_PENDING;
-      }
-
-      // Mark that we should signal the event now. We do this after
-      // we have written the info out.
-      signal_event = true;
-    } else {
-      // X_STATUS_PENDING if not returning immediately.
-      result = X_STATUS_PENDING;
-
-      if (io_status_block) {
-        io_status_block->status = X_STATUS_PENDING;
-        io_status_block->information = 0;
-      }
+    if (io_status_block) {
+      io_status_block->status = result;
+      io_status_block->information = bytes_written;
     }
+
+    // An immediately completed asynchronous request still delivers its APC
+    // through the issuing thread. A null context is a valid callback argument.
+    if ((static_cast<uint32_t>(apc_routine) & ~1u) && XSUCCEEDED(result)) {
+      auto thread = XThread::GetCurrentThread();
+      thread->EnqueueApc(static_cast<uint32_t>(apc_routine) & ~1u,
+                         apc_context.guest_address(), io_status_block.guest_address(), 0);
+    }
+
+    signal_event = true;
+    REXKRNL_IMPORT_RESULT("NtWriteFile", "{:#x} (sync={}, bytes={}, event={:#x})", result,
+                          file->is_synchronous(), bytes_written, static_cast<uint32_t>(event_handle));
   }
 
   if (XFAILED(result) && io_status_block) {

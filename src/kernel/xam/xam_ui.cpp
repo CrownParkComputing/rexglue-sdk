@@ -289,35 +289,45 @@ u32 XamShowMessageBoxUI_entry(u32 user_index, mapped_wstring title_ptr, mapped_w
       uint32_t(user_index), title_ptr.guest_address(), text_ptr.guest_address(),
       uint32_t(button_count), button_ptrs.guest_address(), uint32_t(active_button), uint32_t(flags),
       result_ptr.guest_address(), overlapped.guest_address());
+
+  if (REXCVAR_GET(headless)) {
+    // Auto-pick the focused button.
+    auto run = [result_ptr, active_button]() -> X_RESULT {
+      if (result_ptr) {
+        *result_ptr = static_cast<uint32_t>(active_button);
+      }
+      return X_ERROR_SUCCESS;
+    };
+    return xeXamDispatchHeadless(run, overlapped.guest_address());
+  }
+
   std::string title;
-  if (title_ptr) {
+  if (title_ptr && REX_KERNEL_MEMORY()->TranslateVirtual(title_ptr.guest_address())) {
     title = rex::string::to_utf8(rex::memory::load_and_swap<std::u16string>(
         REX_KERNEL_MEMORY()->TranslateVirtual(title_ptr.guest_address())));
   } else {
     title = "";  // TODO(gibbed): default title based on flags?
   }
-  std::string text_str = text_ptr
+  std::string text_str = (text_ptr && REX_KERNEL_MEMORY()->TranslateVirtual(text_ptr.guest_address()))
                              ? rex::string::to_utf8(rex::memory::load_and_swap<std::u16string>(
                                    REX_KERNEL_MEMORY()->TranslateVirtual(text_ptr.guest_address())))
                              : "";
 
   std::vector<std::string> buttons;
-  for (uint32_t i = 0; i < button_count; ++i) {
-    uint32_t button_ptr = button_ptrs[i];
-    auto button = rex::memory::load_and_swap<std::u16string>(
-        REX_KERNEL_MEMORY()->TranslateVirtual(button_ptr));
-    buttons.push_back(rex::string::to_utf8(button));
+  if (button_ptrs) {
+    for (uint32_t i = 0; i < button_count; ++i) {
+      uint32_t button_ptr = button_ptrs[i];
+      if (button_ptr && REX_KERNEL_MEMORY()->TranslateVirtual(button_ptr)) {
+        auto button = rex::memory::load_and_swap<std::u16string>(
+            REX_KERNEL_MEMORY()->TranslateVirtual(button_ptr));
+        buttons.push_back(rex::string::to_utf8(button));
+      } else {
+        buttons.push_back("OK");
+      }
+    }
   }
 
   X_RESULT result;
-  if (REXCVAR_GET(headless)) {
-    // Auto-pick the focused button.
-    auto run = [result_ptr, active_button]() -> X_RESULT {
-      *result_ptr = static_cast<uint32_t>(active_button);
-      return X_ERROR_SUCCESS;
-    };
-    result = xeXamDispatchHeadless(run, overlapped.guest_address());
-  } else {
     // TODO(benvanik): setup icon states.
     switch (flags & 0xF) {
       case 0:
@@ -351,7 +361,6 @@ u32 XamShowMessageBoxUI_entry(u32 user_index, mapped_wstring title_ptr, mapped_w
       };
       result = xeXamDispatchHeadless(run, overlapped.guest_address());
     }
-  }
   return result;
 }
 

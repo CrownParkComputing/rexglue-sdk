@@ -482,6 +482,13 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_conte
   immediate_drawer_->End();
 }
 
+std::unique_ptr<ImmediateTexture> ImGuiDrawer::CreateTexture(
+    uint32_t width, uint32_t height, ImmediateTextureFilter filter, bool is_repeated,
+    const uint8_t* data) {
+  if (!immediate_drawer_) return nullptr;
+  return immediate_drawer_->CreateTexture(width, height, filter, is_repeated, data);
+}
+
 ImGuiIO& ImGuiDrawer::GetIO() {
   ImGui::SetCurrentContext(internal_state_);
   return ImGui::GetIO();

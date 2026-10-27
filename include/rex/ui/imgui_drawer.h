@@ -41,6 +41,10 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   ImGuiIO& GetIO();
 
+  std::unique_ptr<ImmediateTexture> CreateTexture(uint32_t width, uint32_t height,
+                                                  ImmediateTextureFilter filter,
+                                                  bool is_repeated, const uint8_t* data);
+
   // Per-overlay styling, patched by the consumer in OnConfigureStyle.
   Style& style() { return style_; }
   const Style& style() const { return style_; }

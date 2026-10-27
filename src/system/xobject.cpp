@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
+#include <atomic>
 #include <vector>
 
 #include <rex/chrono/clock.h>
@@ -200,13 +202,65 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   }
 }
 
+
+namespace {
+// Diagnostic: how often guest waits with a finite timeout actually time out.
+// A title whose worker threads run slower than on the console tends to show
+// up here first - it proceeds after the timeout with half-finished data.
+void NoteWaitOutcome(bool finite_timeout, uint32_t timeout_ms, bool timed_out) {
+  static std::atomic<uint32_t> finite{0}, infinite{0}, timeouts{0}, timeout_ms_sum{0};
+  static std::atomic<uint64_t> next_report{0};
+  if (finite_timeout) {
+    finite.fetch_add(1, std::memory_order_relaxed);
+    if (timed_out) {
+      timeouts.fetch_add(1, std::memory_order_relaxed);
+      timeout_ms_sum.fetch_add(timeout_ms, std::memory_order_relaxed);
+    }
+  } else {
+    infinite.fetch_add(1, std::memory_order_relaxed);
+  }
+  const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count());
+  uint64_t due = next_report.load(std::memory_order_relaxed);
+  if (now_ms >= due && next_report.compare_exchange_strong(due, now_ms + 2000)) {
+    const uint32_t t = timeouts.exchange(0);
+    REXSYS_INFO("[WAITS] {} finite-timeout waits/2s, {} timed out (avg requested {} ms), {} infinite",
+                finite.exchange(0), t, t ? timeout_ms_sum.exchange(0) / t : 0,
+                infinite.exchange(0));
+  }
+}
+}  // namespace
+
+// Cooperative-pause checkpoint: a guest thread parks here before blocking on a
+// wait/sleep, at a boundary where it holds no host locks. See
+// XThread::RequestPark - the menu overlay pauses the title this way instead of
+// preemptively suspending host threads, which could freeze one mid-lock and
+// deadlock the UI.
+void ParkGuestThreadIfRequested() {
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  // Host threads call XObject::Wait too (e.g. module_thread_ waits on the main
+  // guest thread) - XThread::GetCurrentThread() asserts on non-kernel threads,
+  // so guard with IsInThread() which returns null for them instead.
+  if (XThread::IsInThread()) {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread->is_guest_thread()) {
+      thread->ParkIfRequested();
+    }
+  }
+#endif
+}
+
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
                        uint64_t* opt_timeout) {
+  ParkGuestThreadIfRequested();
   auto wait_handle = GetWaitHandle();
   if (!wait_handle) {
     // Object doesn't support waiting.
     return X_STATUS_SUCCESS;
   }
+
+  // (DEBUG logging removed)
 
   auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
@@ -215,6 +269,8 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
   XThread::CheckTitleTermination();
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
   XThread::CheckTitleTermination();
+  NoteWaitOutcome(opt_timeout != nullptr, opt_timeout ? uint32_t(timeout_ms.count()) : 0,
+                  result == rex::thread::WaitResult::kTimeout);
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
       WaitCallback();
@@ -235,6 +291,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, uint32_t wait_reason,
                                 uint32_t processor_mode, uint32_t alertable,
                                 uint64_t* opt_timeout) {
+  ParkGuestThreadIfRequested();
   auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
@@ -262,6 +319,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
 X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_type,
                                uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout) {
+  ParkGuestThreadIfRequested();
   std::vector<rex::thread::WaitHandle*> wait_handles(count);
   for (size_t i = 0; i < count; ++i) {
     wait_handles[i] = objects[i]->GetWaitHandle();
@@ -277,6 +335,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
     auto result =
         rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
     XThread::CheckTitleTermination();
+    NoteWaitOutcome(opt_timeout != nullptr, opt_timeout ? uint32_t(timeout_ms.count()) : 0,
+                    result.first == rex::thread::WaitResult::kTimeout);
     switch (result.first) {
       case rex::thread::WaitResult::kSuccess:
         objects[result.second]->WaitCallback();
@@ -298,6 +358,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
     auto result =
         rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
     XThread::CheckTitleTermination();
+    NoteWaitOutcome(opt_timeout != nullptr, opt_timeout ? uint32_t(timeout_ms.count()) : 0,
+                    result == rex::thread::WaitResult::kTimeout);
     switch (result) {
       case rex::thread::WaitResult::kSuccess:
         for (uint32_t i = 0; i < count; i++) {

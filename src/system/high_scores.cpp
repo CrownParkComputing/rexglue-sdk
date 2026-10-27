@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 
 #include <fmt/format.h>
 #include <toml++/toml.h>
@@ -38,6 +39,7 @@ void HighScores::Load() {
         if (!entry) continue;
         HighScore score;
         score.score = (*entry)["score"].value_or<uint64_t>(0);
+        score.view = (*entry)["view"].value_or<uint32_t>(0);
         score.context = (*entry)["context"].value_or<std::string>("");
         score.filetime = (*entry)["filetime"].value_or<uint64_t>(0);
         if (score.score) loaded.push_back(std::move(score));
@@ -54,7 +56,14 @@ void HighScores::Load() {
 
   std::sort(loaded.begin(), loaded.end(),
             [](const HighScore& a, const HighScore& b) { return a.score > b.score; });
-  if (loaded.size() > kMaxEntries) loaded.resize(kMaxEntries);
+  {
+    std::vector<HighScore> kept;
+    kept.reserve(loaded.size());
+    std::map<uint32_t, size_t> counts;
+    for (const auto& entry : loaded)
+      if (counts[entry.view]++ < kMaxEntries) kept.push_back(entry);
+    loaded = std::move(kept);
+  }
 
   std::lock_guard lock(mutex_);
   scores_ = std::move(loaded);
@@ -85,8 +94,8 @@ void HighScores::Save() const {
 
   std::string content = "# Local high scores - managed by the ReXGlue runtime\n\n";
   for (const auto& score : scores) {
-    content += fmt::format("[[score]]\nscore = {}\nfiletime = {}\ncontext = \"{}\"\n\n", score.score,
-                           score.filetime, score.context);
+    content += fmt::format("[[score]]\nscore = {}\nview = {}\nfiletime = {}\ncontext = \"{}\"\n\n",
+                           score.score, score.view, score.filetime, score.context);
   }
 
   // Temp and rename, so an interrupted write cannot leave a half-written board.
@@ -106,7 +115,7 @@ void HighScores::Save() const {
   }
 }
 
-bool HighScores::Submit(uint64_t score, std::string context) {
+bool HighScores::Submit(uint64_t score, uint32_t view, std::string context) {
   if (!score) {
     return false;
   }
@@ -115,24 +124,59 @@ bool HighScores::Submit(uint64_t score, std::string context) {
     // The same score twice is the same run reported twice, which is what a
     // title flushing its stats on both pause and game over looks like.
     for (const auto& existing : scores_) {
-      if (existing.score == score && existing.context == context) {
+      if (existing.view == view && existing.score == score && existing.context == context) {
         return false;
       }
     }
-    if (scores_.size() >= kMaxEntries && score <= scores_.back().score) {
+    // The cap is per view: a board's worst score only drops when a better one
+    // for that same board arrives.
+    uint64_t lowest_in_view = ~0ull;
+    size_t in_view = 0;
+    for (const auto& existing : scores_) {
+      if (existing.view == view) {
+        ++in_view;
+        lowest_in_view = std::min(lowest_in_view, existing.score);
+      }
+    }
+    if (in_view >= kMaxEntries && score <= lowest_in_view) {
       return false;
     }
     HighScore entry;
     entry.score = score;
+    entry.view = view;
     entry.context = std::move(context);
     entry.filetime = 0;
     scores_.push_back(std::move(entry));
     std::sort(scores_.begin(), scores_.end(),
               [](const HighScore& a, const HighScore& b) { return a.score > b.score; });
-    if (scores_.size() > kMaxEntries) scores_.resize(kMaxEntries);
+    std::vector<HighScore> kept;
+    kept.reserve(scores_.size());
+    std::map<uint32_t, size_t> counts;
+    for (const auto& existing : scores_) {
+      if (counts[existing.view]++ < kMaxEntries) kept.push_back(existing);
+    }
+    scores_ = std::move(kept);
   }
   Save();
   return true;
+}
+
+std::vector<HighScore> HighScores::List(uint32_t view) const {
+  std::lock_guard lock(mutex_);
+  std::vector<HighScore> out;
+  for (const auto& entry : scores_)
+    if (entry.view == view) out.push_back(entry);
+  return out;
+}
+
+std::vector<uint32_t> HighScores::Views() const {
+  std::lock_guard lock(mutex_);
+  std::vector<uint32_t> views;
+  for (const auto& entry : scores_)
+    if (std::find(views.begin(), views.end(), entry.view) == views.end())
+      views.push_back(entry.view);
+  std::sort(views.begin(), views.end());
+  return views;
 }
 
 std::vector<HighScore> HighScores::List() const {
@@ -143,6 +187,14 @@ std::vector<HighScore> HighScores::List() const {
 uint64_t HighScores::Best() const {
   std::lock_guard lock(mutex_);
   return scores_.empty() ? 0 : scores_.front().score;
+}
+
+uint64_t HighScores::Best(uint32_t view) const {
+  std::lock_guard lock(mutex_);
+  uint64_t best = 0;
+  for (const auto& entry : scores_)
+    if (entry.view == view) best = std::max(best, entry.score);
+  return best;
 }
 
 HighScores& TitleHighScores() {

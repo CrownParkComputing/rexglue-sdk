@@ -83,7 +83,8 @@ void UnregisterBind(std::string_view name);
 bool InvokeBind(std::string_view name);
 
 /**
- * Process a key-down event against all registered binds.
+ * Process a key-down event against all registered binds. Auto-repeated
+ * key-down events are ignored so toggles fire once per physical press.
  *
  * Looks up each bind's current key from its CVAR, parses it, and compares
  * against the event's virtual key. If a match is found, the bind's callback

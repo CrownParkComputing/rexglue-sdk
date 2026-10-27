@@ -231,6 +231,7 @@ bool InvokeBind(std::string_view name) {
 }
 
 bool ProcessKeyEvent(KeyEvent& e) {
+  if (e.prev_state()) return false;
   std::lock_guard lock(g_binds_mutex);
   for (auto& entry : g_binds) {
     if (!entry.callback)

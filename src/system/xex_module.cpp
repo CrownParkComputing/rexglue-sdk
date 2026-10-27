@@ -460,7 +460,10 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length, bool use_dev_k
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // XEX images share this heap. Resetting it here loses the allocation
+  // records of still-loaded images, breaking unload/reload of facade DLLs.
+  // Each image reader reserves its own exact range with AllocFixed.
+  // Reference: Alexbeav/rexglue-sdk 210432610aa5.
 
   aes_decrypt_buffer(use_dev_key ? xe_xex2_devkit_key : xe_xex2_retail_key,
                      reinterpret_cast<const uint8_t*>(xex_security_info()->aes_key), 16,

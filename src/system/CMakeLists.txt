@@ -41,6 +41,9 @@ set(REXSYSTEM_SOURCES
     lzx.cpp
     guest_memory_watch.cpp
     import_trace.cpp
+    reach_trace.cpp
+    snapshot.cpp
+    tee.cpp
     mmio_handler.cpp
     map_parser.cpp
     module.cpp

@@ -81,6 +81,11 @@ ReXApp::ReXApp(ui::WindowedAppContext& ctx, std::string_view name, PPCImageInfo 
                std::string_view usage)
     : WindowedApp(ctx, name, usage), ppc_info_(ppc_info) {}
 
+std::unique_ptr<ui::SidePanelsDialog> ReXApp::CreateSidePanels() {
+  return std::make_unique<ui::SidePanelsDialog>(imgui_drawer_.get(), immediate_drawer_.get(),
+                                              frame_stats_provider_);
+}
+
 std::unique_ptr<ui::ImGuiDialog> ReXApp::CreateAchievementsOverlay() {
   if (!runtime_ || !runtime_->kernel_state() || !imgui_drawer_ || !immediate_drawer_) {
     return nullptr;
@@ -476,67 +481,69 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
   // A handheld has no F3. Starting the overlay visible is the only way to see
   // the frame rate on a device, so it is a cvar as well as a keybind.
-  if (REXCVAR_GET(show_debug_overlay)) {
+  if (EnableDevOverlays() && REXCVAR_GET(show_debug_overlay)) {
     debug_overlay_ =
         std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
   }
   // RetroRecomp side rails + FPS readout, shared by every title. Created
-  // unconditionally; it reads show_side_panels / show_fps for its own
-  // visibility and registers F8 / F10. Auto-adds to the imgui drawer.
+  // through the CreateSidePanels hook so a title with its own UI can return
+  // nullptr and drop the bezel entirely.
   if (imgui_drawer_) {
-    side_panels_ =
-        std::make_unique<ui::SidePanelsDialog>(imgui_drawer_.get(), immediate_drawer_.get(),
-                                               frame_stats_provider_);
+    side_panels_ = CreateSidePanels();
   }
-  rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
-    if (debug_overlay_) {
-      debug_overlay_.reset();
-    } else {
-      debug_overlay_ =
-          std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
-    }
-  });
-  rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
-    if (console_overlay_) {
-      console_overlay_.reset();
-    } else {
-      console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
-    }
-  });
-  rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
-    if (settings_overlay_) {
-      settings_overlay_.reset();
-    } else {
-      settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
-    }
-  });
-  rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements overlay", [this] {
-    if (achievements_overlay_) {
-      achievements_overlay_.reset();
-    } else {
-      // One page of the blade at a time; two overlapping centred panels is
-      // just an unreadable pile.
-      high_scores_overlay_.reset();
-      achievements_overlay_ = CreateAchievementsOverlay();
-    }
-  });
-  // An open-only action with no key of its own, for the kernel to call when a
-  // title asks to read its leaderboard. The player's F6 toggles; a title
-  // polling XUserReadStats every frame must not, or the page flickers.
-  rex::ui::RegisterBind("bind_high_scores_open", "", "Open high scores overlay", [this] {
-    if (!high_scores_overlay_) {
-      achievements_overlay_.reset();
-      high_scores_overlay_ = CreateHighScoresOverlay();
-    }
-  });
-  rex::ui::RegisterBind("bind_high_scores", "F6", "Toggle high scores overlay", [this] {
-    if (high_scores_overlay_) {
-      high_scores_overlay_.reset();
-    } else {
-      achievements_overlay_.reset();
-      high_scores_overlay_ = CreateHighScoresOverlay();
-    }
-  });
+  if (EnableDevOverlays()) {
+    rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
+      if (debug_overlay_) {
+        debug_overlay_.reset();
+      } else {
+        debug_overlay_ =
+            std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+      }
+    });
+    rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
+      if (console_overlay_) {
+        console_overlay_.reset();
+      } else {
+        console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
+      }
+    });
+    rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
+      if (settings_overlay_) {
+        settings_overlay_.reset();
+      } else {
+        settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
+      }
+    });
+  }
+  if (EnableAchievementPages()) {
+    rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements overlay", [this] {
+      if (achievements_overlay_) {
+        achievements_overlay_.reset();
+      } else {
+        // One page of the blade at a time; two overlapping centred panels is
+        // just an unreadable pile.
+        high_scores_overlay_.reset();
+        achievements_overlay_ = CreateAchievementsOverlay();
+      }
+    });
+    // An open-only action with no key of its own, for the kernel to call when a
+    // title asks to read its leaderboard. The player's F6 toggles; a title
+    // polling XUserReadStats every frame must not, or the page flickers.
+    rex::ui::RegisterBind("bind_high_scores_open", "", "Open high scores overlay", [this] {
+      if (!high_scores_overlay_) {
+        achievements_overlay_.reset();
+        high_scores_overlay_ = CreateHighScoresOverlay();
+      }
+    });
+    rex::ui::RegisterBind("bind_high_scores", "F6", "Toggle high scores overlay", [this] {
+      if (high_scores_overlay_) {
+        high_scores_overlay_.reset();
+      } else {
+        achievements_overlay_.reset();
+        high_scores_overlay_ = CreateHighScoresOverlay();
+      }
+    });
+  }
 
   OnCreateDialogs(imgui_drawer_.get());
 }

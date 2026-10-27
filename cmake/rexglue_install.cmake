@@ -27,6 +27,7 @@ set(REXGLUE_INSTALL_TARGETS
 if(REXGLUE_USE_VULKAN)
     list(APPEND REXGLUE_INSTALL_TARGETS
         rexgpu-native rexgpu-transition
+        rexshader-translator  # rex::shader-translator, linked by native device layers
         SPIRV glslang MachineIndependent GenericCodeGen OSDependent OGLCompiler  # glslang
         spirv-tools-headers
     )
@@ -86,6 +87,7 @@ endif()
 # Install public headers
 install(DIRECTORY include/rex
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    PATTERN "native_graphics" EXCLUDE
 )
 
 # Install generated version header
@@ -93,6 +95,17 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/include/rex/version.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rex
 )
+
+# glslang's SPIR-V builder headers: the public rex::shader-translator header
+# spirv_builder.h includes <SPIRV/SpvBuilder.h>, and rex::SPIRV exports the
+# SDK include dir. glslang's own install is skipped (SKIP_GLSLANG_INSTALL).
+if(REXGLUE_USE_VULKAN)
+    install(DIRECTORY thirdparty/glslang/SPIRV/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/SPIRV
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.hpp11"
+        PATTERN "CInterface" EXCLUDE
+    )
+endif()
 
 # Install vendored header-only library headers
 install(DIRECTORY thirdparty/disruptorplus/include/
@@ -232,3 +245,6 @@ install(CODE [[
     message(STATUS "Registered rexglue in CMake user package registry")
     message(STATUS "  -> ${CMAKE_INSTALL_PREFIX}")
 ]])
+
+# Optional audited graphics helpers and standalone native backend entry point.
+include("${CMAKE_CURRENT_LIST_DIR}/rexglue_native_graphics_install.cmake")

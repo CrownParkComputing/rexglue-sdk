@@ -39,7 +39,7 @@ async_shader_compilation = false
 # fixed, that was 25% of the frame (66 ms -> 49 ms, same scene). Split/Second
 # and Ridge Racer Unbounded need FSI for their colour grade - check a matched
 # pair of frames from one spot on both paths before believing either.
-render_target_path_vulkan = "host"
+render_target_path_vulkan = "fsi"
 
 # SAFETY vs SPEED. Do not wipe shared-memory page-valid state at every frame end.
 # Hydro Thunder needed this back ON: with it off, textures intermittently render
@@ -52,7 +52,7 @@ render_target_path_vulkan = "host"
 # the whole CPU-visible working set is re-uploaded next frame - measured at
 # ~190 MB per two seconds for ~1 MB of actual guest writes. Worth 2.9 -> 10 FPS
 # on Midnight Club LA. Turn it back on if geometry renders stale.
-clear_memory_page_state = false
+clear_memory_page_state = true
 
 # Treat a 256 KB block of shared memory dirtied this many frames running as
 # permanently dirty: stop arming its guest write watch and re-upload it once per
@@ -64,7 +64,7 @@ clear_memory_page_state = false
 # The trade: draws late in a frame do not see writes the guest made after that
 # frame's first upload of a hot page. This is the first thing to turn off if
 # geometry flickers or lags a frame.
-gpu_hot_page_frames = 3
+gpu_hot_page_frames = 0
 
 # Answer the guest's on-screen keyboard from configuration instead of showing a
 # dialog. Titles use that keyboard for profile and gamertag names, and typing

@@ -1,9 +1,11 @@
 # vupkd3d128 dest, src, type
-# type:
-#   0 = PACK_TYPE_D3DCOLOR
-#   1 = PACK_TYPE_SHORT_2
-#   3 = PACK_TYPE_FLOAT16_2
-#   5 = PACK_TYPE_FLOAT16_4
+#
+# The comments below name the PACK TYPE. The encoded operand is type << 2, which
+# is what the disassembler prints (so pack type 6 appears as ",24" in generated
+# code). Pack types:
+#   0 = PACK_TYPE_D3DCOLOR      3 = PACK_TYPE_FLOAT16_2
+#   1 = PACK_TYPE_SHORT_2       5 = PACK_TYPE_FLOAT16_4
+#   2 = PACK_TYPE_NORMPACKED32  6 = PACK_TYPE_NORMPACKED64
 
 # vupkd3d128 is broken in binutils, so these are hand coded
 
@@ -78,3 +80,36 @@ test_vupkd3d128_uint_2101010_2:
   .long 0x18681FF0
   blr
   #_ REGISTER_OUT v3 [7FC00000, 40400000, 40400000, 3F800001]
+
+# PACK_TYPE_NORMPACKED64 (encoded ,24): w(4):z(20):y(20):x(20).
+# The packed value is the guest's LOW doubleword, so it spans guest elements
+# 2 and 3; guest elements 0-1 are poisoned here to catch a read of the wrong
+# half. x/y/z decode to the 3.0+X form, w to the 1.0+w form.
+
+test_vupkd3d128_normpacked64_simple:
+  #_ REGISTER_IN v3 [CDCDCDCD, CDCDCDCD, 40000300, 00200001]
+  # vupkd3d128 v3, v3, 6        x=1 y=2 z=3 w=4
+  .long 0x18781FF0
+  blr
+  #_ REGISTER_OUT v3 [40400001, 40400002, 40400003, 3F800004]
+
+test_vupkd3d128_normpacked64_negative:
+  #_ REGISTER_IN v3 [CDCDCDCD, CDCDCDCD, FFFFFDFF, FFEFFFFF]
+  # vupkd3d128 v3, v3, 6        x=-1 y=-2 z=-3 w=15
+  .long 0x18781FF0
+  blr
+  #_ REGISTER_OUT v3 [403FFFFF, 403FFFFE, 403FFFFD, 3F80000F]
+
+test_vupkd3d128_normpacked64_extremes:
+  #_ REGISTER_IN v3 [CDCDCDCD, CDCDCDCD, 0000007F, FFF80000]
+  # vupkd3d128 v3, v3, 6        x=-524288 y=524287 z=0 w=0
+  .long 0x18781FF0
+  blr
+  #_ REGISTER_OUT v3 [40380000, 4047FFFF, 40400000, 3F800000]
+
+test_vupkd3d128_normpacked64_zero:
+  #_ REGISTER_IN v3 [CDCDCDCD, CDCDCDCD, 00000000, 00000000]
+  # vupkd3d128 v3, v3, 6        x=0 y=0 z=0 w=0
+  .long 0x18781FF0
+  blr
+  #_ REGISTER_OUT v3 [40400000, 40400000, 40400000, 3F800000]

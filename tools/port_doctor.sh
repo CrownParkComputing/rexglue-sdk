@@ -28,8 +28,13 @@ BIN="$(find "$PROJECT/out/build/linux" -maxdepth 1 -type f -perm -u+x ! -name '*
 OUT="$PROJECT/out/doctor"; mkdir -p "$OUT"
 
 echo "== $NAME: generated code"
-"$PROJECT/tools/port_check.py" "$PROJECT" 2>/dev/null || \
-  "$(dirname "$0")/port_check.py" "$PROJECT" || true
+# A generated-code failure is a stop, not a report-only warning. The old
+# fallback masked exit 1 and let a title reach gameplay with missing targets.
+if [ -x "$PROJECT/tools/port_check.py" ]; then
+  "$PROJECT/tools/port_check.py" "$PROJECT" || exit 1
+else
+  "$(dirname "$0")/port_check.py" "$PROJECT" || exit 1
+fi
 
 run_one() {  # name, extra args
   local tag="$1"; shift

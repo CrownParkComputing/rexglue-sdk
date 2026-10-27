@@ -11,22 +11,45 @@ it - and both pay that cost every frame while having to be right about
 semantics they can only guess at.
 
 Stages:
-    ingest     XEX / port -> build description
-    harvest    instrument and drive under the emulator: call frequencies,
-               shaders, render graph, live imports
-    translate  ucode -> SPIR-V, render graph -> static tables      (todo)
-    emit       XenonRecomp C++ for game code only, middleware substituted (todo)
-    link       one native binary                                   (todo)
-    verify     frame-diff against the oracle, boot ladder, device fps (todo)
+    ingest     XEX / port -> build description (call graph, seeds per library)
+    harvest    bound the library region and attribute a runtime reach trace
+               (REX_TRACE_REACH csv) to it: call frequency per function,
+               public-API candidates, static ring-writer classification
+    describe   RE dossier per entry point (arity, r3 offsets, imports)
+    emit       PORT/native.toml + PORT/src/<lib>native/{entrypoints.json,
+               api_table.toml, gen/overrides.cpp, gen/record.cpp,
+               <lib>_native.{h,cpp}, README.md}; every entry starts as a
+               guest-forwarding hook with its measured frequency in a comment
+    link       PORT/src/<lib>native/sources.cmake and the include() line
+    verify     native_check.py, snap_replay, tee_diff.py -> VERIFY.md
+    status     coverage line per module from native.toml + symbols.json + reach
+    translate  ucode -> SPIR-V table (harvest-and-bake)
+    rendergraph render graph -> static table (harvest-and-bake)
+
+Typical flow for a new library on a port:
+
+    rexnative ingest  PORT
+    #  build PORT with -DREXGLUE_GUEST_REACH=ON, run with REX_TRACE_REACH=reach.csv
+    rexnative harvest PORT/out/rexnative/ingest.json --lib d3d9 --reach reach.csv
+    rexnative emit    PORT/out/rexnative/ingest.json --lib d3d9 [--dry-run]
+    rexnative link    PORT --lib d3d9
+    rexnative verify  PORT --lib d3d9
+    rexnative status  PORT
 """
 
 import argparse
 import collections
+import difflib
 import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tomllib
+
+SDK_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 # A statically linked middleware library is identified by the kernel imports
 # only it can call: nothing but the graphics library talks to the video
@@ -35,36 +58,103 @@ SUBSYSTEM_IMPORTS = {
     "d3d9":  re.compile(r"__imp__(Vd[A-Za-z]+)\b"),
     "audio": re.compile(r"__imp__(XAudio[A-Za-z]+|XMA[A-Za-z]+)\b"),
 }
+# Imports that touch the command ring or its registers. A function that reaches
+# one of these (within the library) is a ring/submission candidate; PM4 itself
+# is written with ordinary stores that no static scan sees.
+RING_IMPORTS = {
+    "VdSwap", "VdInitializeRingBuffer", "VdEnableRingBufferRPtrWriteBack",
+    "VdGetSystemCommandBuffer", "VdSetSystemCommandBufferGpuIdentifierAddress",
+    "VdInitializeEngines", "VdInitializeEDRAM", "VdShutdownEngines",
+}
+# Role anchors per library: the import whose direct caller gets the role.
+ROLE_IMPORTS = {
+    "d3d9": {"present": "VdSwap", "ring_init": "VdInitializeRingBuffer"},
+}
+ROLE_NAMES = {"present": "Present", "ring_init": "RingInit"}
 
+# Two generated layouts: XenonRecomp (ppc_recomp.N.cpp, PPC_FUNC_IMPL) and
+# rexglue codegen (<title>_recomp.N.cpp, DEFINE_REX_FUNC). Call sites look the
+# same in both.
 FUNC_RE = re.compile(r"PPC_FUNC_IMPL\(__imp__sub_([0-9A-F]{8})\)")
-CALL_RE = re.compile(r"\bsub_([0-9A-F]{8})\(ctx, base\)")
+FUNC_RE_REX = re.compile(r"DEFINE_REX_FUNC\(sub_([0-9A-Fa-f]{8})\)")
+CALL_RE = re.compile(r"\bsub_([0-9A-Fa-f]{8})\(ctx, base\)")
+IMPORT_RE = re.compile(r"__imp__([A-Za-z][A-Za-z0-9_]*)")
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+MODES = {"guest": "kGuest", "tee": "kTee", "native": "kNative", "fatal": "kFatal"}
+ROLES = {"": "kNone", "present": "kPresent", "ring_init": "kRingInit"}
 
 
-def scan_recompiled(ppc_dir):
-    """Call graph and per-subsystem seed functions, from the recompiled sources."""
-    calls = collections.defaultdict(set)
-    seeds = {k: {} for k in SUBSYSTEM_IMPORTS}
-    funcs = set()
-    sources = sorted(glob.glob(os.path.join(ppc_dir, "ppc_recomp.*.cpp")))
+def recomp_sources(ppc_dir):
+    srcs = sorted(glob.glob(os.path.join(ppc_dir, "ppc_recomp.*.cpp")))
+    if not srcs:
+        srcs = sorted(glob.glob(os.path.join(ppc_dir, "*_recomp.*.cpp")))
+    return srcs
+
+
+def scan_recompiled(ppc_dir, cache_dir=None):
+    """Call graph, per-function kernel imports and per-subsystem seeds.
+
+    Returns (funcs, calls, seeds, imports). The scan of a large title takes a
+    while (PGR4: 139 MB of sources), so the result is cached under cache_dir as
+    graph.json keyed by the newest source mtime.
+    """
+    sources = recomp_sources(ppc_dir)
     if not sources:
         sys.exit("no recompiled sources in " + ppc_dir)
+    newest = max(os.path.getmtime(p) for p in sources)
+    cache = os.path.join(cache_dir, "graph.json") if cache_dir else None
+    if cache and os.path.exists(cache):
+        try:
+            with open(cache) as fh:
+                g = json.load(fh)
+            if g.get("ppc_dir") == ppc_dir and g.get("newest") == newest and g.get("files") == len(sources):
+                funcs = set(int(a, 16) for a in g["funcs"])
+                calls = collections.defaultdict(set, {int(a, 16): set(int(b, 16) for b in bs)
+                                                      for a, bs in g["calls"].items()})
+                imports = collections.defaultdict(set, {int(a, 16): set(v) for a, v in g["imports"].items()})
+                return funcs, calls, seeds_from_imports(imports), imports
+        except (OSError, ValueError, KeyError):
+            pass
+
+    calls = collections.defaultdict(set)
+    imports = collections.defaultdict(set)
+    funcs = set()
     for path in sources:
         cur = None
         with open(path, errors="ignore") as fh:
             for line in fh:
-                m = FUNC_RE.search(line)
+                m = FUNC_RE.search(line) or FUNC_RE_REX.search(line)
                 if m:
                     cur = int(m.group(1), 16)
                     funcs.add(cur)
                     continue
                 if cur is None:
                     continue
-                for name, rx in SUBSYSTEM_IMPORTS.items():
-                    for imp in rx.findall(line):
-                        seeds[name].setdefault(cur, set()).add(imp)
+                if "__imp__" in line:
+                    for imp in IMPORT_RE.findall(line):
+                        if not imp.startswith("sub_"):
+                            imports[cur].add(imp)
                 for callee in CALL_RE.findall(line):
                     calls[cur].add(int(callee, 16))
-    return funcs, calls, seeds
+    if cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache, "w") as fh:
+            json.dump({"ppc_dir": ppc_dir, "newest": newest, "files": len(sources),
+                       "funcs": ["%08X" % a for a in sorted(funcs)],
+                       "calls": {"%08X" % a: ["%08X" % b for b in sorted(bs)] for a, bs in calls.items()},
+                       "imports": {"%08X" % a: sorted(v) for a, v in imports.items()}}, fh)
+    return funcs, calls, seeds_from_imports(imports), imports
+
+
+def seeds_from_imports(imports):
+    seeds = {k: {} for k in SUBSYSTEM_IMPORTS}
+    for addr, imps in imports.items():
+        for name, rx in SUBSYSTEM_IMPORTS.items():
+            hit = {i for i in imps if rx.match("__imp__" + i)}
+            if hit:
+                seeds[name][addr] = hit
+    return seeds
 
 
 def callers_of(calls):
@@ -75,11 +165,46 @@ def callers_of(calls):
     return rev
 
 
+def detect_title(port, slug):
+    """The CMake target / codegen prefix: <title>_init.cpp under generated/."""
+    for init in sorted(glob.glob(os.path.join(port, "generated", "*", "*_init.cpp"))):
+        return os.path.basename(init)[: -len("_init.cpp")]
+    for man in sorted(glob.glob(os.path.join(port, "*_manifest.toml"))):
+        return os.path.basename(man)[: -len("_manifest.toml")]
+    return slug
+
+
+def load_ingest(path_or_port):
+    """Accept either an ingest.json or a port directory."""
+    p = os.path.abspath(path_or_port)
+    if os.path.isdir(p):
+        p = os.path.join(p, "out", "rexnative", "ingest.json")
+    if not os.path.exists(p):
+        sys.exit("no ingest at %s - run `rexnative ingest <port>` first" % p)
+    with open(p) as fh:
+        ing = json.load(fh)
+    ing["_path"] = p
+    ing.setdefault("title", detect_title(ing["port"], ing["slug"]))
+    return ing
+
+
+def save_ingest(ing):
+    path = ing.pop("_path")
+    with open(path, "w") as fh:
+        json.dump(ing, fh, indent=2)
+    ing["_path"] = path
+
+
+def lib_of(args):
+    return getattr(args, "lib", None) or getattr(args, "subsystem", None) or "d3d9"
+
+
 def cmd_ingest(args):
     port = os.path.abspath(args.port)
     slug = os.path.basename(port)
     if slug.endswith("-recomp"):
         slug = slug[: -len("-recomp")]
+    title = detect_title(port, slug)
 
     ppc_dir = args.ppc or os.path.join(port, "ppc")
     if not os.path.isdir(ppc_dir):
@@ -87,14 +212,20 @@ def cmd_ingest(args):
 
     gen = os.path.join(port, "generated", "default")
     fn_toml = os.path.join(gen, slug + "_xenonrecomp.toml")
-    sw_toml = os.path.join(gen, slug + "_switch_tables.toml")
+    sw_toml = os.path.join(gen, title + "_switch_tables.toml")
+    if not os.path.exists(sw_toml):
+        sw_toml = os.path.join(gen, slug + "_switch_tables.toml")
+    symbols = os.path.join(port, "out", "native", "symbols.json")
 
     out = {
         "slug": slug,
+        "title": title,
         "port": port,
         "ppc_dir": ppc_dir,
+        "sdk": SDK_DIR,
         "boundaries": fn_toml if os.path.exists(fn_toml) else None,
         "switch_tables": sw_toml if os.path.exists(sw_toml) else None,
+        "symbols": symbols if os.path.exists(symbols) else None,
     }
     if out["boundaries"]:
         out["function_count"] = sum(
@@ -103,9 +234,11 @@ def cmd_ingest(args):
         out["switch_table_count"] = sum(
             1 for l in open(out["switch_tables"], errors="ignore") if l.startswith("[[switch]]"))
 
-    funcs, calls, seeds = scan_recompiled(ppc_dir)
+    cache_dir = os.path.join(port, "out", "rexnative")
+    funcs, calls, seeds, imports = scan_recompiled(ppc_dir, cache_dir)
     out["recompiled_functions"] = len(funcs)
     out["call_edges"] = sum(len(v) for v in calls.values())
+    out["kernel_imports_used"] = len({i for v in imports.values() for i in v})
 
     # What static analysis can say for certain, and what it cannot.
     #
@@ -117,7 +250,7 @@ def cmd_ingest(args):
     # (56 against 66 known) that would pass a shallow check.
     #
     # The signal that does work is call FREQUENCY from a real run. That is
-    # harvest data, so the partition is only proposed here.
+    # harvest data (the reach trace), so the partition is only proposed here.
     out["middleware"] = {}
     for name, found in seeds.items():
         out["middleware"][name] = {
@@ -129,16 +262,30 @@ def cmd_ingest(args):
 
     dest = args.out or os.path.join(port, "out", "rexnative", "ingest.json")
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    # Keep harvest/emit records from an earlier run of the same port.
+    prev = {}
+    if os.path.exists(dest):
+        try:
+            with open(dest) as fh:
+                prev = json.load(fh)
+        except ValueError:
+            prev = {}
+    for k in ("harvest", "emit", "link", "verify"):
+        if k in prev:
+            out[k] = prev[k]
     with open(dest, "w") as fh:
         json.dump(out, fh, indent=2)
 
-    print("== rexnative ingest: %s ==" % slug)
+    print("== rexnative ingest: %s (%s) ==" % (slug, title))
     print("  recompiled functions %d" % out["recompiled_functions"])
     print("  call edges           %d" % out["call_edges"])
+    print("  kernel imports used  %d" % out["kernel_imports_used"])
     if out.get("function_count"):
         print("  boundaries           %d" % out["function_count"])
     if out.get("switch_table_count"):
         print("  switch tables        %d" % out["switch_table_count"])
+    if out["symbols"]:
+        print("  symbols.json         %s" % out["symbols"])
     for name, info in out["middleware"].items():
         n = len(info["seed_functions"])
         if n:
@@ -148,55 +295,187 @@ def cmd_ingest(args):
     print("  -> %s" % dest)
     print()
     print("  Public API partition is NOT decided here - static structure gives")
-    print("  39% recall on it. It is resolved in `rexnative harvest`.")
+    print("  39% recall on it. It is resolved in `rexnative harvest` from a reach trace.")
     return 0
 
 
-def cmd_harvest(args):
-    """Emit call-counting instrumentation over the candidate middleware region.
+# ---------------------------------------------------------------------------
+# Counts: reach trace CSV (Stage 0) or a legacy harvest log.
+# ---------------------------------------------------------------------------
 
-    Static structure gets the public API wrong (39% recall), but it does not
-    have to be right - it only has to bound what we INSTRUMENT. Call frequency
-    from a real run then decides: once at startup is device creation, once a
-    frame is present, thousands between presents is state or drawing. So a
-    generous candidate region costs nothing but a few hundred counters.
-    """
-    with open(args.ingest) as fh:
-        ing = json.load(fh)
-    sub = ing["middleware"].get(args.subsystem)
+def read_reach(path):
+    """REX_TRACE_REACH csv: `addr,count` header, 8-hex addr rows (FORMATS.md)."""
+    counts = {}
+    with open(path, errors="ignore") as fh:
+        for i, line in enumerate(fh):
+            line = line.strip()
+            if not line or (i == 0 and line.lower().startswith("addr")):
+                continue
+            parts = line.split(",")
+            if len(parts) < 2:
+                continue
+            a = parts[0].strip()
+            if a.lower().startswith("sub_"):
+                a = a[4:]
+            if not re.fullmatch(r"[0-9A-Fa-f]{8}", a):
+                continue   # hand-written REX_FUNC_PROLOGUE user without an address
+            try:
+                counts[int(a, 16)] = int(parts[1].strip())
+            except ValueError:
+                continue
+    return counts
+
+
+def read_counts(path):
+    """Legacy: a log containing the counter TU's `sub_X  N  band` lines."""
+    counts = {}
+    for line in open(path, errors="ignore"):
+        m = re.match(r"\s+sub_([0-9A-F]{8})\s+(\d+)\s+\S+", line)
+        if m:
+            counts[int(m.group(1), 16)] = int(m.group(2))
+    return counts
+
+
+def load_counts(reach=None, counts_log=None):
+    """(counts, source_label). Auto-detects a csv given through --counts."""
+    if reach:
+        return read_reach(reach), reach
+    if counts_log:
+        with open(counts_log, errors="ignore") as fh:
+            first = fh.readline().strip().lower()
+        if first.startswith("addr,count"):
+            return read_reach(counts_log), counts_log
+        return read_counts(counts_log), counts_log
+    return {}, None
+
+
+def band_of(count, frames=None):
+    if count <= 0:
+        return "unreached"
+    if frames and frames >= 10:
+        per = count / frames
+        if per >= 8:
+            return "per-draw"
+        if per >= 0.5:
+            return "per-frame"
+        return "setup" if count >= 10 else "once"
+    if count >= 1000:
+        return "per-draw"
+    if count >= 100:
+        return "per-frame"
+    return "setup" if count >= 10 else "once"
+
+
+# ---------------------------------------------------------------------------
+# harvest
+# ---------------------------------------------------------------------------
+
+def harvest_core(ing, lib, pad, counts, region_override=None):
+    """Bound the library and attribute counts to it. Pure; no files written."""
+    sub = ing["middleware"].get(lib)
     if not sub or not sub["seed_functions"]:
-        sys.exit("no %s seeds in %s" % (args.subsystem, args.ingest))
-
+        sys.exit("no %s seeds in %s" % (lib, ing["_path"]))
     seeds = [int(x, 16) for x in sub["seed_functions"]]
-    lo, hi = min(seeds) - args.pad, max(seeds) + args.pad
+    if region_override:
+        lo, hi = region_override
+    else:
+        lo, hi = min(seeds) - pad, max(seeds) + pad
 
-    ppc_dir = args.ppc or ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
-    funcs, calls, _ = scan_recompiled(ppc_dir)
+    ppc_dir = ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
+    funcs, calls, _, imports = scan_recompiled(ppc_dir, os.path.join(ing["port"], "out", "rexnative"))
     region = sorted(f for f in funcs if lo <= f <= hi)
     if not region:
         sys.exit("candidate region is empty")
-    rev = callers_of(calls)
     inset = set(region)
-    entry = [f for f in region if rev.get(f, set()) - inset]
+    rev = callers_of(calls)
 
-    dest = args.out or os.path.join(ing["port"], "out", "rexnative",
-                                    "harvest_%s.cpp" % args.subsystem)
+    # Frame count: the role anchor (VdSwap caller) is called once per present.
+    anchors = {}
+    for role, imp in ROLE_IMPORTS.get(lib, {}).items():
+        anchors[role] = sorted(f for f in region if imp in imports.get(f, ()))
+    frames = None
+    if counts and anchors.get("present"):
+        frames = max(counts.get(f, 0) for f in anchors["present"]) or None
+
+    # Static ring classification: reaches (within the region) a function that
+    # calls a ring import. An UNDER-approximation for PM4 writers (ordinary
+    # stores); the checksum attribution needs the counter TU (--emit-counters).
+    memo = {}
+
+    def reaches_ring(f, stack=()):
+        if f in memo:
+            return memo[f]
+        if f in stack:
+            return False
+        if imports.get(f, set()) & RING_IMPORTS:
+            memo[f] = True
+            return True
+        r = any(reaches_ring(c, stack + (f,)) for c in calls.get(f, ()) if c in inset)
+        memo[f] = r
+        return r
+
+    rows = []
+    for f in region:
+        outside = sorted(rev.get(f, set()) - inset)
+        n = counts.get(f, 0)
+        rows.append({
+            "addr": "%08X" % f,
+            "count": n,
+            "band": band_of(n, frames) if counts else "unmeasured",
+            "entry": bool(outside),
+            "callers_outside": ["%08X" % c for c in outside[:32]],
+            "callers_outside_count": len(outside),
+            "imports": sorted(imports.get(f, ())),
+            "reaches_ring_import": reaches_ring(f),
+            "roles": [role for role, fs in anchors.items() if f in fs],
+        })
+    reached = [r for r in rows if r["count"] > 0]
+    return {
+        "format": "rex-native-harvest/1",
+        "lib": lib,
+        "title": ing["title"],
+        "region": "%08X-%08X" % (lo, hi),
+        "seed_span": "%08X-%08X" % (min(seeds), max(seeds)),
+        "seeds": len(seeds),
+        "frames": frames,
+        "functions": rows,
+        "summary": {
+            "in_region": len(rows),
+            "api_candidates": sum(1 for r in rows if r["entry"]),
+            "reached": len(reached),
+            "reached_api_candidates": sum(1 for r in reached if r["entry"]),
+            "calls_total": sum(r["count"] for r in rows),
+            "ring_candidates": sum(1 for r in rows if r["reaches_ring_import"]),
+        },
+        "_region": (lo, hi), "_calls": calls, "_rev": rev, "_inset": inset, "_imports": imports,
+    }
+
+
+def parse_range(text):
+    m = re.fullmatch(r"(?:0x)?([0-9A-Fa-f]{8})\s*[-.]+\s*(?:0x)?([0-9A-Fa-f]{8})", text.strip())
+    if not m:
+        sys.exit("range must look like 82690000-8269FFFF, got %r" % text)
+    return int(m.group(1), 16), int(m.group(2), 16)
+
+
+def write_counter_tu(dest, lib, lo, hi, region, entry, args):
+    """Legacy instrumentation TU (pre Stage 0). Kept for ports whose generated
+    code is not built with REX_GUEST_REACH, and for --attribute-ring's ring
+    checksum, which needs code around each call and cannot come from a csv."""
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest, "w") as fh:
         w = lambda s="": print(s, file=fh)
-        w("// GENERATED by `rexnative harvest` - do not edit.")
+        w("// GENERATED by `rexnative harvest --emit-counters` - do not edit.")
         w("//")
-        w("// A call counter on every function in the %s candidate region" % args.subsystem)
+        w("// A call counter on every function in the %s candidate region" % lib)
         w("// 0x%08X..0x%08X - %d functions, %d of them called from outside it."
           % (lo, hi, len(region), len(entry)))
         w("//")
-        w("// Hooked through XenonRecomp's weak-alias seam: defining the unprefixed")
-        w("// name wins at link and __imp__ still reaches the original.")
+        w("// Superseded for plain counting by the reach trace (-DREX_GUEST_REACH,")
+        w("// REX_TRACE_REACH=<csv>); still the only source of ring attribution.")
         w("//")
-        w("// The counts are the partition signal. Static call-graph structure recovers")
-        w("// the public API at only 39% recall, so it is used here purely to BOUND the")
-        w("// region - measured frequency decides what is really API and what is an")
-        w("// internal helper.")
+        w("// Hooked through the weak-alias seam: defining the unprefixed name wins")
+        w("// at link and __imp__ still reaches the original.")
         w('#include "guest.h"')
         w("#include <atomic>")
         w("#include <cstdio>")
@@ -221,21 +500,9 @@ def cmd_harvest(args):
             w("//")
             w("// Static analysis cannot answer this. PM4 goes into the ring through")
             w("// ordinary stores, so neither a Vd* import scan nor an MMIO scan sees")
-            w("// it - a transitive-reach analysis on Geometry Wars reported 13 of 51")
-            w("// functions touching the GPU, which is an undercount, because the")
-            w("// per-draw functions write packets and were invisible to it.")
-            w("//")
-            w("// So checksum the ring around every call and attribute the change. The")
-            w("// ring is 4 KB, which is nothing next to the work the call itself does.")
-            w("//")
-            w("// The window has to cover the INDIRECT BUFFERS, not just the ring.")
-            w("// Watching the ring alone found only 10 functions, all called 1-4 times:")
-            w("// that is ME_INIT and the IB dispatch packets. The per-draw work is")
-            w("// written into the buffers those packets point at, which sit above the")
-            w("// ring, so a ring-only window misses exactly the functions we care most")
-            w("// about. Strided because this runs on every call of a 17,859-call")
-            w("// function and does not need to be exact - a draw packet is many words,")
-            w("// so every 32nd word still catches it.")
+            w("// it. So checksum the ring around every call and attribute the change.")
+            w("// The window has to cover the INDIRECT BUFFERS, not just the ring, and")
+            w("// is strided because this runs on every call of a per-draw function.")
             w("uint32_t RingChecksum() {")
             w("    const uint32_t base_addr = RingBase();")
             w("    if (!base_addr) return 0;")
@@ -264,17 +531,13 @@ def cmd_harvest(args):
             w("}")
         w()
         w('extern "C" void rexnative_harvest_report() {')
-        w("    // Sort an index, not the array: Counter holds a std::atomic and so is")
-        w("    // neither copyable nor movable, which std::sort requires.")
         w("    std::vector<std::pair<unsigned long long, unsigned>> live;")
         w("    for (size_t i = 0; i < kCount; ++i) {")
         w("        unsigned long long n = g_counters[i].n.load();")
         w("        if (n) live.emplace_back(n, g_counters[i].addr);")
         w("    }")
         w("    std::sort(live.begin(), live.end(), std::greater<>());")
-        w('    fprintf(stderr, "\\n[harvest] %s: %%zu of %%zu functions called\\n", live.size(), kCount);' % args.subsystem)
-        w("    for (const auto& e : live) {")
-        w("        unsigned long long n = e.first;")
+        w('    fprintf(stderr, "\\n[harvest] %s: %%zu of %%zu functions called\\n", live.size(), kCount);' % lib)
         if args.attribute_ring:
             w('    fprintf(stderr, "[harvest] functions that WROTE the command buffer:\\n");')
             w("    for (size_t i = 0; i < kCount; ++i) {")
@@ -283,6 +546,8 @@ def cmd_harvest(args):
             w("                g_counters[i].addr,")
             w("                (unsigned long long)g_counters[i].n.load());")
             w("    }")
+        w("    for (const auto& e : live) {")
+        w("        unsigned long long n = e.first;")
         w('        const char* band = n >= 1000 ? "per-draw"')
         w('                         : n >= 100 ? "per-frame"')
         w('                         : n >= 10  ? "setup"')
@@ -291,30 +556,1583 @@ def cmd_harvest(args):
         w("    }")
         w("}")
         w()
-        w("// Drop-in for d3d_trace.cpp: the host already calls d3d_trace_report() at")
-        w("// exit and on a fault, so aliasing it means no change to main.cpp. The two")
-        w("// files cannot both be linked - they define the same hooks.")
         w('extern "C" void d3d_trace_report() { rexnative_harvest_report(); }')
 
-    ing.setdefault("harvest", {})[args.subsystem] = {
+
+def cmd_harvest(args):
+    """Attribute a runtime reach trace to the candidate library region.
+
+    Static structure gets the public API wrong (39% recall), but it does not
+    have to be right - it only has to BOUND the region. Call frequency from a
+    real run then decides: once at startup is device creation, once a frame is
+    present, thousands between presents is state or drawing.
+
+    Since Stage 0 the counts come from the generated prologue itself
+    (-DREX_GUEST_REACH on <title>_recomp, REX_TRACE_REACH=<csv>), so no
+    instrumentation TU is needed. --emit-counters still writes the old TU for
+    a port that cannot rebuild its recomp library, and it is the only way to
+    get ring attribution (--attribute-ring): that needs a checksum AROUND each
+    call, which a csv of counts cannot carry. Without it --attribute-ring falls
+    back to the static classification `reaches_ring_import`.
+    """
+    ing = load_ingest(args.ingest)
+    lib = lib_of(args)
+    counts, src = load_counts(args.reach, args.counts)
+    if args.reach and not counts:
+        sys.exit("no addr,count rows in " + args.reach)
+    region_override = parse_range(args.range) if args.range else None
+    h = harvest_core(ing, lib, args.pad, counts, region_override)
+    lo, hi = h["_region"]
+    region = [int(r["addr"], 16) for r in h["functions"]]
+    entry = [int(r["addr"], 16) for r in h["functions"] if r["entry"]]
+
+    out_dir = os.path.join(ing["port"], "out", "rexnative")
+    os.makedirs(out_dir, exist_ok=True)
+    dest = args.out or os.path.join(out_dir, "harvest_%s.json" % lib)
+    public = {k: v for k, v in h.items() if not k.startswith("_")}
+    public["reach"] = os.path.abspath(src) if src else None
+    public["ring_attribution"] = ("static: reaches_ring_import (transitive within the region to %s); "
+                                  "checksum attribution needs --emit-counters" % ", ".join(sorted(RING_IMPORTS)))
+    with open(dest, "w") as fh:
+        json.dump(public, fh, indent=2)
+
+    tu = None
+    if args.emit_counters:
+        tu = os.path.join(out_dir, "harvest_%s.cpp" % lib)
+        write_counter_tu(tu, lib, lo, hi, region, entry, args)
+
+    ing.setdefault("harvest", {})[lib] = {
         "region": "0x%08X..0x%08X" % (lo, hi),
         "instrumented": len(region),
         "api_candidates": len(entry),
-        "source": dest,
+        "reached": public["summary"]["reached"],
+        "reach": public["reach"],
+        "frames": h["frames"],
+        "json": dest,
+        "source": tu,
     }
-    with open(args.ingest, "w") as fh:
-        json.dump(ing, fh, indent=2)
+    save_ingest(ing)
 
-    print("== rexnative harvest: %s / %s ==" % (ing["slug"], args.subsystem))
-    print("  candidate region    0x%08X..0x%08X" % (lo, hi))
-    print("  instrumented        %d functions" % len(region))
-    print("  called from outside %d  (public API candidates)" % len(entry))
+    s = public["summary"]
+    print("== rexnative harvest: %s / %s ==" % (ing["slug"], lib))
+    print("  candidate region    %08X-%08X  (seed span %s, pad 0x%X)" % (lo, hi, h["seed_span"], args.pad))
+    print("  in region           %d functions" % s["in_region"])
+    print("  called from outside %d  (public API candidates)" % s["api_candidates"])
+    print("  ring candidates     %d  (static: reach a ring import)" % s["ring_candidates"])
+    if counts:
+        print("  reach trace         %s" % src)
+        print("  reached             %d of %d in region, %d of them API candidates, %d calls%s"
+              % (s["reached"], s["in_region"], s["reached_api_candidates"], s["calls_total"],
+                 (", %d frames" % h["frames"]) if h["frames"] else ""))
+        bands = collections.Counter(r["band"] for r in h["functions"] if r["count"])
+        print("  bands               " + "  ".join("%s %d" % (b, bands[b]) for b in
+                                                  ("per-draw", "per-frame", "setup", "once") if bands[b]))
+        top = sorted((r for r in h["functions"] if r["count"]), key=lambda r: -r["count"])[:10]
+        for r in top:
+            print("    sub_%s %10d  %-9s %s%s" % (r["addr"], r["count"], r["band"],
+                                                  "API " if r["entry"] else "int ",
+                                                  ",".join(r["roles"])))
+    else:
+        print("  reach trace         none - counts are unmeasured. Build the port with")
+        print("                      -DREXGLUE_GUEST_REACH=ON, run with REX_TRACE_REACH=<csv>,")
+        print("                      then rerun with --reach <csv>.")
+    if args.attribute_ring and not args.emit_counters:
+        print("  --attribute-ring    static classification only (reaches_ring_import);")
+        print("                      pass --emit-counters for checksum attribution.")
     print("  -> %s" % dest)
-    print()
-    print("  Build it into the host and call rexnative_harvest_report() at exit.")
-    print("  Bands decide the partition: per-draw / per-frame / setup / once.")
+    if tu:
+        print("  -> %s  (legacy counter TU)" % tu)
     return 0
 
+
+# ---------------------------------------------------------------------------
+# emit
+# ---------------------------------------------------------------------------
+
+def parse_addr(v):
+    if isinstance(v, int):
+        return v
+    s = str(v).strip()
+    if s.lower().startswith("sub_"):
+        s = s[4:]
+    if s.lower().startswith("0x"):
+        return int(s, 16)
+    return int(s, 16) if re.fullmatch(r"[0-9A-Fa-f]{8}", s) else int(s, 0)
+
+
+def load_entrypoint_names(path):
+    """A1's entrypoints.json (any of the accepted shapes) -> {addr: item}."""
+    with open(path) as fh:
+        doc = json.load(fh)
+    items = doc
+    if isinstance(doc, dict):
+        items = doc.get("entries") or doc.get("entrypoints") or []
+    by = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        a = it.get("address", it.get("va", it.get("addr")))
+        if a is None:
+            continue
+        by[parse_addr(a)] = it
+    return by
+
+
+def load_arity_file(path):
+    """docs/<lib>/arity.json: {ADDR: {arity_gpr: n}} or {ADDR: n}."""
+    with open(path) as fh:
+        doc = json.load(fh)
+    out = {}
+    for k, v in doc.items():
+        try:
+            a = parse_addr(k)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            v = v.get("arity_gpr", v.get("arity"))
+        if isinstance(v, int):
+            out[a] = v
+    return out
+
+
+def estimate_arity(ing, addrs):
+    """Arity from the disassembly comments, for the selected addresses only.
+
+    Uses codegen.partition.json to open just the files that hold them. Same
+    rule as `describe`: an argument register r3..r10 read before it is written,
+    up to the first call.
+    """
+    gen = ing.get("ppc_dir")
+    part = os.path.join(gen, "codegen.partition.json")
+    if not os.path.exists(part):
+        return {}
+    with open(part) as fh:
+        assign = json.load(fh).get("assignments", {})
+    by_file = collections.defaultdict(set)
+    for a in addrs:
+        idx = assign.get("%08X" % a)
+        if idx is not None:
+            by_file[idx].add(a)
+    STORES = ("stw", "sth", "stb", "stfs", "stfd", "stwu", "stwx", "stbx", "sthx", "stvx", "stfsx", "stwcx.")
+    NO_DEST = STORES + ("cmplw", "cmplwi", "cmpw", "cmpwi", "b", "bl", "beq", "bne", "blt", "bgt",
+                        "ble", "bge", "bdnz", "blr", "mtctr", "mtlr", "bctr", "bctrl")
+    out = {}
+    for idx, wanted in by_file.items():
+        paths = glob.glob(os.path.join(gen, "*_recomp.%d.cpp" % idx))
+        if not paths:
+            continue
+        cur, ops = None, {}
+        with open(paths[0], errors="ignore") as fh:
+            for line in fh:
+                m = FUNC_RE_REX.search(line) or FUNC_RE.search(line)
+                if m:
+                    cur = int(m.group(1), 16)
+                    if cur in wanted:
+                        ops[cur] = []
+                    continue
+                if cur in ops and len(ops[cur]) < 120 and line.lstrip().startswith("// "):
+                    ops[cur].append(line.strip()[3:])
+        for a, body in ops.items():
+            written, argc = set(), 0
+            for op in body:
+                parts = op.replace(",", " ").split()
+                if not parts:
+                    continue
+                mnem = parts[0]
+                regs = [int(mm.group(1)) for mm in re.finditer(r"\br([0-9]+)\b", op)]
+                if not regs:
+                    continue
+                dest = None if mnem in NO_DEST else regs[0]
+                for r in regs:
+                    if r == dest:
+                        continue
+                    if 3 <= r <= 10 and r not in written:
+                        argc = max(argc, r - 2)
+                if dest is not None:
+                    written.add(dest)
+                if mnem in ("bl", "bctrl"):
+                    break
+            out[a] = argc
+    return out
+
+
+def load_existing_table(path):
+    """Existing api_table.toml -> {addr: raw entry} so hand edits survive."""
+    if not os.path.exists(path):
+        return {}, {}
+    with open(path, "rb") as fh:
+        doc = tomllib.load(fh)
+    return doc.get("meta", {}), {parse_addr(e["address"]): e for e in doc.get("entry", []) if "address" in e}
+
+
+def cpp_str(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def toml_str(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def select_entries(ing, lib, h, args, names_by_addr, arity_by_addr, existing, mranges):
+    rows = {int(r["addr"], 16): r for r in h["functions"]}
+    in_module = lambda a: any(lo <= a <= hi for lo, hi in mranges)
+    measured = any(r["count"] for r in rows.values())
+    picked = set()
+    for spec in (args.pick or []):
+        for tok in spec.split(","):
+            if tok.strip():
+                picked.add(parse_addr(tok))
+    only = set()
+    for spec in (args.only or []):
+        for tok in spec.split(","):
+            if tok.strip():
+                only.add(parse_addr(tok))
+    missing_only = sorted(only - rows.keys())
+    if missing_only:
+        sys.exit("--only outside the region: " + " ".join("%08X" % a for a in missing_only))
+    if only:
+        picked = only
+    chosen = set()
+    for a, r in rows.items():
+        if only:
+            break
+        if r["roles"]:
+            chosen.add(a)
+        elif not in_module(a):
+            continue
+        elif r["entry"] and (not measured or r["count"] >= args.min_count):
+            chosen.add(a)
+        elif args.include_internal and measured and r["count"] >= max(args.min_count, 1):
+            chosen.add(a)
+    if args.keep_existing:
+        chosen |= {a for a in existing if a in rows}
+    chosen |= {a for a in picked if a in rows}
+    missing = [a for a in picked if a not in rows]
+    if missing:
+        print("  warning: --pick outside the region, ignored: " + " ".join("%08X" % a for a in missing))
+
+    # A function called orders of magnitude more than the next is a poll loop,
+    # not an API rate. Flag it rather than letting it distort the ordering.
+    ordered = sorted(chosen, key=lambda a: -rows[a]["count"])
+    poll = set()
+    for i in range(len(ordered) - 1):
+        if rows[ordered[i]]["count"] > 50 * max(rows[ordered[i + 1]]["count"], 1) and rows[ordered[i]]["count"] > 1000:
+            poll.add(ordered[i])
+
+    entries = []
+    for a in sorted(chosen):
+        r = rows[a]
+        prev = existing.get(a, {})
+        role = prev.get("role") or (r["roles"][0] if r["roles"] else "")
+        name = prev.get("name") or ""
+        if not name or name == "sub_%08X" % a:
+            it = names_by_addr.get(a, {})
+            jn = it.get("xdk_name") or it.get("name")
+            if jn and IDENT_RE.match(str(jn)) and not str(jn).lower().startswith("sub_"):
+                name = str(jn)
+            elif role in ROLE_NAMES:
+                name = ROLE_NAMES[role]
+            else:
+                name = "sub_%08X" % a
+        arity = prev.get("arity")
+        if arity is None:
+            it = names_by_addr.get(a, {})
+            arity = it.get("arity") if isinstance(it.get("arity"), int) else arity_by_addr.get(a)
+        tier = 1 if r["entry"] else 2
+        if r["count"] == 0 and measured:
+            tier = 3
+        evidence = ["static:callers-outside-region"] if r["entry"] else ["static:internal"]
+        if measured:
+            evidence.append("reach:%s" % os.path.basename(h.get("reach") or "csv"))
+        if a in names_by_addr:
+            evidence.append("entrypoints:" + os.path.basename(args.entrypoints or "json"))
+        if r["reaches_ring_import"]:
+            evidence.append("static:reaches-ring-import")
+        if a in picked:
+            evidence.append("pick")
+        if a in poll:
+            evidence.append("poll-loop")
+        freq = ("%d calls, %s" % (r["count"], r["band"]) if measured else "unmeasured (no reach trace)")
+        if a in poll:
+            freq += ", POLL LOOP - not an API rate"
+        entries.append({
+            "address": a, "name": name, "arity": arity, "mode": prev.get("mode", "guest"),
+            "role": role, "note": prev.get("note") or freq, "freq": freq, "count": r["count"],
+            "band": r["band"], "tier": tier, "callers": r["callers_outside"],
+            "evidence": evidence, "imports": r["imports"], "poll": a in poll,
+        })
+    return entries, measured
+
+
+def gen_api_table(ing, lib, entries, region, meta_prev):
+    L = []
+    w = L.append
+    title = ing["title"]
+    w("# %s %s band: address -> {name, arity, mode}. Source of truth for the" % (title, lib))
+    w("# generated overrides in gen/overrides.cpp; it lives outside generated/ so")
+    w("# `rexglue codegen` never touches it. Written by `rexnative emit`; rerunning")
+    w("# emit keeps the name, arity, mode, role and note you set here per address")
+    w("# and refreshes the measured frequency (`freq`).")
+    w("#")
+    w("# Per-entry fields")
+    w("#   address  guest VA of the function (the generated symbol is sub_<ADDRESS>)")
+    w("#   name     identifier used in logs and native hook symbol names; entries")
+    w("#            still named sub_XXXXXXXX are provisional (no entrypoints.json name)")
+    w("#   arity    integer arguments in r3.. (logging/tracing only; no ABI effect)")
+    w("#   mode     what the override does when the cvar %s_%s is \"native\":" % (title, lib))
+    w("#              guest   forward to __imp__sub_X unchanged")
+    w("#              tee     call hooks::TeePre_<ADDR> / TeePost_<ADDR> around the forward")
+    w("#              native  call hooks::Native_<ADDR>, never forward (fatal if unbound)")
+    w("#              fatal   REX_FATAL: an internal-only function that must be")
+    w("#                      unreachable once its callers are native")
+    w("#   role     optional: \"present\" marks the frame boundary, \"ring_init\" the")
+    w("#            ring buffer initialisation")
+    w("#   freq     measured call frequency from the reach trace (regenerated)")
+    w("#   note     free text")
+    w("")
+    w("[meta]")
+    w("title = %s" % toml_str(title))
+    w("lib = %s" % toml_str(lib))
+    w("symbol_prefix = \"sub_\"")
+    w("region = %s" % toml_str("%08X-%08X" % region))
+    w("generator = \"rexnative emit\"")
+    w("")
+    for e in entries:
+        w("[[entry]]")
+        w("address = 0x%08X" % e["address"])
+        w("name = %s" % toml_str(e["name"]))
+        if e["arity"] is not None:
+            w("arity = %d" % e["arity"])
+        w("mode = %s" % toml_str(e["mode"]))
+        if e["role"]:
+            w("role = %s" % toml_str(e["role"]))
+        w("freq = %s" % toml_str(e["freq"]))
+        if e["note"] and e["note"] != e["freq"]:
+            w("note = %s" % toml_str(e["note"]))
+        w("")
+    return "\n".join(L)
+
+
+def gen_entrypoints_json(ing, lib, entries, h, measured):
+    return json.dumps({
+        "format": "rex-native-entrypoints/1",
+        "title": ing["title"],
+        "lib": lib,
+        "region": h["region"],
+        "reach": h.get("reach"),
+        "frames": h.get("frames"),
+        "measured": measured,
+        "entries": [{
+            "addr": "%08X" % e["address"],
+            "name": e["name"],
+            "arity": e["arity"],
+            "tier": e["tier"],
+            "role": e["role"] or None,
+            "count": e["count"],
+            "band": e["band"],
+            "callers": e["callers"],
+            "evidence": e["evidence"],
+            "imports": e["imports"],
+        } for e in entries],
+    }, indent=1) + "\n"
+
+
+def gen_overrides_cpp(ing, lib, entries, table_rel):
+    """Same shape as pgr4-recomp/tools/d3d/hookgen.py: one REX_HOOK_RAW per
+    entry, counter + effective-mode switch, weak Tee/Native bindings."""
+    ns = lib + "native"
+    hdr = "%snative/%s_native.h" % (lib, lib)
+    prefix = "sub_"
+    names = {}
+    for e in entries:
+        if not IDENT_RE.match(e["name"]):
+            sys.exit("%08X: name %r is not a C identifier" % (e["address"], e["name"]))
+        if e["name"] in names:
+            sys.exit("duplicate name %r at %08X and %08X" % (e["name"], e["address"], names[e["name"]]))
+        names[e["name"]] = e["address"]
+    if sum(1 for e in entries if e["role"] == "present") > 1:
+        sys.exit("more than one entry has role = present")
+    L = []
+    w = L.append
+    w("// GENERATED FILE - DO NOT EDIT.")
+    w("// Written by `rexnative emit` from %s." % table_rel)
+    w("// Regenerate:  rexnative emit <port> --lib %s" % lib)
+    w("//")
+    w("// One strong override per api_table.toml entry. Each displaces the weak")
+    w("// generated alias sub_X; the generated body remains reachable as __imp__sub_X.")
+    w("// Behaviour per effective mode is decided at runtime by %s::Init()." % ns)
+    w("// Every entry starts in guest mode (forward unchanged); the measured call")
+    w("// frequency from the harvest is in the comment above each override.")
+    w("")
+    w("#include <atomic>")
+    w("#include <cstddef>")
+    w("#include <cstdint>")
+    w("")
+    w("#include <rex/hook.h>")
+    w("")
+    w('#include "%s"' % hdr)
+    w("")
+    w("// Generated bodies.")
+    for e in entries:
+        w("REX_EXTERN(__imp__%s%08X);" % (prefix, e["address"]))
+    w("")
+    w("// Native bindings. Weak: an entry without an implementation links and its")
+    w("// pointer is null. Define these (same signature, strong) in any port TU.")
+    w("namespace %s::hooks {" % ns)
+    for e in entries:
+        a = "%08X" % e["address"]
+        w("__attribute__((weak)) void TeePre_%s(PPCContext& ctx, uint8_t* base);    // %s" % (a, e["name"]))
+        w("__attribute__((weak)) void TeePost_%s(PPCContext& ctx, uint8_t* base);" % a)
+        w("__attribute__((weak)) void Native_%s(PPCContext& ctx, uint8_t* base);" % a)
+    w("}  // namespace %s::hooks" % ns)
+    w("")
+    w("namespace %s {" % ns)
+    w("")
+    w("const std::size_t kEntryCount = %d;" % len(entries))
+    w("std::atomic<uint64_t> g_counts[%d] = {};" % len(entries))
+    w("std::atomic<uint8_t> g_effective[%d] = {};  // Init() fills; 0 == kGuest" % len(entries))
+    w("")
+    w("const Entry kEntries[] = {")
+    for e in entries:
+        a = "%08X" % e["address"]
+        w("    {0x%s, %s, %d, Mode::%s, Role::%s," % (a, cpp_str(e["name"]), e["arity"] or 0,
+                                                       MODES[e["mode"]], ROLES[e["role"]]))
+        w("     &__imp__%s%s, &hooks::TeePre_%s, &hooks::TeePost_%s, &hooks::Native_%s}," % (prefix, a, a, a, a))
+    w("};")
+    w("")
+    w("}  // namespace %s" % ns)
+    w("")
+    w("using %s::Mode;" % ns)
+    w("")
+    for idx, e in enumerate(entries):
+        a = "%08X" % e["address"]
+        sym = prefix + a
+        note = (e["note"] + "; ") if e["note"] and e["note"] != e["freq"] else ""
+        w("// 0x%s %s arity=%d table_mode=%s%s - %s%s"
+          % (a, e["name"], e["arity"] or 0, e["mode"], (" role=" + e["role"]) if e["role"] else "", note, e["freq"]))
+        w("REX_HOOK_RAW(%s) {" % sym)
+        w("  constexpr std::size_t kIdx = %d;" % idx)
+        w("  %s::detail::Hit(kIdx);" % ns)
+        w("  switch (%s::EffectiveMode(kIdx)) {" % ns)
+        w("    case Mode::kGuest:")
+        w("      __imp__%s(ctx, base);" % sym)
+        w("      break;")
+        w("    case Mode::kTee:")
+        w("      if (%s::hooks::TeePre_%s) %s::hooks::TeePre_%s(ctx, base);" % (ns, a, ns, a))
+        w("      __imp__%s(ctx, base);" % sym)
+        w("      if (%s::hooks::TeePost_%s) %s::hooks::TeePost_%s(ctx, base);" % (ns, a, ns, a))
+        w("      break;")
+        w("    case Mode::kNative:")
+        w("      if (!%s::hooks::Native_%s)" % (ns, a))
+        w('        %s::detail::Fatal(kIdx, static_cast<uint32_t>(ctx.lr), "native mode without a bound Native_ hook");' % ns)
+        w("      %s::hooks::Native_%s(ctx, base);" % (ns, a))
+        w("      break;")
+        w("    case Mode::kFatal:")
+        w('      %s::detail::Fatal(kIdx, static_cast<uint32_t>(ctx.lr), "guest function reached in native mode");' % ns)
+        w("  }")
+        if e["role"] == "present":
+            w("  %s::detail::OnPresent();" % ns)
+        elif e["role"] == "ring_init":
+            w("  %s::detail::OnRingInit(ctx.r3.u32, ctx.r4.u32);" % ns)
+        w("}")
+        w("")
+    return "\n".join(L) + "\n"
+
+
+def snapshot_macro_available():
+    hdr = os.path.join(SDK_DIR, "include", "rex", "system", "snapshot.h")
+    if not os.path.exists(hdr):
+        return False
+    with open(hdr, errors="ignore") as fh:
+        return "define REX_SNAP_HOOK" in fh.read()
+
+
+def gen_record_cpp(ing, lib, entries, have_macro):
+    ns = lib + "native"
+    L = []
+    w = L.append
+    w("// GENERATED FILE - DO NOT EDIT.")
+    w("// Written by `rexnative emit` (--lib %s). Snapshot-recording wrappers for" % lib)
+    w("// every entry in api_table.toml.")
+    w("//")
+    w("// MUTUALLY EXCLUSIVE with gen/overrides.cpp: both define the strong sub_X")
+    w("// symbols. sources.cmake picks this file when %s_%sNATIVE_RECORD=ON;" % (ing["title"].upper(), lib.upper()))
+    w("// build that configuration, run with REX_SNAP_DIR=<dir> to record one .snap")
+    w("// per call (REX_SNAP_MAX per address), then replay with tests/native/snap_replay")
+    w("// against the native implementation.")
+    w("//")
+    w("// Ranges: registers only by default. Add argument-pointed ranges once the")
+    w("// entry's layout is known, e.g.")
+    w("//   REX_SNAP_HOOK(sub_8269ADD8, {ctx.r4.u32, 64}, {ctx.r5.u32, ctx.r6.u32 * 4})")
+    w("// Put such per-entry ranges in ../snap_ranges.h (macro %s_SNAP_RANGES_<ADDR>)" % lib.upper())
+    w("// and they survive regeneration.")
+    w("")
+    w("#include <cstdint>")
+    w("")
+    w("#include <rex/hook.h>")
+    w("#if __has_include(<rex/system/snapshot.h>)")
+    w("#include <rex/system/snapshot.h>")
+    w("#endif")
+    w("#if __has_include(\"%snative/snap_ranges.h\")" % lib)
+    w('#include "%snative/snap_ranges.h"' % lib)
+    w("#endif")
+    w("")
+    if not have_macro:
+        w("// NOTE: the SDK this was generated against had no REX_SNAP_HOOK yet")
+        w("// (workstream B2, src/system/snapshot.cpp). The placeholder below keeps the")
+        w("// file compiling as a plain forwarding wrapper; regenerate once B2 lands.")
+        w("")
+    w("#ifdef REX_SNAP_HOOK")
+    w("#define %s_SNAP(sub, addr, ...) REX_SNAP_HOOK(sub __VA_OPT__(,) __VA_ARGS__)" % lib.upper())
+    w("#else")
+    w("// Placeholder: forward only, so the record configuration still links.")
+    w("#define %s_SNAP(sub, addr, ...)              \\" % lib.upper())
+    w("  REX_EXTERN(__imp__##sub);                  \\")
+    w("  extern \"C\" REX_FUNC(sub) { __imp__##sub(ctx, base); }")
+    w("#endif")
+    w("")
+    w("namespace %s::record {" % ns)
+    w("struct RecordEntry { uint32_t address; const char* name; uint8_t arity; };")
+    w("const RecordEntry kRecordEntries[] = {")
+    for e in entries:
+        w("    {0x%08X, %s, %d}," % (e["address"], cpp_str(e["name"]), e["arity"] or 0))
+    w("};")
+    w("const std::size_t kRecordEntryCount = %d;" % len(entries))
+    w("}  // namespace %s::record" % ns)
+    w("")
+    for e in entries:
+        a = "%08X" % e["address"]
+        w("// 0x%s %s arity=%d - %s" % (a, e["name"], e["arity"] or 0, e["freq"]))
+        w("#ifdef %s_SNAP_RANGES_%s" % (lib.upper(), a))
+        w("%s_SNAP(sub_%s, 0x%s, %s_SNAP_RANGES_%s)" % (lib.upper(), a, a, lib.upper(), a))
+        w("#else")
+        w("%s_SNAP(sub_%s, 0x%s)" % (lib.upper(), a, a))
+        w("#endif")
+        w("")
+    return "\n".join(L) + "\n"
+
+
+def gen_native_h(ing, lib):
+    ns = lib + "native"
+    t = ing["title"]
+    cv = "%s_%s" % (t, lib)
+    return f"""// {ns}: mode switch and reach counters for the {t} {lib} band.
+//
+// Scaffold written once by `rexnative emit` (--lib {lib}); hand-owned after
+// that (emit does not overwrite it without --force). The generated overrides
+// in gen/overrides.cpp displace the weak generated sub_X symbols for every
+// entry in api_table.toml. Each override counts the call, then acts on the
+// entry's effective mode, which this module computes once at app post-setup
+// from the cvars:
+//
+//   {cv} = guest | tee | native      global switch (default guest)
+//   {cv}_entries = "ADDR=mode,..."  per-entry override, applied last
+//   {cv}_log_counts (int seconds)    0 = only at exit; N = also every N s
+//
+// Native code binds to an entry by defining, in namespace {ns}::hooks,
+// any of  TeePre_<ADDR>, TeePost_<ADDR>, Native_<ADDR>  with the PPCFunc
+// signature (see README.md). The generated file declares them weak, so an
+// entry without an implementation still links; Init() logs what is bound.
+
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+#include <rex/ppc/func.h>
+
+namespace {ns} {{
+
+enum class Mode : uint8_t {{ kGuest = 0, kTee = 1, kNative = 2, kFatal = 3 }};
+enum class Role : uint8_t {{ kNone = 0, kPresent = 1, kRingInit = 2 }};
+
+struct Entry {{
+  uint32_t address;      // guest VA; symbol is sub_<address>
+  const char* name;      // from api_table.toml
+  uint8_t arity;         // integer args in r3.. (informational)
+  Mode table_mode;       // what "native" means for this entry
+  Role role;
+  PPCFunc* imp;          // __imp__sub_<address>, the generated body
+  PPCFunc* tee_pre;      // weak hooks, null when not implemented
+  PPCFunc* tee_post;
+  PPCFunc* native;
+}};
+
+// Generated tables (gen/overrides.cpp).
+extern const Entry kEntries[];
+extern const std::size_t kEntryCount;
+extern std::atomic<uint64_t> g_counts[];
+extern std::atomic<uint8_t> g_effective[];
+
+bool ParseMode(const char* text, Mode& out);
+const char* ModeName(Mode m);
+
+// Read the cvars and compute every entry's effective mode. Call once from the
+// app's OnPostSetup (after config parsing). Safe to call again; counters kept.
+void Init();
+
+// Log the reach table. Call from OnShutdown.
+void Shutdown();
+
+Mode GlobalMode();
+
+inline Mode EffectiveMode(std::size_t index) {{
+  return static_cast<Mode>(g_effective[index].load(std::memory_order_relaxed));
+}}
+
+uint64_t Count(std::size_t index);
+uint64_t Count(const char* name);
+uint64_t Count(uint32_t address);
+std::size_t IndexOf(uint32_t address);
+
+// Log "[{lib.upper()}NATIVE] band functions reached:" followed by one line per entry.
+void LogCounts(const char* reason);
+
+// Frames presented since start (incremented by the present-role override).
+uint64_t FrameCount();
+
+namespace detail {{
+inline void Hit(std::size_t index) {{
+  g_counts[index].fetch_add(1, std::memory_order_relaxed);
+}}
+void OnPresent();
+void OnRingInit(uint32_t r3, uint32_t r4);
+[[noreturn]] void Fatal(std::size_t index, uint32_t lr, const char* why);
+}}  // namespace detail
+
+}}  // namespace {ns}
+"""
+
+
+def gen_native_cpp(ing, lib):
+    ns = lib + "native"
+    t = ing["title"]
+    cv = "%s_%s" % (t, lib)
+    tag = "[%sNATIVE]" % lib.upper()
+    return f"""// {ns}: cvars, effective-mode table and reach counters. See {lib}_native.h.
+// Scaffold written once by `rexnative emit`; hand-owned after that.
+#include "{ns}/{lib}_native.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <string_view>
+
+#include <rex/cvar.h>
+#include <rex/logging.h>
+#include <rex/logging/assert.h>
+
+REXCVAR_DEFINE_STRING({cv}, "guest", "{t}",
+                      "{lib} band mode: guest (forward to recompiled code), tee (mirror into the "
+                      "native implementation, then forward), native (per-entry mode from api_table.toml)");
+REXCVAR_DEFINE_STRING({cv}_entries, "", "{t}",
+                      "Per-entry mode overrides applied after {cv}, e.g. "
+                      "\\"82695BE0=tee,Present=native\\" (address or table name)");
+REXCVAR_DEFINE_INT32({cv}_log_counts, 0, "{t}",
+                     "Log the band reach table every N seconds (0 = only at exit)");
+
+namespace {ns} {{
+namespace {{
+
+Mode g_global_mode = Mode::kGuest;
+std::atomic<uint64_t> g_frames{{0}};
+std::atomic<bool> g_initialised{{false}};
+std::atomic<int> g_log_every_s{{0}};
+std::chrono::steady_clock::time_point g_last_log{{}};
+
+std::size_t FindByNameOrAddress(std::string_view key) {{
+  for (std::size_t i = 0; i < kEntryCount; ++i)
+    if (key == kEntries[i].name) return i;
+  std::string k(key);
+  if (k.rfind("sub_", 0) == 0) k = k.substr(4);
+  if (k.rfind("0x", 0) == 0 || k.rfind("0X", 0) == 0) k = k.substr(2);
+  char* end = nullptr;
+  unsigned long v = std::strtoul(k.c_str(), &end, 16);
+  if (end && *end == '\\0' && !k.empty()) return IndexOf(static_cast<uint32_t>(v));
+  return kEntryCount;
+}}
+
+void ApplyEntryOverrides(const std::string& spec) {{
+  std::string_view s(spec);
+  while (!s.empty()) {{
+    auto comma = s.find(',');
+    std::string_view item = s.substr(0, comma);
+    s = comma == std::string_view::npos ? std::string_view{{}} : s.substr(comma + 1);
+    while (!item.empty() && item.front() == ' ') item.remove_prefix(1);
+    while (!item.empty() && item.back() == ' ') item.remove_suffix(1);
+    if (item.empty()) continue;
+    auto eq = item.find('=');
+    if (eq == std::string_view::npos) {{
+      REXLOG_WARN("{tag} {cv}_entries: ignoring '{{}}' (expected NAME=mode)", item);
+      continue;
+    }}
+    std::size_t idx = FindByNameOrAddress(item.substr(0, eq));
+    Mode m;
+    if (idx == kEntryCount) {{
+      REXLOG_WARN("{tag} {cv}_entries: unknown entry '{{}}'", item.substr(0, eq));
+      continue;
+    }}
+    if (!ParseMode(std::string(item.substr(eq + 1)).c_str(), m)) {{
+      REXLOG_WARN("{tag} {cv}_entries: bad mode in '{{}}'", item);
+      continue;
+    }}
+    g_effective[idx].store(static_cast<uint8_t>(m), std::memory_order_relaxed);
+  }}
+}}
+
+}}  // namespace
+
+bool ParseMode(const char* text, Mode& out) {{
+  if (!text) return false;
+  if (!std::strcmp(text, "guest")) {{ out = Mode::kGuest; return true; }}
+  if (!std::strcmp(text, "tee")) {{ out = Mode::kTee; return true; }}
+  if (!std::strcmp(text, "native")) {{ out = Mode::kNative; return true; }}
+  if (!std::strcmp(text, "fatal")) {{ out = Mode::kFatal; return true; }}
+  return false;
+}}
+
+const char* ModeName(Mode m) {{
+  switch (m) {{
+    case Mode::kGuest: return "guest";
+    case Mode::kTee: return "tee";
+    case Mode::kNative: return "native";
+    case Mode::kFatal: return "fatal";
+  }}
+  return "?";
+}}
+
+Mode GlobalMode() {{ return g_global_mode; }}
+uint64_t FrameCount() {{ return g_frames.load(std::memory_order_relaxed); }}
+
+std::size_t IndexOf(uint32_t address) {{
+  for (std::size_t i = 0; i < kEntryCount; ++i)
+    if (kEntries[i].address == address) return i;
+  return kEntryCount;
+}}
+
+uint64_t Count(std::size_t index) {{
+  return index < kEntryCount ? g_counts[index].load(std::memory_order_relaxed) : 0;
+}}
+uint64_t Count(const char* name) {{ return Count(name ? FindByNameOrAddress(name) : kEntryCount); }}
+uint64_t Count(uint32_t address) {{ return Count(IndexOf(address)); }}
+
+void Init() {{
+  const std::string& mode_text = REXCVAR_GET({cv});
+  if (!ParseMode(mode_text.c_str(), g_global_mode)) {{
+    REXLOG_WARN("{tag} {cv}='{{}}' is not guest|tee|native; using guest", mode_text);
+    g_global_mode = Mode::kGuest;
+  }}
+  if (g_global_mode == Mode::kFatal) {{
+    REXLOG_WARN("{tag} {cv}=fatal is not a global mode; using native");
+    g_global_mode = Mode::kNative;
+  }}
+  for (std::size_t i = 0; i < kEntryCount; ++i) {{
+    Mode eff;
+    switch (g_global_mode) {{
+      case Mode::kGuest: eff = Mode::kGuest; break;
+      case Mode::kTee: eff = Mode::kTee; break;
+      default: eff = kEntries[i].table_mode; break;
+    }}
+    g_effective[i].store(static_cast<uint8_t>(eff), std::memory_order_relaxed);
+  }}
+  ApplyEntryOverrides(REXCVAR_GET({cv}_entries));
+  g_log_every_s.store(REXCVAR_GET({cv}_log_counts), std::memory_order_relaxed);
+  g_last_log = std::chrono::steady_clock::now();
+  g_initialised.store(true, std::memory_order_release);
+
+  REXLOG_INFO("{tag} mode={{}} entries={{}} log_counts={{}}s", ModeName(g_global_mode), kEntryCount,
+              g_log_every_s.load());
+  for (std::size_t i = 0; i < kEntryCount; ++i) {{
+    const Entry& e = kEntries[i];
+    Mode eff = EffectiveMode(i);
+    if (eff == Mode::kNative && !e.native)
+      REXLOG_WARN("{tag}   {{:08X}} {{:<28}} effective=native but hooks::Native_{{:08X}} is not bound; "
+                  "the first call will be fatal", e.address, e.name, e.address);
+    REXLOG_INFO("{tag}   {{:08X}} {{:<28}} table={{:<6}} effective={{:<6}} bound:{{}}{{}}{{}}", e.address, e.name,
+                ModeName(e.table_mode), ModeName(eff), e.tee_pre ? " tee_pre" : "",
+                e.tee_post ? " tee_post" : "", e.native ? " native" : "");
+  }}
+}}
+
+void LogCounts(const char* reason) {{
+  REXLOG_INFO("{tag} band functions reached ({{}}), frames={{}}:", reason ? reason : "",
+              g_frames.load(std::memory_order_relaxed));
+  REXLOG_INFO("{tag}   {{:<8}} {{:<28}} {{:<6}} {{:>12}}", "address", "name", "mode", "count");
+  for (std::size_t i = 0; i < kEntryCount; ++i) {{
+    const Entry& e = kEntries[i];
+    REXLOG_INFO("{tag}   {{:08X}} {{:<28}} {{:<6}} {{:>12}}", e.address, e.name, ModeName(EffectiveMode(i)),
+                g_counts[i].load(std::memory_order_relaxed));
+  }}
+}}
+
+void Shutdown() {{
+  if (!g_initialised.exchange(false)) return;
+  LogCounts("exit");
+}}
+
+namespace detail {{
+
+void OnPresent() {{
+  g_frames.fetch_add(1, std::memory_order_relaxed);
+  int every = g_log_every_s.load(std::memory_order_relaxed);
+  if (every <= 0) return;
+  auto now = std::chrono::steady_clock::now();
+  if (now - g_last_log >= std::chrono::seconds(every)) {{
+    g_last_log = now;
+    LogCounts("periodic");
+  }}
+}}
+
+void OnRingInit(uint32_t r3, uint32_t r4) {{
+  REXLOG_INFO("{tag} ring init r3={{:08X}} r4={{:08X}} mode={{}}", r3, r4, ModeName(g_global_mode));
+}}
+
+void Fatal(std::size_t index, uint32_t lr, const char* why) {{
+  const Entry& e = kEntries[index];
+  LogCounts("fatal");
+  REX_FATAL("{tag} {{}}: {{:08X}} {{}} (lr={{:08X}}, table={{}}, effective={{}})", why, e.address, e.name, lr,
+            ModeName(e.table_mode), ModeName(EffectiveMode(index)));
+}}
+
+}}  // namespace detail
+}}  // namespace {ns}
+"""
+
+
+def gen_readme(ing, lib, entries, h, measured):
+    t = ing["title"]
+    ns = lib + "native"
+    cv = "%s_%s" % (t, lib)
+    n_api = sum(1 for e in entries if e["tier"] == 1)
+    s = h["summary"]
+    lines = [
+        "# %s: %s %s band scaffolding" % (ns, t, lib),
+        "",
+        "Generated by `rexnative emit --lib %s` (SDK `tools/rexnative`). Strong C++" % lib,
+        "overrides for the guest's statically linked %s library, a mode switch and reach" % lib,
+        "counters. Nothing here changes behaviour until the cvar `%s` says so: with" % cv,
+        "the default `guest` every override counts the call and forwards to the generated body.",
+        "",
+        "## Measured baseline",
+        "",
+        "| | |",
+        "|---|---|",
+        "| region | `%s` (%d functions) |" % (h["region"], s["in_region"]),
+        "| public API candidates (callers outside the region) | %d |" % s["api_candidates"],
+        "| reached in the harvest | %s |" % (("%d (%d calls%s)" % (s["reached"], s["calls_total"],
+                                              (", %d frames" % h["frames"]) if h.get("frames") else ""))
+                                             if measured else "unmeasured - no reach trace yet"),
+        "| entries in `api_table.toml` | %d (%d tier-1 API, %d internal/role) |" % (len(entries), n_api, len(entries) - n_api),
+        "",
+        "## Files",
+        "",
+        "| File | Role | Regenerated by emit |",
+        "|---|---|---|",
+        "| `entrypoints.json` | seam entry points with count, band, tier, callers, evidence (FORMATS.md) | yes |",
+        "| `api_table.toml` | address -> name, arity, mode, role; per-address hand edits survive | merged |",
+        "| `gen/overrides.cpp` | one `REX_HOOK_RAW` per entry: counter + guest/tee/native/fatal switch | yes |",
+        "| `gen/record.cpp` | one `REX_SNAP_HOOK` per entry; built INSTEAD of overrides.cpp when `%s_%sNATIVE_RECORD=ON` | yes |" % (t.upper(), lib.upper()),
+        "| `%s_native.h` / `.cpp` | cvars `%s`, `%s_entries`, `%s_log_counts`; effective-mode table | no (scaffold) |" % (lib, cv, cv, cv),
+        "| `sources.cmake` | written by `rexnative link`; `include()` it from the port CMakeLists after `rexglue_setup_target` | link |",
+        "| `VERIFY.md` | last `rexnative verify` result block | verify |",
+        "",
+        "## Wiring",
+        "",
+        "1. `rexnative link <port> --lib %s`, then add the printed `include()` line." % lib,
+        "2. Call `%s::Init()` from the app's `OnPostSetup` and `%s::Shutdown()` from `OnShutdown`." % (ns, ns),
+        "3. Build; `%s = guest` is the default and must be bit-identical to an unhooked build." % cv,
+        "",
+        "## Binding native code",
+        "",
+        "```cpp",
+        '#include "%s/%s_native.h"' % (ns, lib),
+        "namespace %s::hooks {" % ns,
+        "void TeePre_%08X(PPCContext& ctx, uint8_t* base) {}   // %s" % (entries[0]["address"], entries[0]["name"]) if entries else "",
+        "void Native_%08X(PPCContext& ctx, uint8_t* base) {}" % entries[0]["address"] if entries else "",
+        "}",
+        "```",
+        "",
+        "Hooks are keyed by address, so a rename in the table cannot unbind an implementation.",
+        "Set `mode = \"native\"` on the entry and run with `%s=native` (or `%s_entries=ADDR=native`)." % (cv, cv),
+        "",
+        "## Entries by measured frequency",
+        "",
+        "| addr | name | arity | tier | count | band | evidence |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    for e in sorted(entries, key=lambda e: -e["count"]):
+        lines.append("| `%08X` | %s | %s | %d | %d | %s | %s |" % (
+            e["address"], e["name"], e["arity"] if e["arity"] is not None else "?", e["tier"], e["count"],
+            e["band"], ", ".join(e["evidence"])))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def native_toml_section(lib, ranges, policy, banned, lib_dir_rel):
+    return {
+        "ranges": "[%s]" % ", ".join(toml_str(r) for r in ranges),
+        "policy": "%s   # no-guest-code | banned | reach-zero" % toml_str(policy),
+        "banned": "[%s]" % ", ".join(toml_str("%08X" % b) for b in banned),
+        "entrypoints": toml_str(lib_dir_rel + "/entrypoints.json"),
+        "api_table": toml_str(lib_dir_rel + "/api_table.toml"),
+        "sources": toml_str(lib_dir_rel + "/sources.cmake"),
+    }
+
+
+def splice_toml_section(existing_text, lib, fields):
+    """Merge [module.<lib>]: an existing table keeps every key it has (B1 owns
+    the shape; A1 may point `band`/`entrypoints` at docs/) and only gains the
+    keys it lacks; a missing table is appended in full. Returns (text, added)."""
+    hdr = "[module.%s]" % lib
+    lines = existing_text.splitlines(keepends=True) if existing_text else []
+    start = None
+    for i, l in enumerate(lines):
+        if l.strip() == hdr:
+            start = i
+            break
+    if start is None:
+        head = existing_text if existing_text else (
+            "# native.toml - module ranges and gate policy (docs/native/FORMATS.md).\n"
+            "# Written by `rexnative emit`; one [module.<lib>] table per library.\n"
+            "format = \"rex-native-toml/1\"\n\n")
+        if not head.endswith("\n"):
+            head += "\n"
+        if not head.endswith("\n\n"):
+            head += "\n"
+        body = hdr + "\n" + "".join("%s = %s\n" % kv for kv in fields.items())
+        return head + body, list(fields)
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            end = j
+            break
+    present = set()
+    for l in lines[start + 1:end]:
+        m = re.match(r"\s*([A-Za-z0-9_\-]+)\s*=", l)
+        if m:
+            present.add(m.group(1))
+    added = [k for k in fields if k not in present]
+    # insert before trailing blank lines of the section
+    ins = end
+    while ins > start + 1 and not lines[ins - 1].strip():
+        ins -= 1
+    new = lines[:ins] + ["%s = %s\n" % (k, fields[k]) for k in added] + lines[ins:]
+    return "".join(new), added
+
+
+def diff_summary(new_text, old_path, label, max_lines=40):
+    if not os.path.exists(old_path):
+        return ["  %-22s NEW (no existing file to compare)" % label]
+    old = open(old_path, errors="ignore").read()
+    if old == new_text:
+        return ["  %-22s identical to %s" % (label, old_path)]
+    ol, nl = old.splitlines(), new_text.splitlines()
+    sm = difflib.SequenceMatcher(None, ol, nl)
+    add = sum(j2 - j1 for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag in ("insert", "replace"))
+    rem = sum(i2 - i1 for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag in ("delete", "replace"))
+    out = ["  %-22s differs from %s: +%d -%d lines (of %d old / %d new)" % (label, old_path, add, rem, len(ol), len(nl))]
+    for line in list(difflib.unified_diff(ol, nl, "existing", "emitted", lineterm="", n=0))[2:2 + max_lines]:
+        out.append("      " + line)
+    return out
+
+
+def cmd_emit(args):
+    """Generate the seam scaffolding for one library on a port.
+
+    The library is not recompiled away - its entry points get strong hooks
+    that displace the weak aliases codegen emits, and each hook forwards to
+    the generated body until the entry's mode says otherwise. Every entry
+    starts as guest-forwarding with its measured frequency in a comment, so
+    the order to implement is the order that gets a frame on screen soonest.
+    Nothing under generated/ is touched.
+    """
+    ing = load_ingest(args.ingest)
+    lib = lib_of(args)
+    port = ing["port"]
+    title = ing["title"]
+
+    # Counts: explicit --reach/--counts, else the csv the harvest recorded.
+    hv = ing.get("harvest", {}).get(lib, {})
+    reach = args.reach or (hv.get("reach") if not args.counts else None)
+    counts, src = load_counts(reach, args.counts)
+    region_override = None
+    if args.region:
+        region_override = parse_range(args.region)
+    elif hv.get("region"):
+        region_override = tuple(int(x, 16) for x in hv["region"].split(".."))
+    h = harvest_core(ing, lib, args.pad, counts, region_override)
+    h["reach"] = os.path.abspath(src) if src else None
+    lo, hi = h["_region"]
+
+    lib_dir_rel = "src/%snative" % lib
+    real_dir = os.path.join(port, lib_dir_rel)
+    dry_root = os.path.join(port, "out", "rexnative", "dry", lib)
+    out_dir = args.out_dir or (os.path.join(dry_root, lib_dir_rel) if args.dry_run else real_dir)
+
+    # A1 names / arity.
+    ep_path = args.entrypoints
+    if ep_path is None:
+        cand = os.path.join(port, "docs", lib.replace("d3d9", "d3d"), "entrypoints.json")
+        ep_path = cand if os.path.exists(cand) else None
+    names_by_addr = load_entrypoint_names(ep_path) if ep_path else {}
+    ar_path = args.arity
+    if ar_path is None:
+        cand = os.path.join(port, "docs", lib.replace("d3d9", "d3d"), "arity.json")
+        ar_path = cand if os.path.exists(cand) else None
+    arity_by_addr = load_arity_file(ar_path) if ar_path else {}
+
+    # Module range for native.toml: explicit --range, else what native.toml
+    # already says (B1/A1 own that), else the 64 KiB-aligned hull of the seeds.
+    # The harvest pad is only an instrumentation bound; entries are selected
+    # inside the module range so game code next to the library is not hooked.
+    nt_path = os.path.join(port, "native.toml")
+    nt_old = open(nt_path).read() if os.path.exists(nt_path) else ""
+    nt_mod = load_native_toml(port).get(lib, {})
+    range_src = "--range"
+    if args.range:
+        mranges = [parse_range(args.range)]
+    elif nt_mod.get("ranges") or nt_mod.get("range"):
+        mranges = [parse_range(r) for r in (nt_mod.get("ranges") or [nt_mod["range"]])]
+        range_src = "native.toml"
+    else:
+        slo, shi = (int(x, 16) for x in h["seed_span"].split("-"))
+        mranges = [(slo & ~0xFFFF, shi | 0xFFFF)]
+        range_src = "seed hull"
+    ranges = ["%08X-%08X" % r for r in mranges]
+
+    meta_prev, existing = load_existing_table(os.path.join(real_dir, "api_table.toml"))
+    entries, measured = select_entries(ing, lib, h, args, names_by_addr, arity_by_addr, existing, mranges)
+    if not entries:
+        sys.exit("no entries selected - was the harvest run long enough? (try --include-internal or --pick)")
+    need = [e["address"] for e in entries if e["arity"] is None]
+    if need:
+        est = estimate_arity(ing, need)
+        for e in entries:
+            if e["arity"] is None:
+                e["arity"] = est.get(e["address"])
+
+    banned = sorted(e["address"] for e in entries if e["mode"] == "fatal")
+
+    have_macro = snapshot_macro_available()
+    table_rel = lib_dir_rel + "/api_table.toml"
+    files = {
+        "api_table.toml": gen_api_table(ing, lib, entries, (lo, hi), meta_prev),
+        "entrypoints.json": gen_entrypoints_json(ing, lib, entries, h, measured),
+        "gen/overrides.cpp": gen_overrides_cpp(ing, lib, entries, table_rel),
+        "gen/record.cpp": gen_record_cpp(ing, lib, entries, have_macro),
+    }
+    scaffold = {
+        "%s_native.h" % lib: gen_native_h(ing, lib),
+        "%s_native.cpp" % lib: gen_native_cpp(ing, lib),
+        "README.md": gen_readme(ing, lib, entries, h, measured),
+    }
+    nt_new, nt_added = splice_toml_section(nt_old, lib, native_toml_section(lib, ranges, args.policy, banned, lib_dir_rel))
+
+    print("== rexnative emit: %s / %s%s ==" % (ing["slug"], lib, " (dry run)" if args.dry_run else ""))
+    print("  region             %08X-%08X (%d functions), module range %s (%s)" % (lo, hi, h["summary"]["in_region"], ",".join(ranges), range_src))
+    if nt_mod:
+        print("  native.toml        [module.%s] exists; keys kept, added: %s" % (lib, " ".join(nt_added) or "none"))
+    print("  counts             %s" % (src if measured else "unmeasured - every entry noted as such"))
+    if ep_path:
+        print("  names              %s (%d matched)" % (ep_path, sum(1 for e in entries if e["address"] in names_by_addr)))
+    if ar_path:
+        print("  arity              %s" % ar_path)
+    if existing:
+        print("  existing table     %d entries kept (name/arity/mode/role/note preserved per address)" % len(existing))
+    bands = collections.Counter(e["band"] for e in entries)
+    print("  entries            %d  (tier1 %d, tier2 %d, tier3 %d; %s)"
+          % (len(entries), sum(1 for e in entries if e["tier"] == 1), sum(1 for e in entries if e["tier"] == 2),
+             sum(1 for e in entries if e["tier"] == 3), " ".join("%s %d" % kv for kv in bands.most_common())))
+    print("  REX_SNAP_HOOK      %s" % ("available (record.cpp uses it)" if have_macro else "absent - record.cpp carries a forwarding placeholder"))
+    for e in sorted(entries, key=lambda e: -e["count"])[:12]:
+        print("    %08X %-28s arity=%-3s tier%d %10d %-9s %s%s" % (
+            e["address"], e["name"], e["arity"] if e["arity"] is not None else "?", e["tier"], e["count"], e["band"],
+            e["role"] or "", " POLL" if e["poll"] else ""))
+    if len(entries) > 12:
+        print("    ... %d more" % (len(entries) - 12))
+
+    written = []
+    os.makedirs(os.path.join(out_dir, "gen"), exist_ok=True)
+    for rel, text in files.items():
+        p = os.path.join(out_dir, rel)
+        with open(p, "w") as fh:
+            fh.write(text)
+        written.append(p)
+    for rel, text in scaffold.items():
+        p = os.path.join(out_dir, rel)
+        if os.path.exists(os.path.join(real_dir, rel)) and not args.force and not args.dry_run:
+            print("  keep               %s (hand-owned; --force to overwrite)" % os.path.join(real_dir, rel))
+            continue
+        with open(p, "w") as fh:
+            fh.write(text)
+        written.append(p)
+    nt_dest = os.path.join(dry_root, "native.toml") if args.dry_run else nt_path
+    with open(nt_dest, "w") as fh:
+        fh.write(nt_new)
+    written.append(nt_dest)
+    for p in written:
+        print("  -> %s" % p)
+
+    if args.dry_run:
+        print()
+        print("  comparison against the port's existing files:")
+        # A2's hand-built PGR4 layout uses band_overrides.cpp / mode.h / mode.cpp.
+        alias = {"gen/overrides.cpp": ["gen/overrides.cpp", "gen/band_overrides.cpp"],
+                 "%s_native.h" % lib: ["%s_native.h" % lib, "mode.h"],
+                 "%s_native.cpp" % lib: ["%s_native.cpp" % lib, "mode.cpp"]}
+        for rel, text in list(files.items()) + list(scaffold.items()):
+            cands = alias.get(rel, [rel])
+            target = next((os.path.join(real_dir, c) for c in cands if os.path.exists(os.path.join(real_dir, c))),
+                          os.path.join(real_dir, cands[0]))
+            for line in diff_summary(text, target, rel, args.diff_lines):
+                print(line)
+        for line in diff_summary(nt_new, nt_path, "native.toml", args.diff_lines):
+            print(line)
+        if existing:
+            mine = {e["address"] for e in entries}
+            only_theirs = sorted(set(existing) - mine)
+            only_mine = sorted(mine - set(existing))
+            print("  entry set          existing %d, emitted %d, common %d" % (len(existing), len(mine), len(mine & set(existing))))
+            if only_theirs:
+                print("    only in existing  " + " ".join("%08X" % a for a in only_theirs))
+            if only_mine:
+                print("    only emitted      " + " ".join("%08X" % a for a in only_mine[:24]) + (" ..." if len(only_mine) > 24 else ""))
+    else:
+        ing.setdefault("emit", {})[lib] = {
+            "entries": len(entries), "api_functions": sum(1 for e in entries if e["tier"] == 1),
+            "dir": out_dir, "module_range": ranges[0], "policy": args.policy,
+            "reach": h["reach"], "snap_macro": have_macro,
+        }
+        save_ingest(ing)
+        print()
+        print("  Next: rexnative link %s --lib %s" % (port, lib))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# link
+# ---------------------------------------------------------------------------
+
+def cmd_link(args):
+    ing = load_ingest(args.ingest)
+    lib = lib_of(args)
+    port, title = ing["port"], ing["title"]
+    lib_dir_rel = "src/%snative" % lib
+    lib_dir = os.path.join(port, lib_dir_rel)
+    if not os.path.exists(os.path.join(lib_dir, "gen", "overrides.cpp")):
+        sys.exit("no %s/gen/overrides.cpp - run `rexnative emit` first" % lib_dir)
+    T, L = title.upper(), lib.upper()
+    opt_record = "%s_%sNATIVE_RECORD" % (T, L)
+    text = f"""# GENERATED by `rexnative link` ({title} / {lib}) - do not edit.
+#
+# include() this from the port's CMakeLists.txt AFTER rexglue_setup_target({title}):
+#     include(${{CMAKE_CURRENT_SOURCE_DIR}}/{lib_dir_rel}/sources.cmake)
+# It adds the {lib}native sources to the {title} target, exposes the record
+# configuration, and wires the Stage 0 reach counters (docs/native/FORMATS.md).
+
+if(NOT TARGET {title})
+    message(FATAL_ERROR "{lib_dir_rel}/sources.cmake: include it after add_executable({title}) / rexglue_setup_target({title})")
+endif()
+
+option({opt_record} "Build {lib_dir_rel}/gen/record.cpp (REX_SNAP_HOOK wrappers) instead of gen/overrides.cpp" OFF)
+if(NOT DEFINED REXGLUE_GUEST_REACH)
+    option(REXGLUE_GUEST_REACH "Count calls to every generated guest function (REX_TRACE_REACH)" OFF)
+endif()
+
+set({T}_{L}NATIVE_SOURCES
+    ${{CMAKE_CURRENT_LIST_DIR}}/{lib}_native.cpp
+)
+if({opt_record})
+    list(APPEND {T}_{L}NATIVE_SOURCES ${{CMAKE_CURRENT_LIST_DIR}}/gen/record.cpp)
+else()
+    list(APPEND {T}_{L}NATIVE_SOURCES ${{CMAKE_CURRENT_LIST_DIR}}/gen/overrides.cpp)
+endif()
+
+target_sources({title} PRIVATE ${{{T}_{L}NATIVE_SOURCES}})
+target_include_directories({title} PRIVATE ${{CMAKE_CURRENT_LIST_DIR}}/..)
+
+if(REXGLUE_GUEST_REACH AND TARGET {title}_recomp)
+    target_compile_definitions({title}_recomp PRIVATE REX_GUEST_REACH=1)
+endif()
+"""
+    dest = os.path.join(lib_dir, "sources.cmake")
+    with open(dest, "w") as fh:
+        fh.write(text)
+    include_line = "include(${CMAKE_CURRENT_SOURCE_DIR}/%s/sources.cmake)" % lib_dir_rel
+
+    cml = os.path.join(port, "CMakeLists.txt")
+    cml_text = open(cml).read() if os.path.exists(cml) else ""
+    already = include_line in cml_text or ("%s/sources.cmake" % lib_dir_rel) in cml_text
+    marker = "# rexnative:link"
+    edited = False
+    if not already and marker in cml_text and not args.no_edit:
+        lines = cml_text.splitlines(keepends=True)
+        for i, l in enumerate(lines):
+            if l.strip() == marker:
+                lines.insert(i + 1, include_line + "\n")
+                edited = True
+                break
+        if edited:
+            with open(cml, "w") as fh:
+                fh.write("".join(lines))
+
+    # Collisions with an existing hand layout (A2's PGR4 d3d9native).
+    warnings = []
+    for rel in ("gen/band_overrides.cpp", "mode.cpp"):
+        if rel in cml_text and lib == "d3d9":
+            warnings.append("CMakeLists already lists %s/%s: it defines the same strong sub_X / cvars as the "
+                            "emitted files - link one layout, not both" % (lib_dir_rel, rel))
+
+    ing.setdefault("link", {})[lib] = {"sources_cmake": dest, "include": include_line, "cmake_edited": edited}
+    save_ingest(ing)
+
+    print("== rexnative link: %s / %s ==" % (ing["slug"], lib))
+    print("  -> %s" % dest)
+    if already:
+        print("  CMakeLists.txt     already includes it")
+    elif edited:
+        print("  CMakeLists.txt     include inserted after the '%s' marker" % marker)
+    else:
+        print("  add this line to %s after rexglue_setup_target(%s):" % (cml, title))
+        print()
+        print("    " + include_line)
+        print()
+        print("  (or put a '%s' comment line there and rerun link to insert it)" % marker)
+    print("  then call %snative::Init() in OnPostSetup and %snative::Shutdown() in OnShutdown." % (lib, lib))
+    print("  reach build:       cmake -DREXGLUE_GUEST_REACH=ON ...; run with REX_TRACE_REACH=<csv>")
+    print("  record build:      cmake -D%s=ON ...; run with REX_SNAP_DIR=<dir>" % opt_record)
+    for wmsg in warnings:
+        print("  warning: " + wmsg)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# status / verify helpers
+# ---------------------------------------------------------------------------
+
+def load_native_toml(port):
+    p = os.path.join(port, "native.toml")
+    if not os.path.exists(p):
+        return {}
+    with open(p, "rb") as fh:
+        return tomllib.load(fh).get("module", {})
+
+
+def load_symbols(port, allow_run=True):
+    p = os.path.join(port, "out", "native", "symbols.json")
+    if not os.path.exists(p) and allow_run:
+        tool = os.path.join(SDK_DIR, "tools", "native_map.py")
+        if os.path.exists(tool) and glob.glob(os.path.join(port, "out", "build", "*")):
+            subprocess.run([sys.executable, tool, port], capture_output=True, text=True)
+    if not os.path.exists(p):
+        return None
+    with open(p) as fh:
+        return json.load(fh)
+
+
+def module_coverage(port, lib, mod, symbols, counts):
+    ranges = []
+    for r in mod.get("ranges", []):
+        ranges.append(parse_range(r))
+    if not ranges and mod.get("range"):
+        ranges.append(parse_range(mod["range"]))
+
+    def inside(a):
+        return any(lo <= a <= hi for lo, hi in ranges)
+
+    row = {"lib": lib, "ranges": ["%08X-%08X" % r for r in ranges], "policy": mod.get("policy", "?")}
+    if symbols:
+        st = collections.Counter()
+        weight = collections.Counter()
+        for addr, s in symbols["symbols"].items():
+            a = int(addr, 16)
+            if not inside(a):
+                continue
+            st[s["status"]] += 1
+            if counts:
+                weight[s["status"]] += counts.get(a, 0)
+        total = sum(st.values())
+        row.update({"functions": total, "generated": st["generated"], "displaced": st["displaced"],
+                    "dropped": st["dropped"],
+                    "pct_displaced": (100.0 * st["displaced"] / total) if total else 0.0})
+        if counts:
+            wt = sum(weight.values())
+            row.update({"calls": wt, "calls_generated": weight["generated"],
+                        "pct_calls_displaced": (100.0 * (wt - weight["generated"]) / wt) if wt else 0.0})
+    elif counts:
+        reached = {a: n for a, n in counts.items() if inside(a)}
+        row.update({"reached": len(reached), "calls": sum(reached.values())})
+    return row
+
+
+def coverage_line(row):
+    s = "  %-6s range %-20s policy %-13s" % (row["lib"], ",".join(row["ranges"]), row["policy"])
+    if "functions" in row:
+        s += " funcs %4d: displaced %3d (%5.1f%%) generated %4d dropped %3d" % (
+            row["functions"], row["displaced"], row["pct_displaced"], row["generated"], row["dropped"])
+        if "calls" in row:
+            s += " | reach %d calls, %.1f%% off the guest body" % (row["calls"], row["pct_calls_displaced"])
+        else:
+            s += " | reach n/a"
+    elif "reached" in row:
+        s += " symbols.json n/a | reach %d functions, %d calls" % (row["reached"], row["calls"])
+    else:
+        s += " symbols.json n/a, reach n/a"
+    return s
+
+
+def find_reach(args, port):
+    if getattr(args, "reach", None):
+        return args.reach
+    for cand in (os.environ.get("REX_TRACE_REACH"), os.path.join(port, "out", "native", "reach.csv"),
+                 os.path.join(port, "out", "rexnative", "reach.csv")):
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+def cmd_status(args):
+    """Where the pipeline is, read from artifacts rather than a stored flag."""
+    target = args.port or args.ingest
+    if not target:
+        sys.exit("status needs a port directory or --ingest")
+    ing = None
+    port = os.path.abspath(target)
+    if os.path.isfile(port):
+        ing = load_ingest(port)
+        port = ing["port"]
+    elif os.path.exists(os.path.join(port, "out", "rexnative", "ingest.json")):
+        ing = load_ingest(port)
+    slug = ing["slug"] if ing else os.path.basename(port)
+    print("== rexnative status: %s ==" % slug)
+    print()
+
+    modules = load_native_toml(port)
+    if modules:
+        reach = find_reach(args, port)
+        counts = read_reach(reach) if reach else {}
+        symbols = load_symbols(port)
+        print("  coverage per module (native.toml%s%s)" % (
+            ", symbols.json" if symbols else "", (", reach " + reach) if reach else ""))
+        for lib, mod in sorted(modules.items()):
+            print(coverage_line(module_coverage(port, lib, mod, symbols, counts)))
+        print()
+    else:
+        print("  native.toml  none (run `rexnative emit`)")
+        print()
+
+    if not ing:
+        return 0
+    print("  stage        state")
+    print("  ingest       %d functions, %d call edges"
+          % (ing.get("recompiled_functions", 0), ing.get("call_edges", 0)))
+    for name, info in sorted(ing.get("middleware", {}).items()):
+        if info["seed_functions"]:
+            print("               %-6s %d seeds, span %s"
+                  % (name, len(info["seed_functions"]), info["span"]))
+    hv = ing.get("harvest", {})
+    if hv:
+        for name, info in sorted(hv.items()):
+            print("  harvest      %-6s %d in region, %d API candidates, %s"
+                  % (name, info["instrumented"], info["api_candidates"],
+                     ("%d reached from %s" % (info.get("reached", 0), info.get("reach"))) if info.get("reach")
+                     else "no reach trace"))
+    else:
+        print("  harvest      not run")
+    em = ing.get("emit", {})
+    if em:
+        for name, info in sorted(em.items()):
+            if "entries" in info:
+                print("  emit         %-6s %d entries (%d API), module %s, policy %s -> %s"
+                      % (name, info["entries"], info["api_functions"], info["module_range"], info["policy"], info["dir"]))
+                table = os.path.join(info["dir"], "api_table.toml")
+                if os.path.exists(table):
+                    _, ex = load_existing_table(table)
+                    modes = collections.Counter(e.get("mode", "guest") for e in ex.values())
+                    n = len(ex)
+                    nat = modes["native"]
+                    bar = "#" * int(20 * nat / max(n, 1))
+                    print("  implement    [%-20s] %d/%d native, %d tee, %d guest, %d fatal"
+                          % (bar, nat, n, modes["tee"], modes["guest"], modes["fatal"]))
+            else:
+                api = info["api_functions"]
+                impl = 0
+                if args.impl and os.path.exists(args.impl):
+                    src = open(args.impl).read()
+                    impl = len(re.findall(r"rexnative_%s_[0-9A-F]{8}\s*\(" % name, src))
+                bar = "#" * int(20 * impl / max(api, 1))
+                print("  emit         %-6s %d API, %d internals dropped" % (name, api, info["internals_dropped"]))
+                print("  implement    [%-20s] %d/%d native, %d still the guest's" % (bar, impl, api, api - impl))
+    else:
+        print("  emit         not run")
+    lk = ing.get("link", {})
+    for name, info in sorted(lk.items()):
+        print("  link         %-6s %s%s" % (name, info["sources_cmake"], " (CMakeLists edited)" if info.get("cmake_edited") else ""))
+    vf = ing.get("verify", {})
+    for name, info in sorted(vf.items()):
+        print("  verify       %-6s %s -> %s" % (name, info.get("result"), info.get("report")))
+    for label, path in (("shaders", args.shaders), ("render graph", args.rendergraph)):
+        if path and os.path.exists(path):
+            txt = open(path).read()
+            if label == "shaders":
+                n = len(re.findall(r"kShader_[0-9A-F]{16}\[", txt))
+                print("  translate    %d shaders baked" % n)
+            else:
+                frame = txt.split("kFrame[] = {", 1)[-1].split("};", 1)[0]
+                n = len(re.findall(r"^    \{\d+, ", frame, re.M))
+                fid = re.search(r"kHarvestFidelityPercent = ([\d.]+)", txt)
+                print("  rendergraph  %d steps, %s%% periodic" % (n, fid.group(1) if fid else "?"))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+def run_step(cmd, cwd=None, timeout=1800):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except FileNotFoundError as exc:
+        return None, str(exc)
+    except subprocess.TimeoutExpired:
+        return None, "timeout after %ds" % timeout
+
+
+def tail(text, n=12):
+    lines = text.splitlines()
+    return "\n".join(lines[-n:])
+
+
+def cmd_verify(args):
+    """Run every gate that exists and record the result block.
+
+    native_check.py (B1), tests/native/snap_replay (B2) and tools/tee_diff.py
+    (B2) are other workstreams' tools: each is run only if present, and a
+    missing one is reported as SKIPPED, never as PASS. The block goes to
+    NATIVE_COVERAGE.md via native_report.py when that tool can append, else to
+    PORT/src/<lib>native/VERIFY.md.
+    """
+    import datetime
+    ing = load_ingest(args.ingest)
+    lib = lib_of(args)
+    port, title = ing["port"], ing["title"]
+    lib_dir = os.path.join(port, "src", "%snative" % lib)
+    tools = os.path.join(SDK_DIR, "tools")
+    results = []   # (name, status, detail)
+
+    def add(name, status, detail=""):
+        results.append((name, status, detail))
+        print("  %-14s %-8s %s" % (name, status, detail.splitlines()[0] if detail else ""))
+
+    print("== rexnative verify: %s / %s ==" % (ing["slug"], lib))
+    modules = load_native_toml(port)
+    if lib not in modules:
+        add("native.toml", "FAIL", "no [module.%s] - run `rexnative emit`" % lib)
+    else:
+        add("native.toml", "ok", "policy %s ranges %s" % (modules[lib].get("policy"), modules[lib].get("ranges")))
+
+    # 1. native_check.py
+    nc = os.path.join(tools, "native_check.py")
+    if os.path.exists(nc):
+        cmd = [sys.executable, nc, port, "--module", lib]
+        reach = find_reach(args, port)
+        if reach:
+            cmd += ["--reach", reach]
+        rc, out = run_step(cmd)
+        add("native_check", "PASS" if rc == 0 else ("SKIPPED" if rc is None else "FAIL"), tail(out))
+    else:
+        add("native_check", "SKIPPED", "tools/native_check.py not present (B1)")
+
+    # 2. snap_replay
+    snap_bin = None
+    for pat in (os.path.join(SDK_DIR, "out", "build", "*", "tests", "native", "snap_replay"),
+                os.path.join(SDK_DIR, "build*", "tests", "native", "snap_replay"),
+                os.path.join(port, "out", "build", "*", "snap_replay")):
+        hits = [p for p in glob.glob(pat) if os.access(p, os.X_OK)]
+        if hits:
+            snap_bin = hits[0]
+            break
+    snap_dir = args.snap_dir or os.environ.get("REX_SNAP_DIR") or os.path.join(port, "out", "native", "snap")
+    snaps = glob.glob(os.path.join(snap_dir, "*.snap")) if os.path.isdir(snap_dir) else []
+    if snap_bin and snaps:
+        rc, out = run_step([snap_bin, snap_dir] + (["--module", lib] if args.snap_module_flag else []))
+        add("snap_replay", "PASS" if rc == 0 else "FAIL", "%d snapshots in %s\n%s" % (len(snaps), snap_dir, tail(out)))
+    elif snap_bin:
+        add("snap_replay", "SKIPPED", "no .snap files in %s (record build: REX_SNAP_DIR)" % snap_dir)
+    else:
+        add("snap_replay", "SKIPPED", "tests/native/snap_replay not built (B2)")
+
+    # 3. tee_diff.py
+    td = os.path.join(tools, "tee_diff.py")
+    tee_a, tee_b = args.tee_a, args.tee_b
+    if not (tee_a and tee_b):
+        logs = sorted(glob.glob(os.path.join(port, "out", "native", "tee_*.txt")) +
+                      glob.glob(os.path.join(port, "out", "native", "tee_*.csv")))
+        if len(logs) >= 2:
+            tee_a, tee_b = logs[-2], logs[-1]
+    if os.path.exists(td) and tee_a and tee_b:
+        rc, out = run_step([sys.executable, td, tee_a, tee_b])
+        add("tee_diff", "PASS" if rc == 0 else "FAIL", "%s vs %s\n%s" % (tee_a, tee_b, tail(out)))
+    elif os.path.exists(td):
+        add("tee_diff", "SKIPPED", "no tee logs (--tee-a/--tee-b or out/native/tee_*.txt)")
+    else:
+        add("tee_diff", "SKIPPED", "tools/tee_diff.py not present (B2)")
+
+    # 4. coverage line
+    reach = find_reach(args, port)
+    counts = read_reach(reach) if reach else {}
+    symbols = load_symbols(port)
+    cov = None
+    if lib in modules:
+        cov = module_coverage(port, lib, modules[lib], symbols, counts)
+        add("coverage", "ok", coverage_line(cov).strip())
+
+    overall = "FAIL" if any(s == "FAIL" for _, s, _ in results) else \
+              ("PASS" if any(s == "PASS" for _, s, _ in results) else "INCOMPLETE")
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    block = ["## rexnative verify: %s / %s - %s (%s)" % (title, lib, overall, stamp), "",
+             "| gate | result | detail |", "|---|---|---|"]
+    for name, status, detail in results:
+        d = detail.replace("|", "\\|").replace("\n", "<br>")
+        block.append("| %s | %s | %s |" % (name, status, d))
+    block.append("")
+    block_text = "\n".join(block) + "\n"
+
+    # 5. where to put it: native_report.py --append if B1 added that, else VERIFY.md.
+    nr = os.path.join(tools, "native_report.py")
+    report_path = None
+    if os.path.exists(nr):
+        rc, helptext = run_step([sys.executable, nr, "--help"])
+        if rc == 0 and "--append" in helptext:
+            tmp = os.path.join(port, "out", "rexnative", "verify_block_%s.md" % lib)
+            os.makedirs(os.path.dirname(tmp), exist_ok=True)
+            with open(tmp, "w") as fh:
+                fh.write(block_text)
+            rc, out = run_step([sys.executable, nr, port, "--append", tmp])
+            if rc == 0:
+                report_path = os.path.join(port, "NATIVE_COVERAGE.md")
+    if report_path is None:
+        os.makedirs(lib_dir, exist_ok=True)
+        report_path = os.path.join(lib_dir, "VERIFY.md")
+        prev = open(report_path).read() if os.path.exists(report_path) else \
+            "# %s / %s verification log\n\nAppended by `rexnative verify`; newest block last.\n\n" % (title, lib)
+        with open(report_path, "w") as fh:
+            fh.write(prev + block_text)
+
+    ing.setdefault("verify", {})[lib] = {"result": overall, "report": report_path, "when": stamp}
+    save_ingest(ing)
+    print("  overall        %s" % overall)
+    print("  -> %s" % report_path)
+    return 0 if overall != "FAIL" else 1
+
+
+# ---------------------------------------------------------------------------
+# translate / rendergraph / describe (unchanged harvest-and-bake stages)
+# ---------------------------------------------------------------------------
 
 def cmd_translate(args):
     """Bake harvested SPIR-V into a C++ table the native binary compiles in.
@@ -442,9 +2260,9 @@ def cmd_rendergraph(args):
         sys.exit("no period below %d - this title's frame is NOT static, "
                  "so it must not be baked" % args.max_period)
 
-    tail = seq[start:]
-    matches = sum(1 for i in range(len(tail) - period) if tail[i] == tail[i + period])
-    fidelity = 100.0 * matches / max(len(tail) - period, 1)
+    tail_seq = seq[start:]
+    matches = sum(1 for i in range(len(tail_seq) - period) if tail_seq[i] == tail_seq[i + period])
+    fidelity = 100.0 * matches / max(len(tail_seq) - period, 1)
     if fidelity < args.min_fidelity:
         sys.exit("period %d only holds %.1f%% of the time (need %.1f%%) - not baking"
                  % (period, fidelity, args.min_fidelity))
@@ -457,7 +2275,7 @@ def cmd_rendergraph(args):
         w("//")
         w("// One frame of render-target acquisitions, in order. Harvested from a")
         w("// working emulator run and VERIFIED periodic: the sequence repeats with")
-        w("// %.1f%% fidelity at a period of %d acquisitions across %d samples." % (fidelity, period, len(tail)))
+        w("// %.1f%% fidelity at a period of %d acquisitions across %d samples." % (fidelity, period, len(tail_seq)))
         w("//")
         w("// This is why the native binary needs no EDRAM model. The guest reuses one")
         w("// EDRAM base and walks the pitch down a chain; emulating that faithfully")
@@ -503,253 +2321,66 @@ def cmd_rendergraph(args):
 
     print("== rexnative rendergraph ==")
     print("  acquisitions     %d" % len(seq))
-    print("  period           %d  (verified %.1f%% across %d samples)" % (period, fidelity, len(tail)))
+    print("  period           %d  (verified %.1f%% across %d samples)" % (period, fidelity, len(tail_seq)))
     print("  distinct targets %d" % len(uniq))
     print("  -> %s" % args.out)
-    return 0
-
-
-def read_counts(path):
-    counts = {}
-    for line in open(path, errors="ignore"):
-        m = re.match(r"\s+sub_([0-9A-F]{8})\s+(\d+)\s+\S+", line)
-        if m:
-            counts[int(m.group(1), 16)] = int(m.group(2))
-    return counts
-
-
-def cmd_emit(args):
-    """Generate the middleware substitution layer.
-
-    The library is not recompiled - its public API functions get strong native
-    definitions, which beat the weak aliases XenonRecomp emits, and its internals
-    then have no callers and are dropped by --gc-sections. Measured on Geometry
-    Wars that is 51 functions to write instead of 752 to translate.
-
-    Every entry starts as a WEAK default that aborts with the address and its
-    measured call frequency. Writing the real one is just defining the strong
-    symbol. Nothing silently no-ops: a D3D9 call that quietly does nothing
-    renders a black screen and looks like a bug three layers away.
-    """
-    with open(args.ingest) as fh:
-        ing = json.load(fh)
-    counts = read_counts(args.counts)
-    if not counts:
-        sys.exit("no call counts in " + args.counts)
-
-    region = ing.get("harvest", {}).get(args.subsystem, {}).get("region")
-    if not region:
-        sys.exit("no harvest region for %s - run `rexnative harvest` first" % args.subsystem)
-    lo, hi = [int(x, 16) for x in region.split("..")]
-
-    ppc_dir = ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
-    funcs, calls, _ = scan_recompiled(ppc_dir)
-    rev = callers_of(calls)
-    inside = {f for f in funcs if lo <= f <= hi}
-    api = sorted((f for f in counts if f in inside and (rev.get(f, set()) - inside)),
-                 key=lambda f: -counts[f])
-
-    if not api:
-        sys.exit("no public API found - was the harvest run long enough?")
-
-    # A function called orders of magnitude more than the next is a poll loop,
-    # not an API rate. Flag it rather than letting it distort the ordering.
-    poll = set()
-    for i in range(len(api) - 1):
-        if counts[api[i]] > 50 * max(counts[api[i + 1]], 1):
-            poll.add(api[i])
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w") as fh:
-        w = lambda t="": print(t, file=fh)
-        w("// GENERATED by `rexnative emit` - do not edit the scaffold.")
-        w("//")
-        w("// Substitution layer for the guest's statically linked %s." % args.subsystem)
-        w("// These %d functions are its PUBLIC API - the ones game code calls in" % len(api))
-        w("// through - identified by intersecting call-graph structure with measured")
-        w("// call frequency. The library's %d internal helpers are not listed: with" % (len(counts) - len(api)))
-        w("// the API substituted they have no callers left and --gc-sections drops them.")
-        w("//")
-        w("// Each entry is a STRONG definition, which beats the weak alias XenonRecomp")
-        w("// emits, so the recompiled body is never reached. The default implementation")
-        w("// is weak and FATAL: a D3D9 call that silently does nothing renders black and")
-        w("// looks like a bug somewhere else entirely.")
-        w("//")
-        w("// Implement in the order below - it is measured call frequency, so it is also")
-        w("// the order that gets a frame on screen soonest.")
-        w('#include "guest.h"')
-        w("#include <cstdio>")
-        w("#include <cstdlib>")
-        w("#include <atomic>")
-        w("#include <mutex>")
-        w("#include <set>")
-        w()
-        w("// Define any of these strongly to implement it.")
-        for f in api:
-            band = ("POLL LOOP - not an API rate" if f in poll
-                    else "per-draw" if counts[f] >= 1000
-                    else "per-frame" if counts[f] >= 100
-                    else "setup" if counts[f] >= 10 else "once")
-            w("//   rexnative_%s_%08X   %10d calls  %s" % (args.subsystem, f, counts[f], band))
-        w()
-        w("// Two modes, and the difference matters.")
-        w("//")
-        w("//   default          an unimplemented function falls through to the guest's")
-        w("//                    own recompiled body. Substitution becomes incremental:")
-        w("//                    replace one function, keep a running title, verify,")
-        w("//                    repeat. Without this it is all-or-nothing and nothing")
-        w("//                    runs until all %d are written." % len(api))
-        w("//")
-        w("//   REXNATIVE_STRICT an unimplemented function aborts, naming itself. This")
-        w("//                    is what a shipping build wants: the guest's D3D9 is")
-        w("//                    meant to be gone, so reaching it is a bug, and a")
-        w("//                    graphics call that quietly does nothing renders black")
-        w("//                    and looks like a fault somewhere else entirely.")
-        w()
-        w("namespace {")
-        w("[[noreturn]] void Unimplemented(unsigned addr, unsigned long long calls, const char* band) {")
-        # NB: build these with concatenation rather than %-formatting. The format
-        # string needs a literal backslash-n and literal %08X for the C compiler,
-        # and putting either through Python's % is how they get eaten.
-        nl = chr(92) + "n"
-        w('    fprintf(stderr, "' + nl + '[rexnative] unimplemented ' + args.subsystem
-          + ' sub_%08X (%llu calls in harvest, %s)' + nl + '",')
-        w("            addr, calls, band);")
-        w('    fprintf(stderr, "[rexnative] implement rexnative_' + args.subsystem
-          + '_%08X' + nl + '", addr);')
-        w("    fflush(stderr);")
-        w("    abort();")
-        w("}")
-        w()
-        w("// Report each fall-through once, so the log says exactly which functions")
-        w("// are still the guest's and in what order they were first reached.")
-        w("std::atomic<int> g_fallthrough{0};")
-        w("void NotYet(unsigned addr) {")
-        w("    static std::mutex m;")
-        w("    static std::set<unsigned> seen;")
-        w("    std::lock_guard<std::mutex> lk(m);")
-        w("    if (seen.insert(addr).second) {")
-        w("        g_fallthrough.fetch_add(1);")
-        w('        fprintf(stderr, "[rexnative] still guest: sub_%08X\\n", addr);')
-        w("    }")
-        w("}")
-        w("}  // namespace")
-        w()
-        for f in api:
-            band = ("poll" if f in poll else "per-draw" if counts[f] >= 1000
-                    else "per-frame" if counts[f] >= 100
-                    else "setup" if counts[f] >= 10 else "once")
-            w("// %d calls, %s" % (counts[f], band))
-            w('extern "C" void __imp__sub_%08X(PPCContext&, uint8_t*);' % f)
-            w('extern "C" __attribute__((weak)) void rexnative_%s_%08X(PPCContext& ctx, uint8_t* base) {'
-              % (args.subsystem, f))
-            w("#ifdef REXNATIVE_STRICT")
-            w('    (void)ctx; (void)base;')
-            w('    Unimplemented(0x%08Xu, %dull, "%s");' % (f, counts[f], band))
-            w("#else")
-            w("    NotYet(0x%08Xu);" % f)
-            w("    __imp__sub_%08X(ctx, base);   // the guest's own, until this is written" % f)
-            w("#endif")
-            w("}")
-            w("void sub_%08X(PPCContext& ctx, uint8_t* base) {" % f)
-            w("    rexnative_%s_%08X(ctx, base);" % (args.subsystem, f))
-            w("}")
-            w()
-
-        # The host calls d3d_trace_report() at exit and on a fault, so this file
-        # has to provide it too - it is a drop-in for the same slot. Reporting
-        # coverage here means "how far is the substitution" is answered by the
-        # binary itself rather than by counting source files.
-        w('extern "C" void d3d_trace_report() {')
-        # The COUNT is a runtime value - only the total is known at generation
-        # time. Formatting both here would bake in a zero that always reads as
-        # "fully substituted", which is the most misleading possible default.
-        w('    fprintf(stderr, "\\n[rexnative] %d of ' + str(len(api)) + " "
-          + args.subsystem + ' functions still fall through to the guest\\n",')
-        w("            g_fallthrough.load());")
-        w('    fprintf(stderr, "\\n[rexnative] %s substitution active: %d public API"' % (args.subsystem, len(api)))
-        w('                    " functions, %d guest internals dropped\\n");' % (len(counts) - len(api)))
-        w("}")
-
-    ing.setdefault("emit", {})[args.subsystem] = {
-        "api_functions": len(api), "internals_dropped": len(counts) - len(api),
-        "source": args.out,
-    }
-    with open(args.ingest, "w") as fh:
-        json.dump(ing, fh, indent=2)
-
-    bands = collections.Counter()
-    for f in api:
-        bands["poll" if f in poll else "per-draw" if counts[f] >= 1000
-              else "per-frame" if counts[f] >= 100
-              else "setup" if counts[f] >= 10 else "once"] += 1
-    print("== rexnative emit: %s / %s ==" % (ing["slug"], args.subsystem))
-    print("  public API to implement  %d" % len(api))
-    for b in ("per-draw", "per-frame", "setup", "once", "poll"):
-        if bands[b]:
-            print("    %-10s %3d" % (b, bands[b]))
-    print("  internals dropped        %d  (no callers once the API is substituted)" % (len(counts) - len(api)))
-    print("  -> %s" % args.out)
-    print()
-    print("  All %d are weak and fatal until implemented. Order is by measured" % len(api))
-    print("  frequency, which is also the order that gets a frame soonest.")
     return 0
 
 
 def cmd_describe(args):
     """Build an RE dossier for each function that has to be reimplemented.
 
-    The 51 are unnamed, and identifying them from PPC assembly one at a time is
-    the expensive part of the whole project. Most of what you need to recognise
-    a D3D9 entry point is mechanical though - how many arguments it takes,
-    whether it returns anything, which kernel imports it reaches, and which
-    offsets it touches on its first argument. Extracting that turns "read a
-    screenful of assembly" into "check a summary", which is the difference
-    between weeks and days.
+    The entry points are unnamed, and identifying them from PPC assembly one at
+    a time is the expensive part of the whole project. Most of what you need to
+    recognise a D3D9 entry point is mechanical though - how many arguments it
+    takes, whether it returns anything, which kernel imports it reaches, and
+    which offsets it touches on its first argument. Extracting that turns "read
+    a screenful of assembly" into "check a summary".
 
     It does NOT name the functions. That still takes judgement - but judgement
     applied to a summary rather than to raw disassembly.
     """
-    with open(args.ingest) as fh:
-        ing = json.load(fh)
-    counts = read_counts(args.counts)
-    region = ing.get("harvest", {}).get(args.subsystem, {}).get("region")
+    ing = load_ingest(args.ingest)
+    lib = lib_of(args)
+    counts, _ = load_counts(args.reach, args.counts)
+    region = ing.get("harvest", {}).get(lib, {}).get("region")
     if not region:
         sys.exit("run `rexnative harvest` first")
     lo, hi = [int(x, 16) for x in region.split("..")]
     ppc_dir = ing.get("ppc_dir") or os.path.join(ing["port"], "ppc")
-    funcs, calls, _ = scan_recompiled(ppc_dir)
+    funcs, calls, _, _ = scan_recompiled(ppc_dir, os.path.join(ing["port"], "out", "rexnative"))
     rev = callers_of(calls)
     inside = {f for f in funcs if lo <= f <= hi}
-    api = sorted((f for f in counts if f in inside and (rev.get(f, set()) - inside)),
-                 key=lambda f: -counts[f])
+    if counts:
+        api = sorted((f for f in counts if f in inside and (rev.get(f, set()) - inside)),
+                     key=lambda f: -counts[f])
+    else:
+        api = sorted(f for f in inside if rev.get(f, set()) - inside)
+        counts = {f: 0 for f in api}
 
     # Per-function facts, scraped from the disassembly comments the recompiler
     # leaves in its output.
     body = {}
     cur = None
-    for path in sorted(glob.glob(os.path.join(ppc_dir, "ppc_recomp.*.cpp"))):
+    want = set(api)
+    for path in recomp_sources(ppc_dir):
         for line in open(path, errors="ignore"):
-            m = FUNC_RE.search(line)
+            m = FUNC_RE.search(line) or FUNC_RE_REX.search(line)
             if m:
                 cur = int(m.group(1), 16)
-                body[cur] = []
+                if cur in want:
+                    body[cur] = []
+                else:
+                    cur = None
                 continue
             if cur is not None and line.lstrip().startswith("// "):
                 body[cur].append(line.strip()[3:])
 
-    ARG = re.compile(r"\br([3-9]|10)\b")
     LOADST = re.compile(r"\b(lwz|lhz|lbz|stw|sth|stb|lfs|stfs)\s+\w+,\s*(-?\d+)\(r([0-9]+)\)")
-    IMPCALL = re.compile(r"\bbl\s+0x([0-9a-fA-F]+)")
 
     lines_out = []
     for f in api:
         ops = body.get(f, [])
-        # Arity: an argument is a register in r3..r10 READ before anything writes
-        # it. Doing that properly needs the read/write shape of each opcode - a
-        # store's first operand is a SOURCE while a load's is a destination, and
-        # treating them alike is what made an earlier version report 8 arguments
-        # for almost everything.
         STORES = ("stw", "sth", "stb", "stfs", "stfd", "stwu", "stwx", "stbx", "sthx")
         NO_DEST = STORES + ("cmplw", "cmplwi", "cmpw", "cmpwi", "b", "bl", "beq",
                             "bne", "blt", "bgt", "ble", "bge", "bdnz", "blr",
@@ -764,7 +2395,6 @@ def cmd_describe(args):
             if not regs:
                 continue
             dest = None if mnem in NO_DEST else regs[0]
-            # Everything that is not the destination is read here.
             for r in regs:
                 if r == dest:
                     continue
@@ -773,13 +2403,8 @@ def cmd_describe(args):
             if dest is not None:
                 written.add(dest)
             if mnem in ("bl", "bctrl"):
-                # A call clobbers the volatiles, so nothing after it can tell us
-                # about this function's own arguments.
                 break
-        # A return value means r3 is written on the way out and not merely used.
         returns = any(re.match(r"(?!st)\w+\s+r3\b", op) for op in ops[-14:])
-        # Offsets touched on the first argument - the shape of the object it is
-        # handed, which is usually the strongest identification clue.
         offs = collections.Counter()
         for op in ops:
             m = LOADST.search(op)
@@ -787,10 +2412,8 @@ def cmd_describe(args):
                 offs[int(m.group(2))] += 1
         imports = sorted({i for i in re.findall(r"__imp__(\w+)", "\n".join(ops))})
         callees = sorted(c for c in calls.get(f, ()) if c in inside)
-        band = ("per-draw" if counts[f] >= 1000 else "per-frame" if counts[f] >= 100
-                else "setup" if counts[f] >= 10 else "once")
         lines_out.append({
-            "addr": "0x%08X" % f, "calls": counts[f], "band": band,
+            "addr": "0x%08X" % f, "calls": counts[f], "band": band_of(counts[f]),
             "instructions": len(ops), "args": argc, "returns_value": returns,
             "r3_offsets": [o for o, _ in offs.most_common(8)],
             "kernel_imports": imports,
@@ -800,9 +2423,6 @@ def cmd_describe(args):
     with open(args.out, "w") as fh:
         json.dump(lines_out, fh, indent=2)
 
-    # A worksheet per function: the summary, then the disassembly. Identifying
-    # 49 unnamed entry points is the expensive part of this project, and doing
-    # it from a file per function beats grepping one 500k-line source each time.
     if args.bodies:
         os.makedirs(args.bodies, exist_ok=True)
         for d in lines_out:
@@ -830,7 +2450,7 @@ def cmd_describe(args):
                     w("%4d  %s" % (i, op))
         print("  worksheets -> %s/ (%d files)" % (args.bodies, len(lines_out)))
 
-    print("== rexnative describe: %s / %s ==" % (ing["slug"], args.subsystem))
+    print("== rexnative describe: %s / %s ==" % (ing["slug"], lib))
     print("  %-10s %8s %-10s %4s %4s %5s  %s" % ("addr", "calls", "band", "args", "ret", "insns", "r3 offsets"))
     for d in lines_out[:args.top]:
         print("  %-10s %8d %-10s %4d %4s %5d  %s"
@@ -841,57 +2461,11 @@ def cmd_describe(args):
     return 0
 
 
-def cmd_status(args):
-    """Where the pipeline is, read from artifacts rather than a stored flag."""
-    with open(args.ingest) as fh:
-        ing = json.load(fh)
-    print("== rexnative status: %s ==" % ing["slug"])
-    print()
-    print("  stage        state")
-    print("  ingest       %d functions, %d call edges"
-          % (ing.get("recompiled_functions", 0), ing.get("call_edges", 0)))
-    for name, info in sorted(ing.get("middleware", {}).items()):
-        if info["seed_functions"]:
-            print("               %-6s %d seeds, span %s"
-                  % (name, len(info["seed_functions"]), info["span"]))
-    hv = ing.get("harvest", {})
-    if hv:
-        for name, info in sorted(hv.items()):
-            print("  harvest      %-6s %d instrumented, %d API candidates"
-                  % (name, info["instrumented"], info["api_candidates"]))
-    else:
-        print("  harvest      not run")
-    em = ing.get("emit", {})
-    if em:
-        for name, info in sorted(em.items()):
-            api = info["api_functions"]
-            impl = 0
-            if args.impl and os.path.exists(args.impl):
-                src = open(args.impl).read()
-                impl = len(re.findall(r"rexnative_%s_[0-9A-F]{8}\s*\(" % name, src))
-            bar = "#" * int(20 * impl / max(api, 1))
-            print("  emit         %-6s %d API, %d internals dropped"
-                  % (name, api, info["internals_dropped"]))
-            print("  implement    [%-20s] %d/%d native, %d still the guest's"
-                  % (bar, impl, api, api - impl))
-    else:
-        print("  emit         not run")
-    for label, path in (("shaders", args.shaders), ("render graph", args.rendergraph)):
-        if path and os.path.exists(path):
-            txt = open(path).read()
-            if label == "shaders":
-                n = len(re.findall(r"kShader_[0-9A-F]{16}\[", txt))
-                print("  translate    %d shaders baked" % n)
-            else:
-                # Count only the frame, not the distinct-target list that
-                # follows it - both are arrays of the same struct, and counting
-                # both reported 16 steps for a 13-step frame.
-                frame = txt.split("kFrame[] = {", 1)[-1].split("};", 1)[0]
-                n = len(re.findall(r"^    \{\d+, ", frame, re.M))
-                fid = re.search(r"kHarvestFidelityPercent = ([\d.]+)", txt)
-                print("  rendergraph  %d steps, %s%% periodic"
-                      % (n, fid.group(1) if fid else "?"))
-    return 0
+# ---------------------------------------------------------------------------
+
+def add_lib_arg(p):
+    p.add_argument("--lib", "--subsystem", dest="lib", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS),
+                   help="library / subsystem (default d3d9)")
 
 
 def main():
@@ -905,20 +2479,65 @@ def main():
     ing.add_argument("--out")
     ing.set_defaults(func=cmd_ingest)
 
-    hv = sub.add_parser("harvest", help="emit call-counting instrumentation")
-    hv.add_argument("ingest", help="ingest.json from `rexnative ingest`")
-    hv.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
+    hv = sub.add_parser("harvest", help="attribute a reach trace to the library region")
+    hv.add_argument("ingest", help="ingest.json from `rexnative ingest`, or the port directory")
+    add_lib_arg(hv)
+    hv.add_argument("--reach", help="REX_TRACE_REACH csv (addr,count)")
+    hv.add_argument("--counts", help="legacy counter-TU log (or a csv; auto-detected)")
     hv.add_argument("--pad", type=lambda x: int(x, 0), default=0x8000,
                     help="widen the seed span this many bytes each way (default 0x8000)")
-    hv.add_argument("--ppc")
+    hv.add_argument("--range", help="candidate region LO-HI instead of seeds +- pad")
     hv.add_argument("--out")
+    hv.add_argument("--emit-counters", action="store_true",
+                    help="also write the legacy call-counting TU (pre Stage 0 ports)")
     hv.add_argument("--attribute-ring", action="store_true",
-                    help="also record which functions change the command ring")
+                    help="ring attribution: static reaches_ring_import; with --emit-counters, checksum around each call")
     hv.add_argument("--watch-bytes", type=lambda x: int(x, 0), default=0x40000,
-                    help="bytes above the ring base to watch (default 256K, covers the IBs)")
-    hv.add_argument("--watch-stride", type=int, default=32,
-                    help="sample every Nth word (default 32)")
+                    help="(counter TU) bytes above the ring base to watch (default 256K, covers the IBs)")
+    hv.add_argument("--watch-stride", type=int, default=32, help="(counter TU) sample every Nth word")
     hv.set_defaults(func=cmd_harvest)
+
+    em = sub.add_parser("emit", help="write native.toml and PORT/src/<lib>native/")
+    em.add_argument("ingest", nargs="?", help="ingest.json or the port directory")
+    em.add_argument("--ingest", dest="ingest_opt", help=argparse.SUPPRESS)
+    add_lib_arg(em)
+    em.add_argument("--reach", help="REX_TRACE_REACH csv (default: the one harvest recorded)")
+    em.add_argument("--counts", help="legacy counter log")
+    em.add_argument("--entrypoints", help="A1 entrypoints.json for names/arity (default docs/<lib>/entrypoints.json if present)")
+    em.add_argument("--arity", help="arity json {ADDR: {arity_gpr: n}} (default docs/<lib>/arity.json if present)")
+    em.add_argument("--pad", type=lambda x: int(x, 0), default=0x8000)
+    em.add_argument("--region", help="candidate region LO-HI (default: harvest region)")
+    em.add_argument("--range", help="module range for native.toml LO-HI (default: 64K-aligned hull of the seeds)")
+    em.add_argument("--policy", default="no-guest-code", choices=["no-guest-code", "banned", "reach-zero"])
+    em.add_argument("--min-count", type=int, default=1, help="minimum reach count for a tier-1 entry (default 1)")
+    em.add_argument("--include-internal", action="store_true", help="also hook reached internal functions (tier 2)")
+    em.add_argument("--pick", action="append", help="extra addresses to hook, comma separated (repeatable)")
+    em.add_argument("--only", action="append",
+                    help="only hook these addresses in the candidate region, comma separated (repeatable)")
+    em.add_argument("--keep-existing", action="store_true", default=True,
+                    help="keep every address already in api_table.toml (default on)")
+    em.add_argument("--no-keep-existing", dest="keep_existing", action="store_false")
+    em.add_argument("--dry-run", action="store_true", help="write under out/rexnative/dry/<lib>/ and diff against the port")
+    em.add_argument("--diff-lines", type=int, default=12, help="diff lines to show per file in --dry-run")
+    em.add_argument("--force", action="store_true", help="overwrite the hand-owned scaffold files too")
+    em.add_argument("--out-dir", help="override the output directory (testing)")
+    em.set_defaults(func=cmd_emit)
+
+    lk = sub.add_parser("link", help="write sources.cmake and print the include() line")
+    lk.add_argument("ingest", help="ingest.json or the port directory")
+    add_lib_arg(lk)
+    lk.add_argument("--no-edit", action="store_true", help="never touch CMakeLists.txt even with a marker")
+    lk.set_defaults(func=cmd_link)
+
+    vf = sub.add_parser("verify", help="run native_check / snap_replay / tee_diff, record the result")
+    vf.add_argument("ingest", help="ingest.json or the port directory")
+    add_lib_arg(vf)
+    vf.add_argument("--reach")
+    vf.add_argument("--snap-dir")
+    vf.add_argument("--snap-module-flag", action="store_true", help="pass --module <lib> to snap_replay")
+    vf.add_argument("--tee-a")
+    vf.add_argument("--tee-b")
+    vf.set_defaults(func=cmd_verify)
 
     tr = sub.add_parser("translate", help="bake harvested SPIR-V into a C++ table")
     tr.add_argument("--spirv", required=True, help="directory of shader_<hash>.<stage>.spv")
@@ -932,30 +2551,30 @@ def main():
     rg.add_argument("--min-fidelity", type=float, default=99.0)
     rg.set_defaults(func=cmd_rendergraph)
 
-    em = sub.add_parser("emit", help="generate the middleware substitution layer")
-    em.add_argument("--ingest", required=True)
-    em.add_argument("--counts", required=True, help="log containing `rexnative harvest` output")
-    em.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
-    em.add_argument("--out", required=True)
-    em.set_defaults(func=cmd_emit)
-
     de = sub.add_parser("describe", help="RE dossier for each function to reimplement")
     de.add_argument("--ingest", required=True)
-    de.add_argument("--counts", required=True)
-    de.add_argument("--subsystem", default="d3d9", choices=sorted(SUBSYSTEM_IMPORTS))
+    de.add_argument("--reach")
+    de.add_argument("--counts")
+    add_lib_arg(de)
     de.add_argument("--out", required=True)
     de.add_argument("--top", type=int, default=14)
     de.add_argument("--bodies", help="directory to write one annotated .asm per function")
     de.set_defaults(func=cmd_describe)
 
-    st = sub.add_parser("status", help="pipeline state, from artifacts")
-    st.add_argument("--ingest", required=True)
-    st.add_argument("--impl", help="hand-written implementations .cpp")
+    st = sub.add_parser("status", help="coverage line per module, pipeline state")
+    st.add_argument("port", nargs="?", help="port directory (or use --ingest)")
+    st.add_argument("--ingest")
+    st.add_argument("--reach")
+    st.add_argument("--impl", help="(legacy) hand-written implementations .cpp")
     st.add_argument("--shaders", help="baked shaders .h")
     st.add_argument("--rendergraph", help="baked render graph .h")
     st.set_defaults(func=cmd_status)
 
     args = ap.parse_args()
+    if args.stage == "emit":
+        args.ingest = args.ingest or args.ingest_opt
+        if not args.ingest:
+            ap.error("emit needs an ingest.json or port directory")
     return args.func(args)
 
 

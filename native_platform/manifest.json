@@ -1,0 +1,5638 @@
+{
+  "format": "rexglue-native-platform/1",
+  "source_commit": "a8985d37f0d0665d94a8d74692e7f4e3a31e1860",
+  "snapshot": "Git-indexed paths; audited working-tree source bytes",
+  "files": [
+    {
+      "path": "licenses/runtime-module-fixes.txt",
+      "bytes": 1659,
+      "sha256": "8e065be1da2ff9a16b1f063d4636d8b67e6a654bb90583ea4332e66ac421bb18",
+      "mode": 420
+    },
+    {
+      "path": "native/THIRD_PARTY_NOTICES.md",
+      "bytes": 1500,
+      "sha256": "25ecc50b52ce88e942a80f187511d99354a93161404773b43f90391169bc7c36",
+      "mode": 420
+    },
+    {
+      "path": "native/UPSTREAM.json",
+      "bytes": 98383,
+      "sha256": "697cc0e21ae58bfc61f88ca1f47d346162848a7538b302905bd884859f27525f",
+      "mode": 420
+    },
+    {
+      "path": "native/dma_index_cache_probe.cpp",
+      "bytes": 9940,
+      "sha256": "58c8c1c501d3910e38401860bbb0680e642148b0daa5b84af244b2db4f39e832",
+      "mode": 420
+    },
+    {
+      "path": "native/draw_batch_profile_probe.cpp",
+      "bytes": 5690,
+      "sha256": "9cc13368532af8475bdbfa3cf991089bff983875c39d16c5e25683f5bf57bf3d",
+      "mode": 420
+    },
+    {
+      "path": "native/draw_preparation_dirty_probe.cpp",
+      "bytes": 6445,
+      "sha256": "8ea499c797aed2265ad512956ccdb44a3f7e4158b7799e399b7ebf59e2b55611",
+      "mode": 420
+    },
+    {
+      "path": "native/edram_layout_probe.cpp",
+      "bytes": 3268,
+      "sha256": "4e2329eae8f18b9c0daf4df6254ba8c00db405758b85eab88db95d49a12d7028",
+      "mode": 420
+    },
+    {
+      "path": "native/forza4_setup.cpp",
+      "bytes": 16333,
+      "sha256": "78ccaeab1ca1fbb4657724f01acce15ed9266491bb6cafe7af1271c73e8a83e7",
+      "mode": 420
+    },
+    {
+      "path": "native/forza4_setup.h",
+      "bytes": 1677,
+      "sha256": "f0a2883e8b034d682ad233b7454170ca19875650d9f330650e6500f3bcde1c74",
+      "mode": 420
+    },
+    {
+      "path": "native/forza4_tiling_probe.cpp",
+      "bytes": 8263,
+      "sha256": "d77ca489969e304119f651169f8c864fc6ded6e4d63100204873a0f47741c3f1",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/constant_emitter.h",
+      "bytes": 7300,
+      "sha256": "9baeb6d9fe38c2f5cfafee1054ece52df946b6d3b5699b9ea6af6db0b0fbd5b3",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/constant_setter.h",
+      "bytes": 9241,
+      "sha256": "6dcc194e555990d0c616fa785fe0ecdc22ae2d957f876a56253dcc3a0b646e41",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/forza4.toml",
+      "bytes": 618,
+      "sha256": "f96bd524fdbb824872a18cf395477a5db33759ca96d45c4bffcd4212ff2634fb",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/forza4_constant_setter.h",
+      "bytes": 2507,
+      "sha256": "d5f1a7086e326e2b354a315707a509afc9d86b0d728aadbb6adb86be47c815c1",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/forza4_tiling.cpp",
+      "bytes": 6705,
+      "sha256": "0a77fbd9a7029662a9d98c5d7687ba7109f1d40e51f42a7238cd3a20a9dfc7a9",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/forza4_tiling_policy.h",
+      "bytes": 1531,
+      "sha256": "267c362104d009a2fae63d3cd6f07a580594d5c4b35eb8caa1b4c45e17bf2d74",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/graphics_adapters.cmake",
+      "bytes": 1074,
+      "sha256": "6e13f2f8a605126308fb9f6c3100459fc9e49132fb0ed070f4cc083ccf097e82",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/hook_support.h",
+      "bytes": 1985,
+      "sha256": "12ed71c35ee64fc439d361f7408c7db6f5c6307fd3e8549d1009e8eef5a8e995",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/mcla_tiling.cpp",
+      "bytes": 4949,
+      "sha256": "6dece8b80db9fcd2272af9a08c1fb398550e67e1527b82156ef772d70386ffa0",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/mcla_tiling_policy.h",
+      "bytes": 1863,
+      "sha256": "c7709c9fa842fb0a030ad1bf667bf75e5afc94c9fef1f4775aadc625e508417a",
+      "mode": 420
+    },
+    {
+      "path": "native/graphics_adapters/midnightclubla.toml",
+      "bytes": 622,
+      "sha256": "1dfdabcd8b6eaae4506dd416c3d451692d965767b2f7f87bb9f2c21079cb7128",
+      "mode": 420
+    },
+    {
+      "path": "native/mcla_tiling_probe.cpp",
+      "bytes": 3348,
+      "sha256": "43c071c618be689e3ede3dc8f4c7d03f2a7b4705cbb91b78ed97903e2e8c280d",
+      "mode": 420
+    },
+    {
+      "path": "native/native_disc2.cpp",
+      "bytes": 9248,
+      "sha256": "47f839da1f59c7695ef35c3ee6de0c032e7a6173b5a68b8a1fe02b025aeb983f",
+      "mode": 420
+    },
+    {
+      "path": "native/native_disc2.h",
+      "bytes": 404,
+      "sha256": "20e943518857762f8e51ed85ca25a3f9663af9cc4bc46f56e576a327e249ac4c",
+      "mode": 420
+    },
+    {
+      "path": "native/native_options.cpp",
+      "bytes": 44934,
+      "sha256": "422ba0d242fde9c67d522cbe6f1022530f9c90f31c6aae62f6a7e94b7c10e22b",
+      "mode": 420
+    },
+    {
+      "path": "native/native_options.h",
+      "bytes": 1421,
+      "sha256": "006698b1ba7eac31fbaa1b7dfdd21f0bee9f71706f99e15c49684ec51c288732",
+      "mode": 420
+    },
+    {
+      "path": "native/native_settings.cpp",
+      "bytes": 3643,
+      "sha256": "e8781265590976437a5c54dc3b1ba6489c52435cdd4f3b88026241f3d99c83b8",
+      "mode": 420
+    },
+    {
+      "path": "native/native_settings.h",
+      "bytes": 747,
+      "sha256": "5b42b2e33ea25638e78c02f6e4b65d16b3f266ecdcaeba9fbcc1d2af3ad318ef",
+      "mode": 420
+    },
+    {
+      "path": "native/platform.cmake",
+      "bytes": 1578,
+      "sha256": "36c357e535fc06f5cc7bb97845b09e35e55dd60b5e3db00abc7c3fa24e333faa",
+      "mode": 420
+    },
+    {
+      "path": "native/prepare_codegen.py",
+      "bytes": 13650,
+      "sha256": "db2908acc6ff0f548ac2c8bc1b51c5d2fea11a0f9974f1899452ff54b4ef03a5",
+      "mode": 420
+    },
+    {
+      "path": "native/prepare_codegen_probe.py",
+      "bytes": 7398,
+      "sha256": "42cbb237a4999a1289eca9ccd56b193e9464034e77bd06f4ac2db0f16631d717",
+      "mode": 420
+    },
+    {
+      "path": "native/prepare_imports.py",
+      "bytes": 1706,
+      "sha256": "9bf5ae81bf085d8bf954ddffb5cd3b2f829aa13d2b9e2adfdf7a4186fc9b936e",
+      "mode": 420
+    },
+    {
+      "path": "native/prepared_index_cache_probe.cpp",
+      "bytes": 7678,
+      "sha256": "2449b7560dd4d30b21ea83d849a6a0b7a7a722730b920c029d363001f8a4560f",
+      "mode": 420
+    },
+    {
+      "path": "native/render_capture_probe.cpp",
+      "bytes": 15011,
+      "sha256": "bd950f57c92901231da100a116e4285737102ee7fc11bada8afa586c4a51933a",
+      "mode": 420
+    },
+    {
+      "path": "native/render_replay.cpp",
+      "bytes": 43298,
+      "sha256": "b494cc1b51f74d07e0cac18a8baa74b97f7020b15a026d13cbb33c5f943921f4",
+      "mode": 420
+    },
+    {
+      "path": "native/render_replay_semantics_probe.cpp",
+      "bytes": 10751,
+      "sha256": "bdaa9b2ba7e1b13cadb9e285fa418aaf36bd545372bb1d0e1d87c2b4a2e22a23",
+      "mode": 420
+    },
+    {
+      "path": "native/render_tools.cmake",
+      "bytes": 4980,
+      "sha256": "526fd26a451b843b03f252187c805874e7559dae44ed3326479c9fbdc7935b03",
+      "mode": 420
+    },
+    {
+      "path": "native/render_trace_probe.cpp",
+      "bytes": 15848,
+      "sha256": "276a59991ea7bfde73a9350f5cfb40279033172bdd268826ac0185ab96c98148",
+      "mode": 420
+    },
+    {
+      "path": "native/resident_index_cache_probe.cpp",
+      "bytes": 9609,
+      "sha256": "38ab5b4637a8966502d4853998cfd1e305c223939d4a0eede8f3393a920bbe9c",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/CMakeLists.txt",
+      "bytes": 2031,
+      "sha256": "f9908e46460cc0afc4f7e5f79e7d3e6fd9cd6a6135dd678b9fcf878f68df7b4d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/CMakeLists.txt",
+      "bytes": 2966,
+      "sha256": "c85d39ddcb8aba4137c9285a1d963e926338b5bae857bcc02010c8cfd7cdcbc4",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/imports_audio.cpp",
+      "bytes": 18233,
+      "sha256": "e7cdd102ca79f003e760b89ac607286595e608202b8a98f80da9c02458da5fd0",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/imports_audio.h",
+      "bytes": 1231,
+      "sha256": "c91427105e9c209648ceae73a11bca99300924f5b5789f3362687238f7fc56e3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/music_decoder.cpp",
+      "bytes": 4780,
+      "sha256": "05b4a7a6d108b5726cdd107c012166ccd0504e63d279bbcf3184e1af5a795ecd",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/music_decoder.h",
+      "bytes": 543,
+      "sha256": "27eadb62870fe21dab1c0820c16a1aaf1e5481c0e062daf06fd1ef64fde05b89",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/render_driver.cpp",
+      "bytes": 5520,
+      "sha256": "48d420c59181eac7b1c9fcc7e5957ae619b0efe6f468bfbb9f3553bf2f069784",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/render_driver.h",
+      "bytes": 4689,
+      "sha256": "bc833d21adc651be968a91f01de35bbfabd6c7a21d0db9942b5eae2c9ef836f4",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/sdl_output.cpp",
+      "bytes": 3534,
+      "sha256": "42444516f1b31fd961a94a407f80593b76d98767f3b6c351bd16517b8e2f6173",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/sdl_output.h",
+      "bytes": 1480,
+      "sha256": "d8dd295deae24d3a4e376eb218a3d3263755aab66f2e0e5c86969aa8994fa387",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/tests/render_pump_test.cpp",
+      "bytes": 10309,
+      "sha256": "dff61edfacb5a5db14d7cf77383e8abbd63327810fa88f47e3ffb669b6766779",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/tests/xma_context_pool_test.cpp",
+      "bytes": 6618,
+      "sha256": "939192d7e873ece6d2c335aa626b8f77540cca808a4ef64556ba9139433e3450",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/tests/xma_decode_test.cpp",
+      "bytes": 23980,
+      "sha256": "dcb6d5828a631474e090a2ba787bef7f7e85f83ca24bf6cb659678f0326666ee",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xma.cpp",
+      "bytes": 28061,
+      "sha256": "12749dc18fe70ed71b61cd61233bf319229f272c02f43d21bbbebe8c8a6a01d1",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xma.h",
+      "bytes": 13823,
+      "sha256": "ac12003d103e737ea49eced3ea85fd0c55f48a7eeae74531e73b405bd8442852",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xma_registers.cpp",
+      "bytes": 9543,
+      "sha256": "73141fbfd7b1a5ffffa860b6ce6cf1da9ffabc1178e74bcfdc4ed7c9121fb281",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xma_registers.h",
+      "bytes": 6124,
+      "sha256": "60a9ed19e4ecf2b093b2512263d5ea4796c4c0f10cde85a3a0f0e32a21f75258",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xwb.cpp",
+      "bytes": 3936,
+      "sha256": "4a244089472dad98bf48309e0eb6257860b8dd7a1f49393dae905f2be613db89",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/audio/xwb.h",
+      "bytes": 1848,
+      "sha256": "62a6f1c9099246e512e3168220105f7a1c4b6b8a4bc92200a49fd9b25ca3a471",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/core/clock.cpp",
+      "bytes": 894,
+      "sha256": "869b20d4e9fe5d70f9525455dc061b6477a00228ffab4806caac7eba3258ee9d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/core/log.cpp",
+      "bytes": 1831,
+      "sha256": "e55d11e0f82a00bf7d4bc82bd847b09939c85d093b761d2416bbd4eda368b224",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/command_processor.cpp",
+      "bytes": 27547,
+      "sha256": "2c91182f2386e811c3d55f3754656edb2efb86af77f17580010084678c1a6a9d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/command_processor.h",
+      "bytes": 3847,
+      "sha256": "3f797880668ac69a3b860cefd63d7a992a23ddbdb46b2fbeb8b9ce646b41f224",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/frame_rate.cpp",
+      "bytes": 2544,
+      "sha256": "ee7e56dc069cb08fedb23e99fa3a845c7543ac0d0fe0da3c4bd5d2f6a6d8900e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/frame_rate.h",
+      "bytes": 426,
+      "sha256": "84eeb71a0286d996cf335bd86fdb12405399528e9580305887a4b7d4634e60dd",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/frame_recorder.cpp",
+      "bytes": 10408,
+      "sha256": "948785d3b0b027a71e68ca04d4f4e869ce9278de5df51c2b3d24f5a6a231e6fe",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/frame_recorder.h",
+      "bytes": 1899,
+      "sha256": "b80ad836b1bc4b08ebffc17aa93b9e4a8c4fe94b1f4c3020f2c959484c6d7289",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/host_overlay.h",
+      "bytes": 726,
+      "sha256": "30a66185026540fb9238000b1ce76f882c7aad1bd2b5f2ed2a09f25fe43293ce",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/host_window.h",
+      "bytes": 1631,
+      "sha256": "26d153dcfa00b55b39c195126125394954eb52e90160e088a76fdd6422a41278",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/register_file.h",
+      "bytes": 251,
+      "sha256": "91942b8be0a192df92b029f522a1e0a1ae91ed2aa863bf97bb1cc88502fa0cfc",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/render_trace.cpp",
+      "bytes": 23935,
+      "sha256": "e689ae79e4814764d0f4af0c0f5b4f96b8536c2de541e83b191bce92e4393c36",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/render_trace.h",
+      "bytes": 3858,
+      "sha256": "1243c7f0953c7bbe4e109258d892b5d97c3807f5e6de7a2faa0c8cff24799038",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/renderer.h",
+      "bytes": 7072,
+      "sha256": "c99fee7060db0160eee0b9296e9debdb68fe7f32eed8d42836d8b85e9549c237",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/CMakeLists.txt",
+      "bytes": 3006,
+      "sha256": "e90f67d1ba496827bff390ab687973b7e8f7d53174243b39c3c70b5c990186f3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/assert.h",
+      "bytes": 5911,
+      "sha256": "ad25d6dc69545e6ae2c7c3ee749261fe428be74c4f52d382ebad647ceec2d1ce",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/format/ucode.h",
+      "bytes": 79648,
+      "sha256": "e820997c448f0fe4734738cac1526b841dde947e2dac568f56c022d1a55a59fb",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/shader.h",
+      "bytes": 44514,
+      "sha256": "7d57dd98c96077693eff0cabc969e5ccd8d7fcbb6587f9d37bac9192ddfba621",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/spirv.h",
+      "bytes": 2582,
+      "sha256": "2cdf47e197005ac01ab320bd1f3e6685a360812896b20b441efd36ccb39db111",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/spirv_builder.h",
+      "bytes": 5282,
+      "sha256": "87c0cb3ae2e5edc8a591ff15e57acd050ad9f08aab2f9338eca8d48c38b0b685",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/spirv_translator.h",
+      "bytes": 51802,
+      "sha256": "eb84e90b4765601ea05fe1e56f33742c0b9c5072ac783582d17706f80e339c0a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/spirv_translator_features.h",
+      "bytes": 8281,
+      "sha256": "3c9752faba1997d8440e2be462a54007ec086df4b4717db96118346dda9e4d5c",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/pipeline/shader/translator.h",
+      "bytes": 6915,
+      "sha256": "821c3955ad43cb5c73df9a2206549f196a0955c7ef0d3571233f08a83924a54b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/register_file.h",
+      "bytes": 2523,
+      "sha256": "8bad017c6b8ad66c49047088b39c0372e95dddee661b57fb1f2bc7a770343e6d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/register_table.inc",
+      "bytes": 196330,
+      "sha256": "c9dfdbfe72763051736230850ee92eaf73b7e2e9be328ac8b83df7d3b5aa9e53",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/registers.h",
+      "bytes": 40776,
+      "sha256": "2ccf7732db706133acfec34f7d70659e3d12b0533bc51e8b95ca8137cc4d1c40",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/util/draw.h",
+      "bytes": 29623,
+      "sha256": "287f197285cf434ea79c35430597bb37537a36443b55d0ebdb983c4f5f4d0e87",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/graphics/xenos.h",
+      "bytes": 66122,
+      "sha256": "f7dcbf856feaeb0350c9c9aaf5c16a768b4147fc487819cd513e0cc68fc16fd5",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/literals.h",
+      "bytes": 1073,
+      "sha256": "c89b6c9368e17664150c31dc6509f4a89a737e373b97b6f47ef45512175a5610",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/math.h",
+      "bytes": 9596,
+      "sha256": "1ed06133477ba37e623701b7961df0eb82bc95ef15897d9f53ff4f313f31d91f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/platform.h",
+      "bytes": 4498,
+      "sha256": "c540993525ba004aa943e3075edad40bd5c530e959177e8ad56093608ce55043",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/string/buffer.h",
+      "bytes": 1745,
+      "sha256": "f925c44760f3ffab20bdabf02b9691b3c373f47430da98f71be957547d373f8b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/include/rex/types.h",
+      "bytes": 12626,
+      "sha256": "37e3f7ba20a4e7668d2253232f6e6cc7edd5f48846c7d5c80f498152c5bb7af2",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/cvar.h",
+      "bytes": 1031,
+      "sha256": "3d81380128d2261f0c84124928c07662e1b5a0fb0e886451cc78d38f51bc7e6e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/filesystem.h",
+      "bytes": 334,
+      "sha256": "25b7ff80326158634568a1a72a1a57494ebc16218c98ab799893a2909e65f658",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/graphics/flags.h",
+      "bytes": 343,
+      "sha256": "c5f02f4d6d0c45063f6c80030c0f0c2038d3bb11a201b49dc2050238a962f17e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/graphics/pipeline/render_target/cache.h",
+      "bytes": 2318,
+      "sha256": "79e4e724fbca07980f294d725c7de9cfba6a5b3f889719b1e4032f6f63483fbb",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/logging.h",
+      "bytes": 1065,
+      "sha256": "7e7d5ff5a522504f794d923c94169bc02e55fd5439a8e67727d7c3e3e563227b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/memory.h",
+      "bytes": 2272,
+      "sha256": "36ecae320c06b0c16f05ba0e9041d1cded462019b50aab7366b02fa97c7d62b1",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/string.h",
+      "bytes": 125,
+      "sha256": "04da06f56f04d4e4cab8ed5680a475cdad08eb18a6a7a520249a8aa82343afef",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/shim/rex/ui/vulkan/device.h",
+      "bytes": 315,
+      "sha256": "7b88b5ff696aab7b90a68edcdc608c72bb5449989ba247b9448c903bf858ff96",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/draw_util.cpp",
+      "bytes": 30421,
+      "sha256": "6f887536e7ee2e7d9bfd6d639832accfe822c3603b115df74b11133e1f508d2f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/native_gpu_constants.cpp",
+      "bytes": 4475,
+      "sha256": "89e8235df3f2f389ded7841c296537c82e49d3020a6a7ded990c1bd97956014c",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/register_file.cpp",
+      "bytes": 1283,
+      "sha256": "cc88114b73b98f7eecbd3af37b9f6a0b206b82fbb941bef236192916923bc5e0",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/registers.cpp",
+      "bytes": 1062,
+      "sha256": "e10963219c9cdc89fdfd138edd028d48e8f0c8ba0f136a0fcdba5b748e5ac591",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/shader.cpp",
+      "bytes": 5693,
+      "sha256": "6c7fda9bc2d163fc961157164b4498638a2d924b207fe2cb1622ab4d1201ff2f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv.cpp",
+      "bytes": 1141,
+      "sha256": "7f709d0cb700c3b1de0d4dbb8ee75c43d3f7410de11189dbe5205af0764de6c3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_builder.cpp",
+      "bytes": 10431,
+      "sha256": "12a34b805048beee5162de9cdca7f6f4dc3e915eb2dc9ac5849db8ead122526a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_translator.cpp",
+      "bytes": 234218,
+      "sha256": "b80b2b8d4e9189045860ee8f6d817be7244dd1f185731ed82a12cedc98736df2",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_translator_alu.cpp",
+      "bytes": 61988,
+      "sha256": "dfe92d0b216c4d580ac7cbec8605b223d6af6c8ef38f87ec34f4db19c97a5f01",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_translator_fetch.cpp",
+      "bytes": 131505,
+      "sha256": "7f2e5896c49c32b303c207d8c51ec1064d852d2ce4dd840a5346d587d03af653",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_translator_memexport.cpp",
+      "bytes": 40362,
+      "sha256": "5932fc5990642f0de0856aef08de975e3d6bb8cee83fc530d8e8b4f18d8a1212",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/spirv_translator_rb.cpp",
+      "bytes": 184655,
+      "sha256": "6543944f5c4df05fc2aceef5cfccead6aa8abbfdc1c47b0f08d842372b77651e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/string_buffer.cpp",
+      "bytes": 3118,
+      "sha256": "2b7bce6fd4149095a4520eb3e042b715632d24d74c2f4b2937cae665713d2855",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/translator.cpp",
+      "bytes": 60682,
+      "sha256": "b831c7ef8b2ff8ffdb594b3ac6e5c4fe828789a779df06fbfc12e4c51e593f2e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/translator_disasm.cpp",
+      "bytes": 15024,
+      "sha256": "19cff055ac9181ef934e858ab7f97dd97984def892cbaffbfd1e392326ddf730",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/ucode.cpp",
+      "bytes": 5961,
+      "sha256": "ec22bda6748e6233a80a45ec2644a2bf05030686bd54a17a1c7bb4351ccfcad4",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/xenos.cpp",
+      "bytes": 8117,
+      "sha256": "dd0c9d0f7cf6a4ad422b912a12879f22e32659da7a27842536142dfeeeb1c87b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/xn_flags.cpp",
+      "bytes": 1423,
+      "sha256": "e61d5fdb06e4acd35bc4b85dc17d14dcff7b180e5e05b7fa115bda7b23b3f0cc",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/shader/src/xn_math.cpp",
+      "bytes": 1022,
+      "sha256": "c90a363b4ba29108af870ee9d15e852cdc3c1578e3e3a5f8c4ffc65402441596",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/stub_renderer.cpp",
+      "bytes": 3077,
+      "sha256": "bf8e7577ee5d8ebc1f4052bf589025e5fb10aa31337f128f86b1198b7b6a9847",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/CMakeLists.txt",
+      "bytes": 2012,
+      "sha256": "7cda27e08cc28c5904c256414772d8fb1234fb2acfef482d733fc8a19c29065d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/affine_vertex_fetch.h",
+      "bytes": 7432,
+      "sha256": "489db56aa58f1ed8c99bdbef34a9c2652912e196f59088c72c587f3313eea54d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/constant_upload_cache.h",
+      "bytes": 1075,
+      "sha256": "05fad964947623e4da6c92952c0bb8c687c9e22f4c2c909c3d55bf0caaa619f4",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/debug_shaders.h",
+      "bytes": 6345,
+      "sha256": "333cc0b4b8793cf7ec55f6c7ccb33a783b605b781bb2602cab4c6e27610f88c3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/depth_pack.frag",
+      "bytes": 1322,
+      "sha256": "4441035c4c803c0c967555b0505d584a063af1bfc817cebcc2e14106c6a0fd27",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/depth_pack_shader.h",
+      "bytes": 10205,
+      "sha256": "a0f599321edbf2d652b04c7be3474abd91608a355a20acb0f800870268e4bf6d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/device_layout.cpp",
+      "bytes": 3949,
+      "sha256": "40dc643a7030e730c1a7515307096833a16ad84d93215310def411ef3af985f2",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/dma_index_cache.h",
+      "bytes": 4426,
+      "sha256": "c3f59190b846c3c2320344cbe09d8a50054477b8367f112b55c41faa7bd3be59",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/draw_batch_profile.h",
+      "bytes": 4930,
+      "sha256": "6c6a6f638fe13c8bc1a002f637c37a2f20c3da45c7b315a2d2347cf953779b59",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/draw_preparation_dirty.h",
+      "bytes": 7701,
+      "sha256": "cd88b724a0592db17996621988f7166d7f45aa67cfdd44448b484b963781f81f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/edram_layout.h",
+      "bytes": 1937,
+      "sha256": "77ff3db4508ab9112cf7b29b8b6d61729f89676b966bac0d2d9356fb13d1832e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/gamma_ramp.h",
+      "bytes": 12639,
+      "sha256": "a1dd4c8b55d1a7ed04a993c0ce47f53688567e3cb37aceb9ee4669a9643b3706",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/gamma_ramp_shaders.h",
+      "bytes": 7224,
+      "sha256": "f5c6125b192bd51d32f73c1b8b3a2563c17fac066a603a505a0e37fdf7885f34",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/gpu_timestamp.h",
+      "bytes": 530,
+      "sha256": "053bcec0d8e6432261733b8f9e8908e07227bcafb18a8ac383260b48024c9bfb",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/gpu_work_profile.cpp",
+      "bytes": 23703,
+      "sha256": "1102c59ac425f54c8aaaa60ba4f288051b0b845095d8c0fe4c7d18e329a5fae1",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/gpu_work_profile.h",
+      "bytes": 3252,
+      "sha256": "ddfc7d358f5ed9fe352d15cc2efcddb80619c72b75f2b9932bacf3ec726a7757",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/host_sharpen.frag",
+      "bytes": 690,
+      "sha256": "b584c5c9a12e764bdeb4e9ea9922616130f2705af4f161c6d23c4ed80b03e5d6",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/host_ui.cpp",
+      "bytes": 14824,
+      "sha256": "ae813c89b5f2e857b2bd6121887e7051a0865aa460335c65eaaa40a591561c12",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/host_ui.frag",
+      "bytes": 221,
+      "sha256": "9803f74a59841f9b179f3b51e3a6eb21f964a06e45c6b3e7e115ed5f883c0b03",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/host_ui.vert",
+      "bytes": 369,
+      "sha256": "00d11282d8c7dd6df9a04b6186e99cca037c602050064869008c75100da5907b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/index_expand.h",
+      "bytes": 6784,
+      "sha256": "22e113e4dde31c49dc82ccdab697d5cf8a26a672cc5e147e21f7776b3869c6af",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/mirror_guest_range.cpp",
+      "bytes": 5438,
+      "sha256": "d80ba67d6951c1dff8e8030dfdef9cca0e3eb2381f9b6d0bb12921be9dc7fa71",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/palette_vertex_fetch.h",
+      "bytes": 10106,
+      "sha256": "7e86048ecafba0467b86b47ef41e305cdbb4c736664aae12c59b70e7e756930f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/pipeline_cache_file.h",
+      "bytes": 3018,
+      "sha256": "3a56e490dad32b3ce0e80410a0f8520abeb4cb47c793cd43419287fe7b4bad34",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/pipeline_warmup.cpp",
+      "bytes": 4957,
+      "sha256": "83cabe7bd4e9a4ba364b5f22c0b58caa00acfb52b8b4411b00365c02a1f978a0",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/pipeline_warmup_file.h",
+      "bytes": 5666,
+      "sha256": "eab4fc5d906d6b4d5dd447c994f25484063194d5bc8e09c8c87af848fdf52c99",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/prepared_index_cache.h",
+      "bytes": 6177,
+      "sha256": "23024d1e3e19915a07b137b05b2e7f9d708b7779224f9d2d9d86b13dd6542c0c",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/present_limiter.h",
+      "bytes": 652,
+      "sha256": "0ddef94f54f691244b8fe3c41c46817249370831d3f4cc8e1e8144d8f7b59592",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/presentation_mode.h",
+      "bytes": 2522,
+      "sha256": "5c274df78d3064369400c0fe133d98d9e773fdfd3d9fab880e90b79c98564ccf",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/render_capture.cpp",
+      "bytes": 26570,
+      "sha256": "56d99750c3b3b6ed3ee37e7404c91c7d756895c40abdbaeccfa55f21d6b1f3f3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/render_capture.h",
+      "bytes": 424,
+      "sha256": "8eca3049d15fd3f751f3755f39e207e83a9abae8129016d2ce68e63200d9a498",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/resident_index_cache.h",
+      "bytes": 12960,
+      "sha256": "70afc3c89df8b3c816a3c5712076ce74670a7918307a1a60eb6a53755af8e8ac",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/resolve_bias.h",
+      "bytes": 14930,
+      "sha256": "51bbd9acd0ad09d05be099d459ea10d6c4771cc6914f945cf059412ef5e8f710",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/resolve_bias_shaders.h",
+      "bytes": 12257,
+      "sha256": "89f44826184febf6cac13e5881c8a34df261eb41297d27e73b795647d98ce338",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/shader_constants.h",
+      "bytes": 4317,
+      "sha256": "9cd927743a0b7dd06f8aee458df131f7c69648707825f9b8527e4fd19657b3f9",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/shape_a.h",
+      "bytes": 12696,
+      "sha256": "df59c94092a77a49aed85482aa0a376a4719a2ed40be3c7f073aef2b46a876b3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/texture_untile.h",
+      "bytes": 6523,
+      "sha256": "719e07469d4615afdc1135ec455ee3b39218c94b3e65d5772e3e271c50b20a9f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vertex_fetch_range.h",
+      "bytes": 11817,
+      "sha256": "6488589a5bdf296a3adfb7cd6acb4c7e8b3832f558150d0bcaab9fd6fedc9506",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vertex_index_range.h",
+      "bytes": 6282,
+      "sha256": "ce28d215aeec7cbe7180131ca32103de0f21896ed7f0c597d1c6b88d317cf037",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vulkan_draw.cpp",
+      "bytes": 307885,
+      "sha256": "15e5dd6936ef472eb3d33e8e610eaa4a28e594341ccbd6ff032b8843ee416fb3",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vulkan_renderer.cpp",
+      "bytes": 114751,
+      "sha256": "41a288daf585441a4e0e405552ff23a221d28128a887e0b0e5d59f074bd0e7de",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vulkan_renderer.h",
+      "bytes": 5329,
+      "sha256": "ffcd6e725fb810fdaf931cee237a367cdab04c8d9e1e99e459c4b849d308d575",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/gfx/vulkan/vulkan_renderer_impl.h",
+      "bytes": 40230,
+      "sha256": "50bc6debf36819aeb8a7181bcb7d7db053d1a992be002f394b3dcb2b8becdf44",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/guest/guest_delay_hint.hpp",
+      "bytes": 2963,
+      "sha256": "f11699deb10015562f33b07ac91eb4e4cab6af90ad2f60c43b067adc83c54add",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/fibers.cpp",
+      "bytes": 6402,
+      "sha256": "7ce29c7f65ec999ad64462a0e91b7c23447cbb1f4a251b9ca1a19e2cd90ae13a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/fibers.h",
+      "bytes": 265,
+      "sha256": "e2a19cb352d9227e08fb4594c089f10598b706f557afbb6fc316969fc6cc0e4c",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/format.cpp",
+      "bytes": 5351,
+      "sha256": "a61a2039b3518de52ff892246670ffa2bbee4a985e0ef9ccdb789017ff870491",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/host_input.h",
+      "bytes": 219,
+      "sha256": "715b75d6a5e5a805cbd290bb34660c5b975afc281a8bceb9e11a3636dbbc8ffe",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_achievements.cpp",
+      "bytes": 3293,
+      "sha256": "3b544556c2b205b623c08a4b7e7ac2d69a7195d45b6ed24b0081e68bf81dbedd",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_content.cpp",
+      "bytes": 13749,
+      "sha256": "5466310b390b248d8aba66b26079a0152d3c58db145ce7f33261aad875c52a9d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_crypt.cpp",
+      "bytes": 6081,
+      "sha256": "f2add37e9466ebe2b2456276d62b59453e10e12a876d819b405def0cc2664853",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_io.cpp",
+      "bytes": 42750,
+      "sha256": "70c7500ee4a168aa1ac9f4a022f24af018c7e4f72709aa01b28c8ea720ba5525",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_launch.cpp",
+      "bytes": 1360,
+      "sha256": "55823e5666c53622c15e6c4cc0cc9c47d8cb2aabc3eae52f3b6e3aa3263c100d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_memory.cpp",
+      "bytes": 12652,
+      "sha256": "46d76c1ea12ac6130496455016bf5a6e8153e852945b1d93ea3501366c377c4f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_misc.cpp",
+      "bytes": 20261,
+      "sha256": "fec7e58faa264325a4aa8219917edf1c85e9dcbdaf814248a5e0d5a0737039b7",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_rtl.cpp",
+      "bytes": 15167,
+      "sha256": "ea4da0f93478084e5d74b1b961c746a58e99613d3eda3c94fec2b4fc232f9244",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_sync.cpp",
+      "bytes": 15270,
+      "sha256": "8aabe0cb91e4a2110c72d24874c414e33ea3b4c9b1cf7972239e66da193d6d03",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_threading.cpp",
+      "bytes": 25678,
+      "sha256": "07a018d54a7e2a3e01d1dc0c26a706426f4f17ad7737a53eafb12cfc7ce13047",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_trace.cpp",
+      "bytes": 2636,
+      "sha256": "18b5a1fa7adc9479c6d6699341a79b9fe9e5cfc325efd4b21339a01ceba420bc",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_ui.cpp",
+      "bytes": 12213,
+      "sha256": "bea447961eb0485fbb8011494d705b405db785d202150c99ccbcbeedd5c4345a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_video.cpp",
+      "bytes": 7176,
+      "sha256": "ff38131fb549a12fb89bf41595a6fad1fa03dfc3668b4c6320cb18ac77ef7f6a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/imports_xam.cpp",
+      "bytes": 54485,
+      "sha256": "ef55c3dd609acc66c0e5b79fa77724feca7a70d1109fa0437a2637da99ab95c8",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/input_script.cpp",
+      "bytes": 4864,
+      "sha256": "f554eb45399432686c38a458c883ceff0c41ab943da845c583d4ce9652e73f6e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/input_script.h",
+      "bytes": 2044,
+      "sha256": "5c1c7f06d5675a390dbb1b3abb03c134b7eaefc73aa863ea8dc217e2637d7054",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/kernel.cpp",
+      "bytes": 15876,
+      "sha256": "d6a24874e8d398f48bd87c1ee355062c22213ff2f330b9fee9684678375aa63b",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/kernel.h",
+      "bytes": 5460,
+      "sha256": "1cb317700469e4a76e9fc78c232e5481d46e3d2f5e85042fc4d53852f3d022fd",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/local_profile.cpp",
+      "bytes": 7543,
+      "sha256": "8ddb7cd58808765d7f7a911aa9563c6511a27e47de6a63bf50ac311e2e207427",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/local_profile.h",
+      "bytes": 998,
+      "sha256": "ab8958e34990bcc0a321739be4eba2127ae425c8378c516cb35ceda4424b1c5d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/modules.cpp",
+      "bytes": 5245,
+      "sha256": "0772c1a0ed1bb6b22d04655ac6a938399e6b84500c58f40ad5ebcb4b562128ce",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/modules.h",
+      "bytes": 229,
+      "sha256": "3ed0c6c07595e2f663da1e8e06eff6b005fcc0a06be287b278de2e31681be489",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/objects.cpp",
+      "bytes": 20319,
+      "sha256": "89091d156b184aab1eba94d35625fc40065d93317a7d1e75a93ccb9685ea83c7",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/objects.h",
+      "bytes": 12336,
+      "sha256": "d8dc29522ec9c5d5abf610d60123eb93c81017bbd4a6b593b3d0f9259bece2ee",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/profile_store.cpp",
+      "bytes": 5423,
+      "sha256": "0119cc338de7e2faa5e2ee5c4a45c6d7e48e5eba2e7a1b250a441a734dbf96ff",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/profile_store.h",
+      "bytes": 2272,
+      "sha256": "8bda729c844d788dc889fbde0362f5f0d521e62c5f4c9715e4a096e9cc67c3a0",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/stats_store.cpp",
+      "bytes": 2047,
+      "sha256": "cf58db145083577b58647ab73f7fe19853f25844cc592d5f5e51c06369ae58cd",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/stats_store.h",
+      "bytes": 1269,
+      "sha256": "99affc04f9f365d1100714acb7f904cde833046fea7f11971b76a7233f9d5fee",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/threads.cpp",
+      "bytes": 18553,
+      "sha256": "b50cc2b98b5f731a0578c3257e58a9439603675855c389a4eda6909c7b897b85",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/threads.h",
+      "bytes": 5358,
+      "sha256": "46c0f7169f83341b7d11667b22eeb1bc717244dfd594aa8693118c5a38649184",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/xmp.cpp",
+      "bytes": 11734,
+      "sha256": "0304ec2cef7289044abb687d8a6e02cd63cf80e152a9a34c9da5403aa2f15747",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/xmp.h",
+      "bytes": 449,
+      "sha256": "899cb4b7e2d904e76c5eec0b1839ae9283a122090b032120be83045c7f2d792d",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/kernel/xtypes.h",
+      "bytes": 5186,
+      "sha256": "3a481a81375f0023afbd9876d7b8d585c6f7ea081753afd6ba210ad85716dd73",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/title_metadata.cpp",
+      "bytes": 6131,
+      "sha256": "10cff00b6e7c549e64463110377655907d5e7e37c8a6f671e265a490d12ce78a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/title_metadata.h",
+      "bytes": 1594,
+      "sha256": "3a522e2d0e7b27acf8ea29e71872b223b97a392dc50072205d1a7ff6c3120673",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/xctd.cpp",
+      "bytes": 4388,
+      "sha256": "76e469368cf7db28f75c8f6bfa7bb2007d754c831d9db9320eeff4238503eefa",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/xctd.h",
+      "bytes": 1268,
+      "sha256": "7f8a947651ab6e38231b017130dd9818c61231c4312421929d67459a9e2151a0",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/xex.cpp",
+      "bytes": 10374,
+      "sha256": "acfa87f01bec91fef5b39b5dd233fc1705153a98c2432ed7ae6ba6197e2c08c4",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/loader/xex.h",
+      "bytes": 1922,
+      "sha256": "f2d1809db87f02e8c0e81707961b59c29dffaab81a73f8bd2edafcaa8365a4d1",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/memory/arena.cpp",
+      "bytes": 10545,
+      "sha256": "88cedf6d03cd8eb6fde8f5ba193e3fadc73c68ab20f7891c170c4abf03430a24",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/memory/arena.h",
+      "bytes": 4230,
+      "sha256": "00b3370e03cbc68442d44f21069523fe2d483e2a04428eaa0d94c0ac71e45915",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/memory/physical_write_watch.cpp",
+      "bytes": 10495,
+      "sha256": "a5ee6d39f001e42e910a59ac791358dcbb103996e946a830257ed389a9d64662",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/memory/physical_write_watch.h",
+      "bytes": 3531,
+      "sha256": "51c4cb295824e4c869ba9a2b3310c090c9812bbb0c71ebee95b0a1afacdca33f",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/dispatch.cpp",
+      "bytes": 2449,
+      "sha256": "baeef2a9017523f5ba117e90454edc1624dfcbd304693beb0c0dcbd70559c66a",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/chrono/clock.h",
+      "bytes": 597,
+      "sha256": "52238d9c9498e0d942ee104734406219cb394e065a399781632dea90b8e526a7",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/hook.h",
+      "bytes": 3542,
+      "sha256": "f3617f3560eef9a80bbe422bc720fd0ed7e3960b667c818737bab87ebdb182ea",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/image_info.h",
+      "bytes": 746,
+      "sha256": "f83c0d949c1437116f562047b35e1b3d5b8d6c4a73caf7f894c81a937cb13ec5",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/logging.h",
+      "bytes": 1867,
+      "sha256": "5a66964e57c5bd6f9238f8a44ed7befa04dc5ba365a7d3c0039aef554e1c40c8",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/perf/counter.h",
+      "bytes": 155,
+      "sha256": "91ee5ee069d14ad2e2c09ce202d241d2d94d93f4204a7fa3b2a50a398cf554a9",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/platform/fpscr.h",
+      "bytes": 3288,
+      "sha256": "e1f98e71630e8dc9efaae4db831679c64273419d612256d76193fb5bd8930adb",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc.h",
+      "bytes": 301,
+      "sha256": "a6d670e325d5c1d2b944e17786d33405577a7ff45c12e54b51ab6d328d8ee7da",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc/context.h",
+      "bytes": 13050,
+      "sha256": "5b7b8920a8d1c090694bbea271976cf2a57d8d780045abdca45f57a9a7235f16",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc/func.h",
+      "bytes": 2881,
+      "sha256": "989bd465b8ed71acde725bcabf2279b73357740fef0d3d0b3d86ffb1e3f430ac",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc/function.h",
+      "bytes": 9709,
+      "sha256": "6a478fc3da8c4f6207ed143346e396f6de5675db63c9daa1b3891ce41939afd2",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc/intrinsics.h",
+      "bytes": 20657,
+      "sha256": "121c2ddd86917308c7f248ee0950baf04ce5c63c71658141165e93c5cf782451",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/ppc/packed_vector.h",
+      "bytes": 820,
+      "sha256": "e9d2dbde86d3ed4c30e0282174f141b52327c1190412e3f3db578fdcd6a97529",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/system/mmio_handler.h",
+      "bytes": 876,
+      "sha256": "a8c9b1c55a73839443e4cf8c743345af83991f4fc7518566436813fa0a8d1893",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/thread/mutex.h",
+      "bytes": 459,
+      "sha256": "1a71d92c4b0717537ada87aebf4d158f0bbc6ed9d7a8efec5a00b3259f001e1e",
+      "mode": 420
+    },
+    {
+      "path": "native/runtime/ppc/include/rex/types.h",
+      "bytes": 12576,
+      "sha256": "d88b6c3dcc199a64b918c57e2a804a89bc7621aa234576b7ff6d0b45f5420485",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/crypto/TinySHA1.hpp",
+      "bytes": 6295,
+      "sha256": "54dc7225c1fa3ed9073f6fbec00aa0910ffee3a34347d65e10fac077b69f7a95",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/crypto/rijndael-alg-fst.c",
+      "bytes": 63666,
+      "sha256": "01da895812eafb9ddd4522acb45a51b3d4671db0fdf3e90061ea2edefe9a4ed9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/crypto/rijndael-alg-fst.h",
+      "bytes": 1963,
+      "sha256": "0426f17b905cfd137e5be3337da02903c635a3095daff399eedadc9986dcbde5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/crypto/sha256.cpp",
+      "bytes": 14569,
+      "sha256": "984cca119aabdb718ddb29cc9191300897c2975c39a346506fa4bde82f62d284",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/crypto/sha256.h",
+      "bytes": 2136,
+      "sha256": "1d1c6a178ad51b929ac83d6c5637feb9a5f8cc19c79ca7c5c5ec19d4460d7fec",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/.appveyor.yml",
+      "bytes": 2682,
+      "sha256": "1c376a076bf9d83e20a7f5530e4d77f40e47b870810cbe3b26db47d2e5fe2eb5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/.clang-format",
+      "bytes": 379,
+      "sha256": "27a023ad8caf6db1524dece3b21762a6514b161e115f829194ac47f55fb2f7e1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/.gitattributes",
+      "bytes": 523,
+      "sha256": "5468adb4832d68e4d4f952e22d8169fe622e8d5e0cb69ae7d2c401ef1a554a13",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/.gitignore",
+      "bytes": 118,
+      "sha256": "2fa412acf3703fe0f86afd9a85d95c786ec03541a6b2f605206a0963544e3a0c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/.travis.yml",
+      "bytes": 4218,
+      "sha256": "4b99835d4c1865c718b79783569059de16ec5ccc1bac285720871e39b3a54c9a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/Android.mk",
+      "bytes": 6497,
+      "sha256": "d7b744bae3aa36871a3eee3f60d651948dabcf54995143142f5be557a7760579",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/BUILD.bazel",
+      "bytes": 7983,
+      "sha256": "2ecdab8c013fb7484fb9a79dfdee102ecb62ecd10e4926710f56d0bd43ac1cbf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/BUILD.gn",
+      "bytes": 10277,
+      "sha256": "937202fbe0629d738da6b19b5f38192c35e2cc632fde4cfb5f536bd7afb9da5b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/CHANGES.md",
+      "bytes": 1222,
+      "sha256": "eca189f2e50733bb17a9a13ed7cdf2a29946d85d54f7906a9968f84f95316ebe",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/CMakeLists.txt",
+      "bytes": 14086,
+      "sha256": "2b22727f64dbcfc235b48ad50dbb02e34a30f4b82193dd6cc2d63a8cfae7261d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/CODE_OF_CONDUCT.md",
+      "bytes": 280,
+      "sha256": "a25e58cd66a9543e1500db9a5c3c027e874893ad1a264530bf26eb10918b5d80",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/ChooseMSVCCRT.cmake",
+      "bytes": 5472,
+      "sha256": "42b8ee7552fdb9514780800f1760d10a050d7a7bb1e3986441b7b67bd9e9e371",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/External/CMakeLists.txt",
+      "bytes": 3145,
+      "sha256": "17369e26663d368e89df606f881bcaf9f609bc5c04204c3e54fda658c032b62d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/LICENSE.txt",
+      "bytes": 21644,
+      "sha256": "130b2e98901db02a83e5e83c132b22d22d9279155feb53c49d6471b75af3c352",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/OGLCompilersDLL/CMakeLists.txt",
+      "bytes": 2111,
+      "sha256": "11fbc457d4a9e8bb9c2fa0d373797ee570c59332214f6c1a981defaf09dd1c3a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/OGLCompilersDLL/InitializeDll.cpp",
+      "bytes": 4921,
+      "sha256": "138f678b7f00d517df08b16fadeb201e9d500620d8237306467e1be56b953869",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/OGLCompilersDLL/InitializeDll.h",
+      "bytes": 2005,
+      "sha256": "d09e6b4830a003f6c7bd602c774dce26cad56fcf63452e96df5808a62de6b1db",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/README-spirv-remap.txt",
+      "bytes": 5140,
+      "sha256": "ec5b61c60f31aba6586c1e1f8d487a059a17651dbaf923116c902befecacfdbe",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/README.md",
+      "bytes": 17653,
+      "sha256": "379d5fc44d6f00e7e5a3d78f28f666ee3463309b7a2d5fa14f52a0f642dfb538",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/CInterface/spirv_c_interface.cpp",
+      "bytes": 3846,
+      "sha256": "c56aa4b61a04fff1d90c3a5979405477294c885337c2f4f7f7fd95b89658c00c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/CMakeLists.txt",
+      "bytes": 4803,
+      "sha256": "e6a5cd0dc25aff05d24bcf0b240b0e227192471be407e3278bd671a257647caa",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GLSL.ext.AMD.h",
+      "bytes": 3616,
+      "sha256": "28b306c7d15734d5e91ea771118beb70009a8469d97333964a3f50fb4a877a42",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GLSL.ext.EXT.h",
+      "bytes": 2139,
+      "sha256": "8435217a18187648ac56a7f827285ade9dfcb5336c0b3b8ff4ffeda5bcb1bf09",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GLSL.ext.KHR.h",
+      "bytes": 3228,
+      "sha256": "79217b16433006809d51fa9a234f278f4665cd421b5d0862b7d431499bc91946",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GLSL.ext.NV.h",
+      "bytes": 3292,
+      "sha256": "a9ec6dd7b9ffbe1b386a75a344d45b3571a155883903409b8c06c5a63e06905c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GLSL.std.450.h",
+      "bytes": 4127,
+      "sha256": "3f344a0f9138bee885065c584b857471e65aa5f85f9c40496f20b43128a8534f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GlslangToSpv.cpp",
+      "bytes": 376513,
+      "sha256": "f07bf6aa837b0eb3c54692633be4414d5683bd7e29d9a45ea0e44739d654b569",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/GlslangToSpv.h",
+      "bytes": 2490,
+      "sha256": "f6a44f13ea0e57d8525466bed0c0551d4e7a7937bac6bf684bf7140b1d9bbce5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/InReadableOrder.cpp",
+      "bytes": 5747,
+      "sha256": "b61abd1ff35717a55eeb0a76541ca90bcb2d745b11f7c214c15a87b81f1571f3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/Logger.cpp",
+      "bytes": 2760,
+      "sha256": "f2170036bba1e5cdac365fe08091262e0ae0207dd131ab59ca820672ee21fa71",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/Logger.h",
+      "bytes": 2979,
+      "sha256": "ea8df21037171b543c84f34849ea7e7d9f5d0417ed4737e4668438c0eaf65215",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/NonSemanticDebugPrintf.h",
+      "bytes": 1863,
+      "sha256": "d7562ed52341d4619ca2f384ca7190d6faef7cc18897d96cd3e3ef95c5448aa1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SPVRemapper.cpp",
+      "bytes": 53233,
+      "sha256": "2e11c904803907036683d7b9d1a2dfe69376f4389db4baad0cfae045dd5d3812",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SPVRemapper.h",
+      "bytes": 11991,
+      "sha256": "a54a1aec6de9df74f159ad841984f0ae3b1f57b56d72220b2a57d2ff03884045",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SpvBuilder.cpp",
+      "bytes": 110777,
+      "sha256": "4e250fef002de0f5ecbf23f12cbd12fb050b8fd89d6b40c9b4972c0366c67ead",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SpvBuilder.h",
+      "bytes": 39020,
+      "sha256": "d03e443cb92afc20c70afde83f907911e5c35181118dd5f7dd0a300ded52e682",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SpvPostProcess.cpp",
+      "bytes": 19781,
+      "sha256": "3398977a74f91762256dd69970aa2c49198ee2cc8cdcfc6f13c450359e259523",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SpvTools.cpp",
+      "bytes": 9604,
+      "sha256": "4d8dd586bb1c07fee36c125e7599f95d8e1cf38d0682b2afd726ac65dac20d5f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/SpvTools.h",
+      "bytes": 3347,
+      "sha256": "ca4b36ecdf73e54c9c4efdfdb130d514f9f6d292067ceea469bc62d5cb99bbd6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/bitutils.h",
+      "bytes": 3316,
+      "sha256": "82df79b2b848b2aa86cd7f973a7bb076eb4ba4db21a6abe5aca35baf6488bd31",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/disassemble.cpp",
+      "bytes": 29545,
+      "sha256": "e688f8c8cc4c8e38f4e00e49816d35475de61e867231819b069611b7a686ba36",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/disassemble.h",
+      "bytes": 1926,
+      "sha256": "52bff4afc257a80ca0b52b31ca8c71efc3da4a963d69ee3b793df1e1317d06a3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/doc.cpp",
+      "bytes": 149021,
+      "sha256": "dacf1a63c52b210ea01e3fae7feddf13cd53c7abff8f3b49e6c5ca6f1c3e97cd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/doc.h",
+      "bytes": 8017,
+      "sha256": "11c7a8d8f8d2dea3199f295e4a895534b151088ae3f22c7859859852cf680f7b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/hex_float.h",
+      "bytes": 39517,
+      "sha256": "5cc8f3ffdefff8bf0b36b6cd23dd3cd6a73053aac5263e2a68cdc6ca3cc3fba4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/spirv.hpp",
+      "bytes": 105102,
+      "sha256": "fa7c9de4ce085896b68ea684d58528c236acb4f77919807a72d63d42e3c780c0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/SPIRV/spvIR.h",
+      "bytes": 17151,
+      "sha256": "1e677cc39d1d1f625b0182885218a8f78a048c6b06b7e9d47fbd04ce264cfc14",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/CMakeLists.txt",
+      "bytes": 4018,
+      "sha256": "1ca800ff25d15d8903b6ad26b4074d54cbae69970ff98ffc28e9ab14e46daf34",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/DirStackFileIncluder.h",
+      "bytes": 5586,
+      "sha256": "a27738e2f612de615ff9dd02123e818467b8927c53c9825b3dc985cff8b6cfd8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/ResourceLimits.cpp",
+      "bytes": 31626,
+      "sha256": "fa842f455f67f000c7143cef6bc61f68a7e8cb19493a8551fd084d2b7138fbfc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/ResourceLimits.h",
+      "bytes": 2367,
+      "sha256": "955d0c0400d8a4ad23a546cebc44130ccf6907a48e72057ec9e521e10478ac50",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/StandAlone.cpp",
+      "bytes": 73810,
+      "sha256": "fe528c422bb5a7c43554eaa6b59b21330d0a21b006bb8f97bcfdf47edafa7d5d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/Worklist.h",
+      "bytes": 2821,
+      "sha256": "d6132fe6cb432f329572dcb211aa11a691997801c829abc09619d80e34600bc1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/resource_limits_c.cpp",
+      "bytes": 2349,
+      "sha256": "7b9e9f35cdae1d19d243f123861e5e8982adf553f07ddaf10851febfaedfbd3e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/resource_limits_c.h",
+      "bytes": 2188,
+      "sha256": "bcad932ed9b6263093aeb58efc4bccf7e8c5c93085b9c99a918f94694666e498",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/StandAlone/spirv-remap.cpp",
+      "bytes": 12517,
+      "sha256": "e72f9aecff0abf5bdaa14b70138f9232d7301c0c8adab629d8f73f82f4e45f14",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/WORKSPACE",
+      "bytes": 1043,
+      "sha256": "abae3258c4b75f4397639026a630e636c6e84d424d0b59eb927c976972de61e8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/_config.yml",
+      "bytes": 27,
+      "sha256": "7a3bf23b6636cecb7ea2ff048bc16938eef86cb934593b76d858090a86ae47f1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/build_info.h.tmpl",
+      "bytes": 2920,
+      "sha256": "cb4d39e2b24c3d52eba74b8d7c0e00fc18a55a54115f5e3d6a9ef8fc45519100",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/build_info.py",
+      "bytes": 7798,
+      "sha256": "9e7112af72e8f15ede522b7bafee9fdddc44dbea36ef6e9e2c0bafac9af98c8c",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/build_overrides/glslang.gni",
+      "bytes": 1718,
+      "sha256": "6f4c63000b90d52ed132dd6816d5273872b28864a3013e6fc7f7c0acc6c76c4b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/CInterface/glslang_c_interface.cpp",
+      "bytes": 15385,
+      "sha256": "aa5bccbfd5496bccef8742c2d9633affe9a99fae75eca6099fa2542f670f70c0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/CMakeLists.txt",
+      "bytes": 8609,
+      "sha256": "6e29a9d471bc6a60dace5b378d41e76eb3654a0ce88d4cfb047590bd4429a1d4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/GenericCodeGen/CodeGen.cpp",
+      "bytes": 2699,
+      "sha256": "b1bed734590febfa89ff24c50982e10188892348cf0833e3e98c73479247fdf8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/GenericCodeGen/Link.cpp",
+      "bytes": 2836,
+      "sha256": "e1c4ee3e5f8df3849ba982bd7b772080b63cc7fef248aaa6ae245a04d782e975",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslAttributes.cpp",
+      "bytes": 7047,
+      "sha256": "31059e18967498a0aa614640dbad061c552a666c88ebfd28bba914b13c81aa57",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslAttributes.h",
+      "bytes": 2132,
+      "sha256": "94a28534961e659d0f5514cf3b98656f0a85ee1f563b98d038538ab305c203c5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslGrammar.cpp",
+      "bytes": 131524,
+      "sha256": "c4c0e62aaf39fbb1c638c4fc72e09de14489e1c2e138c8e56c3dae8def739914",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslGrammar.h",
+      "bytes": 6671,
+      "sha256": "f880289a8752ed5707bc6dfd85d193fd1b0f08c68983327dab85e8d2ce3e4143",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslOpMap.cpp",
+      "bytes": 5697,
+      "sha256": "e1a3072adecd80bbae197e6b63a6f34d82533b58d107cf3db0c7bd5bea29b89c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslOpMap.h",
+      "bytes": 2327,
+      "sha256": "896cad548a57e96340550e368d878e98a96db2e2d88e887874bb74fddb0911a9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslParseHelper.cpp",
+      "bytes": 435684,
+      "sha256": "3a6dedb37826c707f522d4e3f67ddb8fc822567c6688da11d68871e5563d7861",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslParseHelper.h",
+      "bytes": 28309,
+      "sha256": "7f8856b7dec799b2f409f1a7de67d36bb84e4a6dd071c5b4721c90d50a53e6ae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslParseables.cpp",
+      "bytes": 86255,
+      "sha256": "be0704374763c04d30a73a5bbaa13885bd7ac2a452295577d8c73ce1aea1f38f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslParseables.h",
+      "bytes": 2622,
+      "sha256": "3220743695faf837f90a0edd22dd7f986838e506b651883676c024a81207a54e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslScanContext.cpp",
+      "bytes": 36100,
+      "sha256": "a48e770f4f541ceb4b4279103f2385fe98b32044635ab9325f421c7513ade67a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslScanContext.h",
+      "bytes": 3560,
+      "sha256": "7aa2a5ce7d26357030b456ec5cccc78263575d6975fadf81c6819a5b3844a4ab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslTokenStream.cpp",
+      "bytes": 4497,
+      "sha256": "27f1a79111db236537738a7deea15d87ad3b6dec4548c70f8dacda641b2c1cad",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslTokenStream.h",
+      "bytes": 3856,
+      "sha256": "2b9bdd2a57d7b63adc127bca36a9bc77e61c8c9dc8256f449a132f55aed47df1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/hlslTokens.h",
+      "bytes": 7788,
+      "sha256": "51eabfcc2c5d5f0fb8c0037a145a861e285048a3ef085794bf9a9ee77e7aa473",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/HLSL/pch.h",
+      "bytes": 1996,
+      "sha256": "521ebd60fed69453b218e54318ab6849ea43b26a1d330a1a657f0a88168b1af0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/BaseTypes.h",
+      "bytes": 19934,
+      "sha256": "046a3d1393208f754c71b6f8d84fea8e8fe0b7d4779b60179b12c5f45f46ddce",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/Common.h",
+      "bytes": 9189,
+      "sha256": "bac776840163ba75175e5ea335fb90e45bb0618de696d93990573ebd31aa52f3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/ConstantUnion.h",
+      "bytes": 36482,
+      "sha256": "390ae99780047df059f47f2a81c4a47e8629107b190da72c48d3133a4afa4431",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/InfoSink.h",
+      "bytes": 5363,
+      "sha256": "8eb1b257231888d6d415ef4b5c2185a08cf187997c62fc0e81aad11e9903ed6c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/InitializeGlobals.h",
+      "bytes": 1800,
+      "sha256": "e4b26892327667870ae3e6a75eaad292ce3e8e713cafe6c0c89e21c6417a67dd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/PoolAlloc.h",
+      "bytes": 11574,
+      "sha256": "fdc5d9b595d39521a371dd27abb240c068b4575e36481f5448f9fa0f3b353678",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/ResourceLimits.h",
+      "bytes": 5355,
+      "sha256": "cb6bc32f4308ff6e048bb17621ce1bf3255a227c98a7f1b15d515c2e3efa9905",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/ShHandle.h",
+      "bytes": 6264,
+      "sha256": "840c17be7f3b69ebd53f165dbc9ea97bfbc33cb1a2873262ce882a8956654578",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/Types.h",
+      "bytes": 88660,
+      "sha256": "40493861bdf5f7799ae0e071b746c858e61339b4d39c9e2cf2faef829fdc7cad",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/arrays.h",
+      "bytes": 11309,
+      "sha256": "aa5537d6b0ee0f60144ab6b603ad7f1b0d61b19f3001a80a08f9ff9d0b6e2a1e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/glslang_c_interface.h",
+      "bytes": 9762,
+      "sha256": "d4bc70baefe896e0d419491d6167efd0f411dcec3e0d3d82404f83fc402ccad1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/glslang_c_shader_types.h",
+      "bytes": 6978,
+      "sha256": "01f5f85dcceebda13b0d815ef2ed0fdb03177a7cfbd9fda3353e5c48fd6caf5d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Include/intermediate.h",
+      "bytes": 58157,
+      "sha256": "1f5b6ef064255629a14a2d0dafe54cd7ce10030b0b082c0af1099afdcd0fd0df",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Constant.cpp",
+      "bytes": 61993,
+      "sha256": "56f8cc0a82b4e3fe361d947ce1fd01bbd8ff8fec4a1ce8a94e5fad04e001e1c0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/InfoSink.cpp",
+      "bytes": 3142,
+      "sha256": "9a985aa95af8c21246db0fd3a396764154e7ec4a1608196275def1a78927963c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Initialize.cpp",
+      "bytes": 480188,
+      "sha256": "e90c3d3c7bbb2c9b0525d2f3112a8f0d157f2456d2cbea5afb0fa53b82a1983a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Initialize.h",
+      "bytes": 5291,
+      "sha256": "356a532a6afe356f31e5f6cbf8dcd688f36bc7303404d4089f28358fa2930200",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/IntermTraverse.cpp",
+      "bytes": 7916,
+      "sha256": "f2410ef824fc2a9b40a1497d40c41bbc63ce6d8d70cb36619ce2bd561a4461fc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Intermediate.cpp",
+      "bytes": 136105,
+      "sha256": "eb66ce06a6a7c724823ebf72d637495d0b83c1d92d36435d4dd8ee5209d9ba87",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/LiveTraverser.h",
+      "bytes": 6435,
+      "sha256": "8fcc2cf8a6fb490049a45cc7ae35420ebb21663ee294663c8b4c6f3898d629ae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/ParseContextBase.cpp",
+      "bytes": 22339,
+      "sha256": "f97e63c89788c353c02d6748d3b21956fbb30ee8b5fbdaea71656d65d9a22c53",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/ParseHelper.cpp",
+      "bytes": 398057,
+      "sha256": "9171572541d9c64b5d8fbb25939a5a5e013040e53fa133dcc9f2a0b7b445240b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/ParseHelper.h",
+      "bytes": 28432,
+      "sha256": "334e4f6c418e5ffdcb873cfcbda330d200841368a30eaac25ea535c5847ff3de",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/PoolAlloc.cpp",
+      "bytes": 9503,
+      "sha256": "85e43f3aa6d37d593fe1908f6a5b1fb36f4ae43ddfac8c5403c0f4a7ae85bc50",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/RemoveTree.cpp",
+      "bytes": 3121,
+      "sha256": "49a63761b9ce172e958c63f9de69147b05041888b6584a46f9ed7a9e03937697",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/RemoveTree.h",
+      "bytes": 1704,
+      "sha256": "6dce992fb1571f40c4142c62e5eb8f134fe48528cdfc042a87e6f7aa1bdf418a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Scan.cpp",
+      "bytes": 68404,
+      "sha256": "b54ef2b22d7225784423127172e02dee97108c33dd52d915fffed00d1f195935",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Scan.h",
+      "bytes": 9697,
+      "sha256": "d0862d8bf5ffc9cce435f18b5135883dda3b15e104729d7e4b2e9ac14d1d25ca",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/ScanContext.h",
+      "bytes": 3206,
+      "sha256": "734d90d588fb4810bddaddd4e4571cec491688296f46eae5269975d066260759",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/ShaderLang.cpp",
+      "bytes": 79477,
+      "sha256": "0864fb103faa935633122521244cb90f83ad1427ab4ce6f7b813a071852da535",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/SymbolTable.cpp",
+      "bytes": 15247,
+      "sha256": "f5fe9485c0827ec7742654f5021e076947d78c606a1cfe37165bf611b5237b38",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/SymbolTable.h",
+      "bytes": 33828,
+      "sha256": "ed926cd390c3eb7c5b7aeb7fba4d3ef02bcde7d70ffbe4c688f58a91e190acb2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Versions.cpp",
+      "bytes": 61538,
+      "sha256": "577ce62ea94c3045ee9440671131b5075162564e71c4cf4293831554e49cc558",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/Versions.h",
+      "bytes": 21615,
+      "sha256": "e50df57463e63dedeea0b46bf1aebf187bcfd8027dcc0c9c4fcb177116d0aae0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/attribute.cpp",
+      "bytes": 11566,
+      "sha256": "8625bf4bbe818d60fdc848e1ee64f33955b38f14c9c7e6a11debed7520f6f032",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/attribute.h",
+      "bytes": 4462,
+      "sha256": "ce942e4cefd4a31a6ad6daf51902f4c0a5676ad8d85b3c5ac7c7d841d7297d62",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/gl_types.h",
+      "bytes": 10171,
+      "sha256": "02cdae8434ba6c62bbe8a8ab0e39e23552cd62c7f0325060eab171a9d54c7199",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/glslang.m4",
+      "bytes": 150361,
+      "sha256": "7b1a511e4aa832cbd3b9b4d87f9f8e7d7ef755593085af909ccac11aafc66e77",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/glslang.y",
+      "bytes": 149124,
+      "sha256": "d39c9af5e9d084e361d321a7fc05abe2e17d4d89422622bc064af635a3657506",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/glslang_tab.cpp",
+      "bytes": 496227,
+      "sha256": "2c0db30c7c8b90d4459eec3759fa0fe062771dfe211046434caeeaba71acc47e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/glslang_tab.cpp.h",
+      "bytes": 12467,
+      "sha256": "c5f2747b3f63ac3989bcfd6db9ab8ba8fff8015be3a2e954fd520057581d268f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/intermOut.cpp",
+      "bytes": 88452,
+      "sha256": "9c1efc56344785468be3a225fd9d0aff75bff2333edd02ae355b216d26841d2f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/iomapper.cpp",
+      "bytes": 52904,
+      "sha256": "c4ebb8f70124b6967c90e2c974b3e2b749fe77656d977227fc7d2b0372712024",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/iomapper.h",
+      "bytes": 12498,
+      "sha256": "86a78dd5d37d6fb49817a826a9e55bcb5e81fe96de21f2862deb511cb586761c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/limits.cpp",
+      "bytes": 6417,
+      "sha256": "374da192f86d98320d6ef0826b4d92384668da62d4984f35d8db3fc270238229",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/linkValidate.cpp",
+      "bytes": 75467,
+      "sha256": "23feff1ac04cedb052e231466abc3f44671efe552249a4908d94057aae8bee5c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/localintermediate.h",
+      "bytes": 42426,
+      "sha256": "7e1bb1143a8a9db19097b43dc5ac7afc1d7bc8e289b0046a0aa54f540f1eddd8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/parseConst.cpp",
+      "bytes": 7758,
+      "sha256": "7c512a25b55b295a969490ffa7d53c32a2742a23a842ddeff21a0448a467cf1e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/parseVersions.h",
+      "bytes": 13632,
+      "sha256": "8a4e85e8cfaf691ecb01545493fa46581944d6389734031bdb552db6eeb8e8eb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/pch.h",
+      "bytes": 1896,
+      "sha256": "c67ca4f0988c3dfb7f805b68e69734d5eabdb038ee4c2645e263d14d69bdbf69",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/Pp.cpp",
+      "bytes": 49882,
+      "sha256": "554d396cd753f5a889ef8a0ac31fa93fd56d559fcaffc9e5c0e88dedf122ef23",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpAtom.cpp",
+      "bytes": 6672,
+      "sha256": "8e4a98e95edf1987f61bef44585cd4fade98132f44300b6d192ffd041e880694",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpContext.cpp",
+      "bytes": 5199,
+      "sha256": "c6c07f0f2cc54a0a2fb31d44b744dd0ee29a16eed7639482f9cae0dbd06cc845",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpContext.h",
+      "bytes": 26081,
+      "sha256": "2c365f42ee2f4c311f0d61cc8d3cef6c29f821bb7daa49c4ea282c2c21aa9930",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpScanner.cpp",
+      "bytes": 52188,
+      "sha256": "112e3335194b2cc2d384627116483a7dbe27ead93bdfe52bd3ce5f1ad8771342",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpTokens.cpp",
+      "bytes": 7572,
+      "sha256": "ef66753f31170244c7c248588ab31c966dd0701ac45542c681ab510033a51adc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/preprocessor/PpTokens.h",
+      "bytes": 5791,
+      "sha256": "ca7b6eb90e315180c6fba8914ff710e4ba09a2e6f7dfb63f29cd3492d233f7fc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/propagateNoContraction.cpp",
+      "bytes": 40817,
+      "sha256": "8dff5742d95aaafdc26481216cda7ca2dbcf8edf0b0611d9942356c887e8aef0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/propagateNoContraction.h",
+      "bytes": 2417,
+      "sha256": "bc022193838de74687cfdb82ac24a86b9fa36e84a30b48a9d81f6386e064bc2e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/reflection.cpp",
+      "bytes": 56175,
+      "sha256": "dcb72c4a5b5b35b6d2f8f864700676feb38f1234f4052ae80ee09be4b576b967",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/MachineIndependent/reflection.h",
+      "bytes": 8267,
+      "sha256": "68575f3e344423aed5344ddd107fbf1c8f8859c8f4d7dc214565910b8e2e7960",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Unix/CMakeLists.txt",
+      "bytes": 2734,
+      "sha256": "d60ef0ab819d7b2893def58412ee5d5d7d37f7b5687a9e72bbc01b705c3b5635",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Unix/ossource.cpp",
+      "bytes": 5483,
+      "sha256": "30e9f6b1c8d24b90ffdfd9d1abf53a6348e2a61050663ee6f17c0f364712aae3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Web/CMakeLists.txt",
+      "bytes": 3161,
+      "sha256": "fe698acc30e2e71341a1f9ad8dd243d8575f713aec53f32ddebba0d8e15b7224",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Web/glslang.after.js",
+      "bytes": 730,
+      "sha256": "cbbbee5889f3cd4fe9e31c898baee565bcde73f7bb9be0445a96903f481c2542",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Web/glslang.js.cpp",
+      "bytes": 10595,
+      "sha256": "965bf548657427a97a7cf31f31d663c56f95e7bc9820ab157cc099c40ffda7a7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Web/glslang.pre.js",
+      "bytes": 2158,
+      "sha256": "2cd7fe7c6160f3c84898a5e5891a9d4b46919851c3cc4f42a60e8400414651c1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Windows/CMakeLists.txt",
+      "bytes": 2314,
+      "sha256": "d957329219600b022dcfd7f4c313c04bc4a23907fe5f9aa77ed7ac2eab5435d7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Windows/main.cpp",
+      "bytes": 2324,
+      "sha256": "476e42b18f7e0bdb309c0d7714eed314c810759701ff9dcd0df7c9baece06a81",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/Windows/ossource.cpp",
+      "bytes": 3914,
+      "sha256": "5881bada76cc094996b72564ee518a86f4ba7e380d03a7e88fc818ee0a0df62b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/OSDependent/osinclude.h",
+      "bytes": 2211,
+      "sha256": "0ae99af27b91cd75c855bc23014a04dd7a9f667b39126e0c4f4777f9c4a141f1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/Public/ShaderLang.h",
+      "bytes": 41554,
+      "sha256": "98deec048b5a0066fb0f551441c68b309c3de591ec9853de81ee67132180887e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/glslang/updateGrammar",
+      "bytes": 1977,
+      "sha256": "5b09d6a5c57bb2b2871107b4f5728cc3af70bd1288c7db81122e29f4a6c0228a",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/AST.FromFile.cpp",
+      "bytes": 9081,
+      "sha256": "774b6c0fb02b1c303857181886080e5dc0d31ee47af568ec0d5537d49355b180",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/BuiltInResource.FromFile.cpp",
+      "bytes": 2200,
+      "sha256": "956945efccb09e70e6db6f4912e477f115f38b218c287d65c75792a6144d854e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/CMakeLists.txt",
+      "bytes": 4574,
+      "sha256": "ff347e570d17452c15ca7f08634500b59af792ca20b042a9c85a2ea6a578e7bd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Config.FromFile.cpp",
+      "bytes": 4078,
+      "sha256": "d81e676262ed5e7f461104e4c6414802e5fae67a3701a8d72e571559dfb69743",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/HexFloat.cpp",
+      "bytes": 52292,
+      "sha256": "2d1792315a4844b5fce94258b0c967f78057833e6cc2bfabd8bbc50b74d13461",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Hlsl.FromFile.cpp",
+      "bytes": 22731,
+      "sha256": "54473d1be7730bbbf4250776afadba5317d45261af6bfa4e7c9db4dc4be69af6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Initializer.h",
+      "bytes": 2130,
+      "sha256": "04904aa174d550d63314a590f3eeb4a68864068da33f76666cc3ae5d96bc1d28",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Link.FromFile.Vk.cpp",
+      "bytes": 5285,
+      "sha256": "841831eefb77afca639578a1f138afbc538aa4793607457b5012766444606b40",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Link.FromFile.cpp",
+      "bytes": 4536,
+      "sha256": "b3a112b9fe00ddb986fda69d8f1a4b6000b9e5ea701ef5fc4e29b03802754bc9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Pp.FromFile.cpp",
+      "bytes": 2817,
+      "sha256": "474876333d73a4eb78bfe49ac5a22470cde55a5ed110a034374592a56caa3627",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/README.md",
+      "bytes": 1212,
+      "sha256": "4a62331500b4c81679d929fbd05f6d347a48db8085017146776772386db14b9e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Remap.FromFile.cpp",
+      "bytes": 6067,
+      "sha256": "b34c6539445c39ac7189ebb2065f087d0a0ae71e70a24c12266bc2df8ef7597a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Settings.cpp",
+      "bytes": 2206,
+      "sha256": "7e96f0121e4b494df05cc12b4d8074eea94db88c6729326c68586de1098126bb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Settings.h",
+      "bytes": 2142,
+      "sha256": "aab7c3e4a4c39ad409f96c6eaa63c6b274629411cd6fc5086649a88a12908688",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/Spv.FromFile.cpp",
+      "bytes": 27051,
+      "sha256": "3566a1c23a10fbd696b18224a148639457a11a5274d259e3bee39813bb53145d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/TestFixture.cpp",
+      "bytes": 6037,
+      "sha256": "5ec118a80831347e15114bc486afcda076c47ad7dad6ee1f6d06c9ae78f58c4a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/TestFixture.h",
+      "bytes": 31950,
+      "sha256": "6fc560a8e15e2e582f7d59be69481ef5b0b18272149ab048631635eec875bbb4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/main.cpp",
+      "bytes": 3051,
+      "sha256": "7d896a1c4f66e9d0dd53490d7a749ac376097f45eaf4c769417905defce7a750",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/gtests/pch.h",
+      "bytes": 1678,
+      "sha256": "2940873c10bf525df47b173b53f19c9c9dd06aaab8bfc8c4a0730b8b2b786c84",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/hlsl/CMakeLists.txt",
+      "bytes": 2589,
+      "sha256": "442cfe35fd3443075189e021382a01670a88ad88dc46c2b718049a775931a1d7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/hlsl/stub.cpp",
+      "bytes": 1938,
+      "sha256": "cd4040c1a57021ded1f47c17efcabde031e4c4f8b4aeb4dbfd535ee0a13d8388",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/known_good.json",
+      "bytes": 501,
+      "sha256": "924e5a1522b83b2040ec51e2f1afd8038ff4e7e04332e4c4d75de5ce194685fe",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/known_good_khr.json",
+      "bytes": 464,
+      "sha256": "22e9a0d551e6b7332f4e307af365cdbb34b4c60b7ca1674ccc80b081fe224b4b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/android-ndk-build/build-docker.sh",
+      "bytes": 1867,
+      "sha256": "5dcacfcbf4526534a9c04ec18d3e59bf3a69fe59bd2dbbaacbdf85c6a3f64312",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/android-ndk-build/build.sh",
+      "bytes": 1989,
+      "sha256": "a9960d91ad2af1b163d86e4abd8819951b25a72c95589ec18abbc0b8bb3ecffb",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/android-ndk-build/continuous.cfg",
+      "bytes": 1642,
+      "sha256": "9aabf8e3ef1c91304b976191979087f0eac6b26439d2decab6d2cdcc3aafdd8c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/android-ndk-build/presubmit.cfg",
+      "bytes": 1641,
+      "sha256": "4905b9667bc5f8aa754ffe6a53384a38fbbb8fc16f173be2f44b78890bb544c8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/license-check/build-docker.sh",
+      "bytes": 1665,
+      "sha256": "c489d0182e713653eb7d2d9d05b7bc7f8dc360a814c633b5488d1775f5d83372",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/license-check/build.sh",
+      "bytes": 1992,
+      "sha256": "9cd354fccec3e0627b3647576a33ffb6e1b3b4cb37aaee2e17fea7dc48fae458",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/license-check/continuous.cfg",
+      "bytes": 1638,
+      "sha256": "4624ec9999e6e21a27937a36a478a36c7251133e1dba05efd34043e6ae820248",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/license-check/presubmit.cfg",
+      "bytes": 1637,
+      "sha256": "5afb0fbf62022918d9b62fa8057bd7794d68f9110bc999c6f8c279d56ff4a5c1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/build-docker.sh",
+      "bytes": 1963,
+      "sha256": "a77f35608d3c5912565d5e16ec7d32f6fedb0493ffc283548097263d41e14f86",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/build.sh",
+      "bytes": 2046,
+      "sha256": "281c02131b38791878454f5aaa9cace18bb4f62894839587289d5aa1a7e14cab",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/shared/continuous.cfg",
+      "bytes": 1696,
+      "sha256": "d3aec71b61ece9dcb77057f7614e14a2a82ade71df4c78fb3714b1de9d15162f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/shared/presubmit.cfg",
+      "bytes": 1695,
+      "sha256": "85dbd529a3e77bcea7825e27153bbce0a1b7d4410ca581106836237ad9301d55",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/static/continuous.cfg",
+      "bytes": 1696,
+      "sha256": "6d85e058742c8b584291b14f4545491d7f421acf841598057e7de3761d12d517",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-cmake/static/presubmit.cfg",
+      "bytes": 1695,
+      "sha256": "828a159a6b3e684c66fb02ef9d08a233f3677b04a06fc2b624af908748915aca",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-release-bazel/build.sh",
+      "bytes": 2124,
+      "sha256": "b069406798bb17dd994cc5f0da18069fe8b7edba3e8a8a1481366a67e90b6d86",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-release-bazel/continuous.cfg",
+      "bytes": 1650,
+      "sha256": "bc9237b9cd4fba80dd034d13bb7daf863782cd1b03f2fd642c8a253a5f94d06c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-clang-release-bazel/presubmit.cfg",
+      "bytes": 1649,
+      "sha256": "03df82f963e8b8b5dc940b43f5a8a8183f37ea66accacc3b3b67c94dd34855c6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/build-docker.sh",
+      "bytes": 1956,
+      "sha256": "b7153548e1314a813f6747d572761e5d74cba92967d78ebbad7a93ba83740fa9",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/build.sh",
+      "bytes": 2046,
+      "sha256": "281c02131b38791878454f5aaa9cace18bb4f62894839587289d5aa1a7e14cab",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/shared/continuous.cfg",
+      "bytes": 1694,
+      "sha256": "7fda8fdfd7e3e89883f55ca4b8dce976b2a7c0a9458cb0b24c9d90235d0eeec4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/shared/presubmit.cfg",
+      "bytes": 1693,
+      "sha256": "26888902a11a29cd1f4e0eb37b4c7e2171df34c7e27bfa7b00e4a9fc2a63d639",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/static/continuous.cfg",
+      "bytes": 1694,
+      "sha256": "2a4fd8d495b0c6c85c42e94e6411316951e4257a65f5278b150b6db86499c0b5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/linux-gcc-cmake/static/presubmit.cfg",
+      "bytes": 1693,
+      "sha256": "3a14edefd983be3682af36e9483980e967593ce6f5a4b901236e935ead2b9fac",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/macos-clang-release-bazel/build.sh",
+      "bytes": 2091,
+      "sha256": "809c811ea4d067c9afa820fb0f1ff63354740baf9e2749a8da0408ab22cc38d5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/macos-clang-release-bazel/continuous.cfg",
+      "bytes": 1650,
+      "sha256": "c93f6ca752713c7f6a690c6c5c741d9a8101d19c9127e5b5042ce3e0276eeb2b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/macos-clang-release-bazel/presubmit.cfg",
+      "bytes": 1649,
+      "sha256": "5f0302e32f82d318703432249589096a4a5bbd945fdfcaa866e069ffe74d6ad8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/windows-msvc-2015-release-bazel/build.bat",
+      "bytes": 2735,
+      "sha256": "ea7a8f1e32afeec21b9e205472393ce95c35cdcd5318187d07eb764e91ab89ae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/windows-msvc-2015-release-bazel/continuous.cfg",
+      "bytes": 1657,
+      "sha256": "491f37498532c90a3c8b2333b6955a2c3cdf6ccd712a48256a0c3099d7dbc810",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/kokoro/windows-msvc-2015-release-bazel/presubmit.cfg",
+      "bytes": 1656,
+      "sha256": "b7a03f2d822adc76a6f2a3a0dba1facb0438e175575c0ca47558c910bff94dcd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/license-checker.cfg",
+      "bytes": 1378,
+      "sha256": "5a826746f77bb514fc04434a72de10173d8cc94c4325cf42e11947eb95e1e5ce",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/ndk_test/Android.mk",
+      "bytes": 1915,
+      "sha256": "259b1261daa87c88d1e8593a969e0ddfd28806788738b00a335ac82493207b1e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/ndk_test/jni/Application.mk",
+      "bytes": 1696,
+      "sha256": "bd074c6d1841f78d10386bed4d6c887870d8e20a28673309bf69e35ab9a3d4ab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/ndk_test/test.cpp",
+      "bytes": 724,
+      "sha256": "c4cfa3d4fce22bfc56bfccaf514d0702a7a867b36c2b2a6dbe38f95002ae642b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/glslang/update_glslang_sources.py",
+      "bytes": 5114,
+      "sha256": "ab665cc00128746ed8976e45e5df427c4b62ec71f8e39411be5cf805277483aa",
+      "mode": 493
+    },
+    {
+      "path": "native/thirdparty/licenses/ReXGlue-Xenia.txt",
+      "bytes": 1659,
+      "sha256": "8e065be1da2ff9a16b1f063d4636d8b67e6a654bb90583ea4332e66ac421bb18",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/licenses/Rijndael.txt",
+      "bytes": 1130,
+      "sha256": "d41ca4a99c47bca07d7a8c154e3a19ff3e5b1f00ce539aea4a9d9e9f5827e4d6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/licenses/SIMDe.txt",
+      "bytes": 1077,
+      "sha256": "75ce0a8c5a7bff42fbd6f8f3b469b518132132c4f4948fb8d02b1ccb5d0df9d8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/licenses/TinySHA1.txt",
+      "bytes": 1075,
+      "sha256": "ac2981808bb038e18467c4371b0afcba0b93821d32702d9aa20a7d42cf90c40f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/COPYING.LIB",
+      "bytes": 26430,
+      "sha256": "a190dc9c8043755d90f8b0a75fa66b9e42d4af4c980bf5ddc633f0124db3cee7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/lzx.h",
+      "bytes": 10436,
+      "sha256": "22b1ffa9ddc15aa5fac95d4f4f0c60486f590e55636a17ab94f3ad1b770f907f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/lzxd.c",
+      "bytes": 30015,
+      "sha256": "622183f03bac71a12327bc9f036395dcb5c3b7c6cc7d766785de24ac1354256a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/macros.h",
+      "bytes": 2076,
+      "sha256": "29a9628cd7a8881bd36defb811209c2a48852e0bf6899d579d6cb80d65337b0d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/mspack.h",
+      "bytes": 91654,
+      "sha256": "df9e9e2b18cc145e6cf652a43ffbc88bde21bfd6fd3024318fbc2140a4efd059",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/readbits.h",
+      "bytes": 8621,
+      "sha256": "7c849edb9b939b4eb1e9e2b895b7fee3eb19e23d0a1dab87c6c504cf007010ab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/readhuff.h",
+      "bytes": 6814,
+      "sha256": "446c7ca1cfb11a80cd1b4e86006abea3f6052059636361ddb1e227f29ccee560",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/mspack/system.h",
+      "bytes": 1727,
+      "sha256": "98997127296c7baccd61b5ade9362cab509c9664b00259f9f62e6008b7369e42",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/COPYING",
+      "bytes": 1077,
+      "sha256": "75ce0a8c5a7bff42fbd6f8f3b469b518132132c4f4948fb8d02b1ccb5d0df9d8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon.h",
+      "bytes": 8656,
+      "sha256": "3451e150c697917b51ffc9cda66d444137c7f21fc78d9dba02b4bd7c4484157f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/aba.h",
+      "bytes": 6276,
+      "sha256": "90b624c12fbc1e081b2fc8b8ba298b093b517ea4e59e6ae8668abbb19a05f8b8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abal.h",
+      "bytes": 3930,
+      "sha256": "b4fefdc6902df8ab3b3edc6a4e6807d59d42640573f6a8fee116b5700f7aeb2a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abal_high.h",
+      "bytes": 4364,
+      "sha256": "ce90e60170914000fa199e2df3d8fc48f5e38a55161a1f13507f266b8764940d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abd.h",
+      "bytes": 21479,
+      "sha256": "0501b5827716cf358e010b7757361dfa0a23ab5af702b66896b8e506d7116310",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abdl.h",
+      "bytes": 4266,
+      "sha256": "169e79af161ce01c7b0c56cb05b2a5265133c27610dbb4584dc4b3e1e52496be",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abdl_high.h",
+      "bytes": 4026,
+      "sha256": "de4d8b746483a1d6b1b20205de9c6999790dd24b306f41371ea8c70a4a23c1a2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/abs.h",
+      "bytes": 15655,
+      "sha256": "a8dab32340bbeaaaefa3ab8889db52fce5ffd59ccf8f6dbd93c9ee3cfc11d4b7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/add.h",
+      "bytes": 28695,
+      "sha256": "98050a9c39a1d062a032e9b11286b322031810da97f113a99503fb6fa1824d1e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addhn.h",
+      "bytes": 7275,
+      "sha256": "1a704a915cd8489880d477cce01b579063fdceb1d1b9ea4811c257e8741c2d3e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addhn_high.h",
+      "bytes": 4168,
+      "sha256": "b5488c1bc4bd05985d663f2988765198580a8fc77e62ed3008dc417ccd07ead4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addl.h",
+      "bytes": 3912,
+      "sha256": "b153a9034f8588e9b3abcf3f38f7044703487b89e13f11035a723cb29f0c655e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addl_high.h",
+      "bytes": 4141,
+      "sha256": "a3276b41392947d545f9e8b909d842ba8f7ff6d8b4322cc421cdddbc87b19695",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addlv.h",
+      "bytes": 9747,
+      "sha256": "e8f1b62079d7da3aec94580a5a52096da1add80d9a039361014cfda7c8a93d4f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addv.h",
+      "bytes": 10727,
+      "sha256": "4f80c0cdac19f3aadb677d5bff653df8d76f2d4fe450c2c565f24bc5741db2c0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addw.h",
+      "bytes": 7501,
+      "sha256": "c1e4df7767838e518de16d24533c2b9268fba1b8d037a6f3562861402f3ec542",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/addw_high.h",
+      "bytes": 6592,
+      "sha256": "5b11fb9f461639e8558258670420b2460361744aa9c03f9a2a2bcd336ad6d76c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/aes.h",
+      "bytes": 6990,
+      "sha256": "bffa3a27f2eafbe4c6658bdc5e053a38369330fadd49e2f794377e2dfe4b3fa2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/and.h",
+      "bytes": 17910,
+      "sha256": "e4568ab4d6a1870cd84ed5b0713acf579da934a62455360f2c34bb7f78f0266f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/bcax.h",
+      "bytes": 5580,
+      "sha256": "48df1d433836d82d16b56e56978c592a274fdcf8dafa1b9c145577f590c2486d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/bic.h",
+      "bytes": 14608,
+      "sha256": "9c8c7d46226165e9029f340d9762b9aa55ba8702c9f9f2e8a809512b1f587b08",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/bsl.h",
+      "bytes": 31355,
+      "sha256": "1c3c8196b5f0f7871e2b29a34c3b754406ae4fa1406bc8d0c546266b46cd15ac",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cadd_rot270.h",
+      "bytes": 8535,
+      "sha256": "8d416ffb34318303dde11ca1dad6d4e4401768c971ce972c4b2d37b761c7b515",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cadd_rot90.h",
+      "bytes": 8503,
+      "sha256": "f7de9c332b2f5107a57aa19623ee70def33e41a9ce359fa455a263cf460a79e6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cage.h",
+      "bytes": 5902,
+      "sha256": "4665d01c634f885c534a02e5ab05d2472ec8a5b83879f2a5c71da0236307c6f3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cagt.h",
+      "bytes": 5934,
+      "sha256": "fae6f7759dfe9da981fe0ce73902ff9f8e2e9dee65908ae905a6a8c577381639",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cale.h",
+      "bytes": 4828,
+      "sha256": "387a624309266bda1bf1e6a7d2b5f576d37980c10242705488efef6a268f157d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/calt.h",
+      "bytes": 4828,
+      "sha256": "602ee6d229ad917690daedecb75a7ddd5bf4e6f167753c50641a9e207e00c05b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ceq.h",
+      "bytes": 28291,
+      "sha256": "dcfac37be3f8bfe4ee1525d103f94ab72d6cb39fda0198ae389b8c091b30ad92",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ceqz.h",
+      "bytes": 12572,
+      "sha256": "752fbd4e0b8ea661252ce5f9a93c2781c160e73ec225a3fd63df2bae8841b106",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cge.h",
+      "bytes": 27527,
+      "sha256": "a83842dc61876c01b4b8769e95d5c894fd89f7994d071b88b396acf3a491e934",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cgez.h",
+      "bytes": 14790,
+      "sha256": "b49a2dfe49273f08bfb674527de4b3bd7e2a19907d4e2992c47eaa0ffdcb94a8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cgt.h",
+      "bytes": 26791,
+      "sha256": "60faa455f3d3a788074cf48a43d592b643042419d03ca15678978bfe6009d93c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cgtz.h",
+      "bytes": 14810,
+      "sha256": "cd86c90373338941a47931b6a154ee7a4e01ab46e149b9eab78553546a4167ae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cle.h",
+      "bytes": 27845,
+      "sha256": "b136373f67258c5961d90905dbf8a119a7d76427cb28e3e3f385310ffe8728af",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/clez.h",
+      "bytes": 14916,
+      "sha256": "ca2cea77d0d84cbcdc2c63d0194102e16b876daa749a8b6d29f27e4d27a34b60",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cls.h",
+      "bytes": 4854,
+      "sha256": "39576d582a2d2a83c471c03dd2b79d43d156925626fb190ab7c45f1d85e1c0c7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/clt.h",
+      "bytes": 27122,
+      "sha256": "f8b186f7f8dcb3481427c0493d990c91d5bd6a5c50374945de589c3cd33a27ef",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cltz.h",
+      "bytes": 11729,
+      "sha256": "667d18c2a4ac985d2e0f476a971479cd184966f7b77b18d6ed3d45534ef6a77b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/clz.h",
+      "bytes": 12547,
+      "sha256": "a3eda550a51b6520d762d50bbcf13fcd3929a0e6c6c97718b98356a8694e6f1a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla.h",
+      "bytes": 7995,
+      "sha256": "6b1e9204ee7e24fd2c3e8f25daf7c37133a2649990b95c2518f31588a5eb28a4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_lane.h",
+      "bytes": 15874,
+      "sha256": "8b25393374abf00214be1715ae61178ba263f1b72ce38ca39bccfc831d664c3e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot180.h",
+      "bytes": 8937,
+      "sha256": "f6e629d2afe2d589781367d2ea89c3a23d93fceb7f07f32af950d33c7127bf41",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot180_lane.h",
+      "bytes": 17215,
+      "sha256": "870c4e0e66875d5347d5cd7c4bc9620bdc225b6da47554e698408e83f552e998",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot270.h",
+      "bytes": 8966,
+      "sha256": "e24b045862fdc28ca29ca15a9a54db31862690af2b862bb0583d892a6c9c5d7b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot270_lane.h",
+      "bytes": 17264,
+      "sha256": "45d73646a1d43e753cb62853f290f1f609b925624870a8475e97c5a62495aff8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot90.h",
+      "bytes": 8938,
+      "sha256": "1ec696e697f445cd926cb475f23cd7861823c4a3cbf71dfb1c2c569e4ad0da7c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cmla_rot90_lane.h",
+      "bytes": 17125,
+      "sha256": "99738517eef2163f9258317d161415f5e7c3f4d5d8b74f9e7bca2c3885f65045",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cnt.h",
+      "bytes": 6697,
+      "sha256": "d8d05cea9bb687d4faaaadf2a55be975d6a68031747f12d4259a808bd8294ee8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/combine.h",
+      "bytes": 15705,
+      "sha256": "362eed4f84bda6f92f3fbdbf9fa2eb495d00b537196fc812ca8a1abee5a6d212",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/copy_lane.h",
+      "bytes": 44592,
+      "sha256": "8a7278763e4f9a33f505c95504dfc2fd183787957327d057d7ad511fc3bc9fbe",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/crc32.h",
+      "bytes": 10223,
+      "sha256": "0d8c3825be3af3a4dc362372116262939b665a672e3fbc8f326c993c52b4e5e7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/create.h",
+      "bytes": 6960,
+      "sha256": "dcea75c254a7aa5262ac1c35bf8b4b1ad1432ae4343c470677576326134a1183",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cvt.h",
+      "bytes": 69275,
+      "sha256": "fac2b7f8f80352d9962f56c2df588f9825629d6a8fc37d293fe6bf0478f212af",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cvt_n.h",
+      "bytes": 23826,
+      "sha256": "6717367439034301a2f56235f1a2a96d1f3a0c33a0c937d7c5b6db078ee02660",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cvtm.h",
+      "bytes": 12289,
+      "sha256": "7c2cc9e6e320807d6ab217ac2d6b674b8c457ff238aba90810cf97792cb4d7ad",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cvtn.h",
+      "bytes": 17272,
+      "sha256": "ddfeda398201df53630a16d371f8c17392dc160420eabe6f87c5e8ed53696039",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/cvtp.h",
+      "bytes": 12273,
+      "sha256": "57f0a7bd8ef43914b676af1641ca04c87d42f6a6c055ec2718979ed5f1cce36c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/div.h",
+      "bytes": 5956,
+      "sha256": "ea07de96a5409f411710a1ac0c1cc6ffd66b0bd1ae0c7428b794b91203f923df",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/dot.h",
+      "bytes": 8683,
+      "sha256": "870a2552d7d6a0cbfd41ab52d65c0fab80152089b699d5b27ae531d586cd8c36",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/dot_lane.h",
+      "bytes": 21282,
+      "sha256": "23ea05b7b27dde098301b28bb75e4b0b7943db84d37564b8ebbf6d73ce0aa619",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/dup_lane.h",
+      "bytes": 63942,
+      "sha256": "db3246194f7f39e0674fd56f54f46b8b936ababf541beca15b7478afd434cb10",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/dup_n.h",
+      "bytes": 24775,
+      "sha256": "16d8a9554e1248302a5a0d40b476e9f2843bdc275c3cf021d23134d5f77f2900",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/eor.h",
+      "bytes": 22577,
+      "sha256": "f26ff29ebb6ad6656b8c9e95db6b2a1e459151b3993b1dfdbc31eb5319240d5e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ext.h",
+      "bytes": 49298,
+      "sha256": "a45d04583e1e8862861ac91c9ebd8ba8ff1e867e45170575dfdbb5894609a486",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fma.h",
+      "bytes": 5591,
+      "sha256": "50aa60f4859fa9081de7d7e1b5fe950c13bd6bb543c9e1daa333ed6b03b65acc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fma_lane.h",
+      "bytes": 12199,
+      "sha256": "a97716d1732f23c875fc5db0555043a602d696e35ef08aa1583a58844a935ace",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fma_n.h",
+      "bytes": 4820,
+      "sha256": "4851b69c9302abc37b6eba2b6fa736ef658b530a8f276f2eabc234cf77a4a26c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fmlal.h",
+      "bytes": 20366,
+      "sha256": "5e2d5a8ed86128cc720f0560f44e2fbc16464752587aee1e6982913a73f84de6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fmlsl.h",
+      "bytes": 14432,
+      "sha256": "6541913666c5f6cd75b970a836c08e39784e5757894d13d88716e6373dd4363d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fms.h",
+      "bytes": 4743,
+      "sha256": "edf2e2b3d1523e6bdc85b9ac20969b7ea27cd5496d61fde4d64cf5472247ca38",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fms_lane.h",
+      "bytes": 12145,
+      "sha256": "a6dc34b7a68b0ad77179fb6b78f24d2243b9b64bc285f4666b18bb890e35f0be",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/fms_n.h",
+      "bytes": 4773,
+      "sha256": "8df0550c94622f306c6a6384b5eeee0e8d8ad1d7def231fb642db0fdd4d8952b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/get_high.h",
+      "bytes": 12840,
+      "sha256": "f30004c4a9817a22959565a9b29215a3352faf8aad08eaf8b264e7ad77a3addb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/get_lane.h",
+      "bytes": 20784,
+      "sha256": "7bc80646917249b44143dcfdf27cfb49d33bab2b5eeb74e8c9f658f2571e7aba",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/get_low.h",
+      "bytes": 13300,
+      "sha256": "d6247c794a751b1eeeec4e99d618c5b67de442f23e18fe3c20080fd9640ad129",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/hadd.h",
+      "bytes": 12987,
+      "sha256": "0a412a513acbddf44e615b15123150d771c15e7d0f95d2f5f79919c2b812faec",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/hsub.h",
+      "bytes": 10597,
+      "sha256": "725df66315419489336f07b56be3ef9530a0f0fc8a802ffbbc5be96002937ca8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1.h",
+      "bytes": 19446,
+      "sha256": "b66344c6aad691eab5dcedb2cfb26c6b7a5a0457e2084b4ea01e293d1b89d46a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1_dup.h",
+      "bytes": 14871,
+      "sha256": "b4d1916e3bc919f595acfed08e7a8d2f5e47fe96d4b92e977038c70f77e1b008",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1_lane.h",
+      "bytes": 20538,
+      "sha256": "89cc49df1ebd6d32fa78e417e87b560683758820d24e086b542418deab9c59fa",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1_x2.h",
+      "bytes": 16364,
+      "sha256": "c5aa148933fad97d96456dd360d6ce8744568e31a8a52302f015aa7000612822",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1_x3.h",
+      "bytes": 18257,
+      "sha256": "24f4d08340854a8b4d43510d2b2ff41c47942911cb99e1bb8aec4100c53b3ab6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1_x4.h",
+      "bytes": 20086,
+      "sha256": "578307e8bab11088fc7a2855c7e18938d4a0e70d17bf437c631502ee804ea970",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1q_x2.h",
+      "bytes": 16656,
+      "sha256": "e79fcc28c7602c6df4fd32f053135e158bc3ad5f868ef3c4f914e6896a0da9d0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1q_x3.h",
+      "bytes": 18355,
+      "sha256": "4dd00e269da5536ea05118b326dac4598ffb75342a80393dccc1cd9a818b4511",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld1q_x4.h",
+      "bytes": 20214,
+      "sha256": "50c1d442f1290a738104d2de5af129282e9a5dc413e1422cc28c85dd1582c0b2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld2.h",
+      "bytes": 43711,
+      "sha256": "8bd41f714338e31d6d641e5189145e474d8137580537178c915e05749da4051e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld2_dup.h",
+      "bytes": 15315,
+      "sha256": "0c0cb235fc5690e7362f4893df3db2b977994d57f8cd97c60433db11aed52246",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld2_lane.h",
+      "bytes": 23447,
+      "sha256": "e264a3a969e22699603fd81c9a5ed6de9a091a44b2a8fddf8e1c28516ea5f530",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld3.h",
+      "bytes": 35090,
+      "sha256": "b8793e3a5ba7ca4fc2f78bbd47b593ba6bba0a6e89a0e65572c4c7ea9595750f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld3_dup.h",
+      "bytes": 15295,
+      "sha256": "3dd88e84c75e6ce7f81764a1e438582b8ccb6428e604b2a8df0af7320827a9df",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld3_lane.h",
+      "bytes": 23447,
+      "sha256": "41dbb1fa48c7718ff57d48574660df0f3e34ee32d1dab01fee8949300155ef70",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld4.h",
+      "bytes": 36113,
+      "sha256": "52581e27c8eab10705ef625e2697edccf3501ea0e85af23c9c1b08b39fec43ea",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld4_dup.h",
+      "bytes": 15295,
+      "sha256": "a2edcd6814799f960825dd05c878964271b79bbf19582c9c94eea5ddce23447a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/ld4_lane.h",
+      "bytes": 29677,
+      "sha256": "3c1b0b4cc8b9920a288ea0e0bbbff11c9816e548a6cf9c2a040085c05c78fe45",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/max.h",
+      "bytes": 21736,
+      "sha256": "e8385afd6334bc89e7415d9f93843309c62a728fb53ed343aa23130d239f5f4c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/maxnm.h",
+      "bytes": 9499,
+      "sha256": "7f49458d47dfe18baa48d88215022a3b7b940241a81578f6f0e1c4bb7d14b48f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/maxnmv.h",
+      "bytes": 5267,
+      "sha256": "88148940bf61833c11fb05362c5076a4c12ed947129fb1e8004479f2cd2d843b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/maxv.h",
+      "bytes": 11870,
+      "sha256": "79ee9c0b9a22435d14924409182b7ce5c307bae4f0a7f1c1eb924ad69a91a1bc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/min.h",
+      "bytes": 23679,
+      "sha256": "4a2c7e1e028e662e77e124506a81b958d9ba94c95df85799926d43ef8497aae5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/minnm.h",
+      "bytes": 9723,
+      "sha256": "58d8ad84e10f538ec4e23ee65bec24229c8825167d74ed3343bd5cd3ca26fc6e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/minnmv.h",
+      "bytes": 6069,
+      "sha256": "5b9212df7c756de5c51ee3b92f605043d006677639e433c382b5499c351e759c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/minv.h",
+      "bytes": 12724,
+      "sha256": "b5c2438a43b7980f9c79aef69bae3d43b242a664989a2bc826bb55d97c72e0c7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mla.h",
+      "bytes": 8908,
+      "sha256": "2aff85c111e0efa1656072fb149433c2080d47ec64168d371fcddef1627e6aa6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mla_lane.h",
+      "bytes": 9913,
+      "sha256": "08ebaae46427c8254297cdc5babe3196245337e7bce3a1879cbc6240f44b0e0d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mla_n.h",
+      "bytes": 10388,
+      "sha256": "907ac6b87d2936bc901e8d53ed0d5f430c1ec34334dc4c908d361762d36a8309",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal.h",
+      "bytes": 5025,
+      "sha256": "bab43443330cdf065f983f5c30ed0e7b91c152f347e1d73e2519439e5e5fbd07",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal_high.h",
+      "bytes": 5259,
+      "sha256": "f02d4d71271fa59a97c1df5768687b2e6d257b79c2896013af1e48bf9aa9b8f4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal_high_lane.h",
+      "bytes": 6487,
+      "sha256": "1598ead0bdb356e7e45ce51b5c158f9097146101b7baa83defc4f634319db056",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal_high_n.h",
+      "bytes": 4299,
+      "sha256": "1a0cf0e55bb7cdd5416b9dad1c0960a9e7a9086d3ef4e283b25bed3c2c1cbc2c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal_lane.h",
+      "bytes": 4826,
+      "sha256": "9cb8a87ddac5dc6bc90018a2f331be667cee0d40aab283030119136e70bdbcc1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlal_n.h",
+      "bytes": 4149,
+      "sha256": "e3fa1fbe6706d410b5e047946ff0cd9c7efcd28a415d2cbf407b86ef733e3ba1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mls.h",
+      "bytes": 8532,
+      "sha256": "9007504a24287eb8e8a459e798564c6328fd522579721b62e7148b62d81f7745",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mls_lane.h",
+      "bytes": 9837,
+      "sha256": "80328e89a21e84023e23573f0d24c7abf79f7f5f0525a591de9c69f089484952",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mls_n.h",
+      "bytes": 5586,
+      "sha256": "ed6a5556cc05e9e6d71294d5319c82da7360d64b01e4c0dba457a2bf59c58122",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl.h",
+      "bytes": 3888,
+      "sha256": "2035182f89a3ca0ade6849389f033b53a597aa104cf5e40550acaf1c750e1334",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl_high.h",
+      "bytes": 4092,
+      "sha256": "da1599e409036bfaeb684182818c3f78b3feebdad5a2065114f25b459291ea75",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl_high_lane.h",
+      "bytes": 6487,
+      "sha256": "f56a383920bd027b46ca6f04557766f0537c364f5347c85d2e1a43d8ad94118f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl_high_n.h",
+      "bytes": 4299,
+      "sha256": "1d48b7b097926d0bc12b47144d9ea97d479feb07879bc61fe0e0c6fee379daf1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl_lane.h",
+      "bytes": 4826,
+      "sha256": "dc1e2d364ae3b741096b2b716bcf5cac6d1e13c5025b5bb0172833423bb64d9b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mlsl_n.h",
+      "bytes": 3110,
+      "sha256": "797436476b8c38d5e29ad9d25dff131038552a0fd26ff33da37b94c341b17785",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mmlaq.h",
+      "bytes": 5499,
+      "sha256": "abcbec2b7e7d7ca66833fce420aa846be5b2c0b4df001c7d1e62a0bf84822012",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/movl.h",
+      "bytes": 7490,
+      "sha256": "1893f3fb58fd968cb37a2ab0593f6828ef5852cd8964787426ff07c852b0a66e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/movl_high.h",
+      "bytes": 3784,
+      "sha256": "62f56dab298ad35979a3810bbf36abf1e735bd8071947d49a20cbe2bb0f9be89",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/movn.h",
+      "bytes": 5749,
+      "sha256": "bc7911a49c81266f9aa9fff9ccd873fa47e45afcc51c550c1bbab7db78b27dd0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/movn_high.h",
+      "bytes": 3905,
+      "sha256": "5958f7572475f20014dad524a24a6961509d29272ea9f77ac3167076a33c0c45",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mul.h",
+      "bytes": 23503,
+      "sha256": "9113a2b53fe6a0fc6da6e860299504af52c4c87cbb99e513c3a03b4b3ee29a01",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mul_lane.h",
+      "bytes": 31213,
+      "sha256": "72862761d981703a8e0aefe518dfdb2d8662575718b6dac00dd392ed49690c33",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mul_n.h",
+      "bytes": 7029,
+      "sha256": "f05be8ff9973a9e650b43d810ca2f8bdd5692265f8237916458e23a7c567146e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull.h",
+      "bytes": 9805,
+      "sha256": "1c6626d567f6ace2c3d099ac083b114cb6b26dbe75370fb0edd36d7cde35d5ba",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull_high.h",
+      "bytes": 5926,
+      "sha256": "64bbaae611bc7f90ece7176e07609f347afe0c523e6f4fb5d4a37647ec275c4a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull_high_lane.h",
+      "bytes": 6604,
+      "sha256": "d415fc9635b210d90748b360a9d0815c293fd33ea9fab9a8825b9fade2fec6d8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull_high_n.h",
+      "bytes": 3255,
+      "sha256": "eb55e11eae0dad64fda9634cc8ecb02e3397b50302ecd1e709a9c5fd5a8eb5a6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull_lane.h",
+      "bytes": 4634,
+      "sha256": "915f18d9abe08df470ab1231a734525dae0e6e80089d13eafe786016b189513f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mull_n.h",
+      "bytes": 5368,
+      "sha256": "de430f901d4b593187e8537c292a23997fec6e7b59379bfe4d7fa6fae0a1f1c4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mulx.h",
+      "bytes": 6949,
+      "sha256": "5c8089fb0ce6a9ea4ac8574129987b3fb5731c758ce3657db9d62b561d382009",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mulx_lane.h",
+      "bytes": 15944,
+      "sha256": "447cd89ffab45de61c87f89fc00c0a117a96a1ec7e44eb9c8918a8f45641522e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mulx_n.h",
+      "bytes": 2360,
+      "sha256": "5bb5fe74299b3900d3499ba53a1e8d049c825e9d1d243c318891bd63d42a9c96",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/mvn.h",
+      "bytes": 13678,
+      "sha256": "d4a8460b468660f0505afbdd7fb79bd2c3f69839a050b6929303aca7c0555830",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/neg.h",
+      "bytes": 13586,
+      "sha256": "c18dd8a8d210e2a0f55b7f6312641d9e64b9025c3f2c91094a20394c2d5415ca",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/orn.h",
+      "bytes": 14783,
+      "sha256": "0ace5b073aeb23706f7b699ca4682b2d28dee51bcfa43038bdffad3964537f0d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/orr.h",
+      "bytes": 16254,
+      "sha256": "2730e19ee1a607efd04b7029f9aec0c0ae081c44428584128fcae16e732b7774",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/padal.h",
+      "bytes": 6129,
+      "sha256": "43bf0514f8be727540565e29f6853b4207613f226390b803ff98e42b60faf70c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/padd.h",
+      "bytes": 12582,
+      "sha256": "ddf2f4567cd22bdf6fa97d72f6eeaf2876e295e57ac85ccdb700c66ac5858ac4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/paddl.h",
+      "bytes": 10854,
+      "sha256": "1da2d5ea124618c2eb7063bb28852d25f36a69b48c5ce5e593cc014c3bd2186a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/pmax.h",
+      "bytes": 9415,
+      "sha256": "1bc6aa90272e554c321879b07ce319587c1db53650b239f9e5d5790d7d4d7c36",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/pmaxnm.h",
+      "bytes": 4579,
+      "sha256": "ee79aa45e76efe5ab1fd56ded63f97c9511feedf13935522efecf1fe3f8e87b0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/pmin.h",
+      "bytes": 10179,
+      "sha256": "2ac1f688305c606b4eb641bb7613971554ff26d951ff6558bc0c9327ee9ee8d0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/pminnm.h",
+      "bytes": 4579,
+      "sha256": "71aa64ea7d2afd8193bbba8e731b0661c684a94995fd263553134db142ce970f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qabs.h",
+      "bytes": 8314,
+      "sha256": "ca66f27b6e4b8b45b9326a94272bce3109a4d0a44cb9202566bad01897c1294c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qadd.h",
+      "bytes": 25575,
+      "sha256": "d22dd86af22268e61fd62dde5da6dbb1fd4416110c0a6f39b0b6706bf0a0ce2c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal.h",
+      "bytes": 3443,
+      "sha256": "18063c766e3ad35c6ccc4e9a81014fba4e786ef19e22b4e282c2a33922438bb0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal_high.h",
+      "bytes": 2875,
+      "sha256": "889ae5aba64f0a00d2c2d10a050d21e476134427c0986800c1c70e8620a94ad9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal_high_lane.h",
+      "bytes": 5011,
+      "sha256": "94ec65de601e5815793985718f96005a1dd29ea42b996c4e51046f1356823bfc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal_high_n.h",
+      "bytes": 2967,
+      "sha256": "365d98612c616120e3d72bd3bd90d0c238600a3b7e79c82f8419a6283b8d610c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal_lane.h",
+      "bytes": 5056,
+      "sha256": "59faa7a75d6f69627411d545a531046a3142c3c1a42e9d0de9bd7350eda7389c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlal_n.h",
+      "bytes": 2370,
+      "sha256": "78269683918bd45a81ed3741e4832516f5312c00034f451d66ec0da0c6a16876",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl.h",
+      "bytes": 3461,
+      "sha256": "c44434a1234ef30d4a0b53915963ce5844cf48637c7c0633b8fe6440cdfd2af2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl_high.h",
+      "bytes": 2865,
+      "sha256": "7ce4e2df1446f4ddd5174d01ac0ef240ca4ac846a0ba721b707d90aaf01799ff",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl_high_lane.h",
+      "bytes": 4992,
+      "sha256": "5893ad0287156d4cc343f6c228b7e65f866d5e71d4b745deaab5dc8a61e7dfaa",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl_high_n.h",
+      "bytes": 2966,
+      "sha256": "2d719097a049f3040ea5eacdf38087345589e831c74b03f80ddecee066d403b7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl_lane.h",
+      "bytes": 5056,
+      "sha256": "2839d711fddffd8c202c426fda0d37966168d450722b1c00f91064dc2c2941f7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmlsl_n.h",
+      "bytes": 2370,
+      "sha256": "f114a43927c89b898aa4414b38b497f7fc6443c665103475d530a738e6b6d8f9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmulh.h",
+      "bytes": 5764,
+      "sha256": "c9cad0e9531af7ac39117569c1b28ed20ed7e57bc6ee2847f5a42c1773e23923",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmulh_lane.h",
+      "bytes": 7226,
+      "sha256": "d31252f5e3c1681636fce0c15a8d4fa78df49d5ec0317e4e989d48e025b589b4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmulh_n.h",
+      "bytes": 2873,
+      "sha256": "8e51776820958e864ef1c531eadd9dad880311969d13b6a99b4107b3b2571077",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull.h",
+      "bytes": 5779,
+      "sha256": "ccb06bb2f99caa1c21d16bc3d433b9714c2be88ad2fa6caa05a356b8406beaf5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull_high.h",
+      "bytes": 2412,
+      "sha256": "d2a3275d206cc8bfeec35ca95cf1257443824703ba115a9749f62b7c730733e8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull_high_lane.h",
+      "bytes": 4139,
+      "sha256": "5dd292d71bd7ad8ea322b5ac8477c78844c6ecfb4a23edc18fa84fe64cf0edba",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull_high_n.h",
+      "bytes": 2435,
+      "sha256": "67477efb9c9150f99b641dfe1c55f0187f6b57ed0e8a1045043626f2ca29b613",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull_lane.h",
+      "bytes": 7029,
+      "sha256": "e95960614dff9820858ad7fce9e07e36def7161a295c63c795e25db50e1b00ab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qdmull_n.h",
+      "bytes": 2306,
+      "sha256": "a452caeb13f9a5509566a55a2655baf5f8a1c536de5336a7be24e0124e5d3083",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qmovn.h",
+      "bytes": 8266,
+      "sha256": "7673214f1a6130d3180f72136aec1e3471ef2fc4b63819e95d8a952e50d18521",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qmovn_high.h",
+      "bytes": 4029,
+      "sha256": "a482e22a339fab33729b6790b5dc8c4ef22c96fcc3335ab606b9acd43e83b52d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qmovun.h",
+      "bytes": 5196,
+      "sha256": "d328357b239e9ebd563fc8ccd1b4d745621aa78b732a8a057e5339cb363da5b1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qmovun_high.h",
+      "bytes": 2784,
+      "sha256": "e250faa7c3f624ee31adf66f7bd73ea66c54b8629e36829d066ef0822dae9c67",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qneg.h",
+      "bytes": 8600,
+      "sha256": "ec4d01c7241598f8d0b01010dce7febbf028cecba130c97187233cdb607443ca",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmlah.h",
+      "bytes": 6493,
+      "sha256": "56e278f0536716ade52d86fdef49258eeeeae8c263ff8868027017a0ae9ec034",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmlah_lane.h",
+      "bytes": 7306,
+      "sha256": "56f5c871b3658dce1035443c9c5591c5cdb72bf131b03005c57cff3170a64b25",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmlsh.h",
+      "bytes": 6494,
+      "sha256": "eb92277729cdb784bd763b2b7073e64a99f59c76108c3f6a82e49719a492cb90",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmlsh_lane.h",
+      "bytes": 7306,
+      "sha256": "2dc65a79bbf4c926f7a823f03163ba6a8e3eedf4e073a7a67d402e80109c8e13",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmulh.h",
+      "bytes": 6542,
+      "sha256": "a812a5b82a7f832dcad55137f35b0d9a265143e82a62c615b020583f97de25a0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmulh_lane.h",
+      "bytes": 7189,
+      "sha256": "0f2e7d3591d5091b88def17373862db5abbf9986b6b81ef693689a6459a818c0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrdmulh_n.h",
+      "bytes": 4088,
+      "sha256": "eb657dd9ceddb05671db06523e5e5efb8ae1321e351531de9afaec9303c717e0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrshl.h",
+      "bytes": 20645,
+      "sha256": "889102bcee73c853eb625476c9edb56a555590e17c21f09da7525014b543c8e7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrshrn_high_n.h",
+      "bytes": 7264,
+      "sha256": "356779d20ec9d19caadf1277fc0f3bb1e52a8cb71bdd61ac347a2a4ec98f10f5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrshrn_n.h",
+      "bytes": 5685,
+      "sha256": "3b4128a7dddb53c292090728cde98764cc129c16cb35246756d0b204956a5967",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrshrun_high_n.h",
+      "bytes": 4569,
+      "sha256": "1530aa7c81fe2a7581758a00019902fdc8a2f8057383ff991bdbe755230b59f6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qrshrun_n.h",
+      "bytes": 4172,
+      "sha256": "5adc998bc3fe3ba4dbf8758971e50efbc887783287bcd9ffe4011c1b5116f166",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshl.h",
+      "bytes": 19278,
+      "sha256": "5147b94e90fc026cbce2ec50c72444e6aea20c1b494a805ac1442ad59de0b78c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshl_n.h",
+      "bytes": 15820,
+      "sha256": "4ee3285efd9d5dde45d3690a300d52e83a7e4a5f9d690ead616b8361b15908a6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshlu_n.h",
+      "bytes": 18151,
+      "sha256": "c3cf7226b74159fd8938d4208c39bfa5c9259b1c96f20419b563085e3e5cc74c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshrn_high_n.h",
+      "bytes": 3965,
+      "sha256": "b96078faf055db9391f4218a74115388c4a9f2c9e937e097be724a04b420270f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshrn_n.h",
+      "bytes": 5646,
+      "sha256": "37e9947f63638db8991bf840491338128f34c661bab572fdcdd18bd74db0bd53",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshrun_high_n.h",
+      "bytes": 4344,
+      "sha256": "7bef1d92990d4e648eaea65a2972b15fc803677f1143c397294ffa786f12f9d3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qshrun_n.h",
+      "bytes": 3744,
+      "sha256": "79240b0c5e5f0d3a998a8106d2f9fb528cee738514a077a38b7754de75734aea",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qsub.h",
+      "bytes": 22099,
+      "sha256": "ac8e95663e84f2dd2e9f93516777d2f02d572d2077d6ac43cceea903491e638f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qtbl.h",
+      "bytes": 24660,
+      "sha256": "58c94e45a1056aca102237f829dcef6f0fa747c3fd7ade54a02484edeb0857ab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/qtbx.h",
+      "bytes": 27299,
+      "sha256": "1d7c64d58aa80d3a46c5d8dfac2687cb5e0f6ed835dd87a6a1367b004c21e195",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/raddhn.h",
+      "bytes": 6006,
+      "sha256": "a9998d66267a1a22783a44d188a0f1eae1668d34cbbe560683d537955263af82",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/raddhn_high.h",
+      "bytes": 3828,
+      "sha256": "68ecf2ba310f2dadffe752aa43722792f52d118fb83d3fafdd8d537594a8621f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rax.h",
+      "bytes": 2221,
+      "sha256": "7c6f3eaca06a17168c00b0ed87f2864e335e036f833e4f425848f359346a8646",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rbit.h",
+      "bytes": 7469,
+      "sha256": "4764e224554210e9011a8b1b22df040da15a6e9c023f507ccb0962d9f0744813",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/recpe.h",
+      "bytes": 9764,
+      "sha256": "1b536109c79a961e60fd355b0ba3957c80dc8e709573820b72dd96123bc47649",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/recps.h",
+      "bytes": 5903,
+      "sha256": "0fc70929eca6d973c9777f07e4bc34a9e86d0c619430feadd3b1c8ed2eee6c29",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/recpx.h",
+      "bytes": 3884,
+      "sha256": "b99d78fdf79403855aefdfb1374e91d77cb263e2986ab3946c39d0967e1b0531",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/reinterpret.h",
+      "bytes": 235636,
+      "sha256": "3e1190e3e9147b03207da7dfef867456bb70ba7b76ee46c6642a594ae9a93bdc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rev16.h",
+      "bytes": 5566,
+      "sha256": "a457db397ac7819873cfefbbbe56a2496310b769557b5780fefb9bd5ff21b20d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rev32.h",
+      "bytes": 9673,
+      "sha256": "770788a006cba20259d60f0da599e5525eff9103cf7a573e1020c1645e0b839a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rev64.h",
+      "bytes": 14292,
+      "sha256": "4885710d4d4bc471313bbe80adb2f6ab74c8d5981a3bed6e873aa59cdd1289fa",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rhadd.h",
+      "bytes": 17720,
+      "sha256": "c73ac6ff892f1105b5a6795a48fc966edcbcdc933d15698ab535d41e8e6405d2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnd.h",
+      "bytes": 6098,
+      "sha256": "73e97d0e05a7cbadf453280e7ef0d73d390c6b1c62b3681b8303dd528643c1a7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnd32x.h",
+      "bytes": 5647,
+      "sha256": "6a7be65528d968a2b22a9924f7bd93aa16a6771486ab97fa9cd29b492f54d455",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnd32z.h",
+      "bytes": 5651,
+      "sha256": "3053274dbd1e73480006a608ca76cd65d3c0aa0a59757ed9defd791f4209f046",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnd64x.h",
+      "bytes": 5647,
+      "sha256": "e61b4ec15fb3239a92b938e07c75574125945f161a6ca23eef906b72017c32c1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnd64z.h",
+      "bytes": 5651,
+      "sha256": "d0bc6d61267e9b6af3c7b03d00c97a04a97784a8dd177af5e670565caec665cc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rnda.h",
+      "bytes": 5457,
+      "sha256": "12ab112408b071fb68f1c87657cbd3b9766489f5a33d2b80cfe61f28ac0c3646",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rndi.h",
+      "bytes": 6029,
+      "sha256": "ec9e23b732fbc1450011b39968cd51cc9705b3440fbfc563947fa6e52c38708a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rndm.h",
+      "bytes": 6144,
+      "sha256": "7599cea5dfabaffdd289fd1a2b05ba8da7def21eda0e995379a7df04c907fe99",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rndn.h",
+      "bytes": 6574,
+      "sha256": "8645b5dd684e354d0089d26db0908b81aab092f0780739e57c306f6dc0d3ebb0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rndp.h",
+      "bytes": 6135,
+      "sha256": "813e7a01ebc5d8494835b059aaf23fa771609ea264df56ae885e501755eeb7a9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rndx.h",
+      "bytes": 5452,
+      "sha256": "5f8a3983b5f7da91168effc7401ff00f7a062feb01537cb1ef73aed36036785d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rshl.h",
+      "bytes": 46893,
+      "sha256": "75fd7e199d4dbff9a612b59fb5c77a18678769b77fb1bc22f083ae1856e729a8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rshr_n.h",
+      "bytes": 18642,
+      "sha256": "3d35d0c7fbc939dfc7d3396197861751c450cf75fb02d1d6414d55ebd8196a9d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rshrn_high_n.h",
+      "bytes": 3867,
+      "sha256": "9acae2274ad31d3c816da4c6251b802e8e92eb04ba683bf23a8d2f56f1a99e77",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rshrn_n.h",
+      "bytes": 3506,
+      "sha256": "2cd294626a58401ef7b7c7b78dc44a598e3b3b6c4e3ac1c3604080e3fedc05a1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rsqrte.h",
+      "bytes": 14145,
+      "sha256": "cb2263abb5426501a8478cb4c91033f13747f8b45902c332202d6397bbe8370a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rsqrts.h",
+      "bytes": 6208,
+      "sha256": "af0e2216bb30c9925037cd3dc9efdd5023a5adebb00763325e01fc54b84c5645",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rsra_n.h",
+      "bytes": 8089,
+      "sha256": "549495488c307d66787d61834020e953d2929f3fb71eaaa051e13b536b01a23d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rsubhn.h",
+      "bytes": 6005,
+      "sha256": "0e5d5cc1629f1774e643d2a60d0ec97f4ae06c0df03d465846971234a6e05efd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/rsubhn_high.h",
+      "bytes": 3828,
+      "sha256": "1b4f2a01f3f4f4e01864d80b1c3671b596a56ebbcf934f4a0bac68434e50210c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/set_lane.h",
+      "bytes": 20328,
+      "sha256": "15f72f84f69965cb1898b12a19bc50a1e6995965f5c2c7079b7ac56739c01c2e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sha1.h",
+      "bytes": 7305,
+      "sha256": "05ca77f3ab0c2988a185d6f840a01d59b6627265a822de11d4d17837cc03eb69",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sha256.h",
+      "bytes": 6700,
+      "sha256": "e8f09576c13c33ccf91adaa97674ad8264f0afa2496f86236c7234a74e705dff",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sha512.h",
+      "bytes": 5833,
+      "sha256": "7934b0db807da9fbfa84f8e1d803aa40b956932bc8ad856739f0cac8bc0be67d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shl.h",
+      "bytes": 37122,
+      "sha256": "ccb890b702f648a68f30a3e725cd87b078a8f31e29eba065924563289806265d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shl_n.h",
+      "bytes": 19519,
+      "sha256": "aea549a84129c20944a5d35d92e449213f752ed7abdef87dac086a637fa549ea",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shll_high_n.h",
+      "bytes": 6598,
+      "sha256": "3ab54211b49cbb9bde72c5f9d6b4339458d5a593d1c926733668de58fc1dac7c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shll_n.h",
+      "bytes": 6147,
+      "sha256": "56c8cc647818efbc7065d41f219019533efbefac40c2837abe01901f52f97663",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shr_n.h",
+      "bytes": 21704,
+      "sha256": "2618b26e4cfe24827ef2301f2da84cbdc64ec9c84b7da31758082ecc8268add2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shrn_high_n.h",
+      "bytes": 4233,
+      "sha256": "ec670b909bf89bca46ff06848a8ee3a562067f2cd2cf98f4d9180a55a4995064",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/shrn_n.h",
+      "bytes": 5268,
+      "sha256": "c216088014fb697afb08a786dda1d23c0607090ee1cc87499e8196962d1263c2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sli_n.h",
+      "bytes": 12110,
+      "sha256": "ca34130e09b2934599a9c2ac0850ac8f24ec01d714332b939d7be33d20335168",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sm3.h",
+      "bytes": 9177,
+      "sha256": "981bee58f6ff3a65bd93f3bb20def0c5a72f93c3a72698f26be0f969af781f48",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sm4.h",
+      "bytes": 5863,
+      "sha256": "c8b485d8e2bda2a9a38799dcaf84376ced1087f9790df529211c1da1b624b184",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sqadd.h",
+      "bytes": 10385,
+      "sha256": "dc87f1f0af7f06d18d6cb512636cd4501266db40d88521518709a2f00fc9a137",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sqrt.h",
+      "bytes": 5788,
+      "sha256": "a3b7272c2ce3e899fcaf3501b4fa24efd7683d20672567e2b213edbccac6a743",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sra_n.h",
+      "bytes": 7798,
+      "sha256": "5f080c7fb6598a42a8248373bb398c5ff16052a87071f41ab89d10b958443ae3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sri_n.h",
+      "bytes": 12341,
+      "sha256": "835b90ee5c7d65aad78b033f4395063c393be90065f1e8422f75fae9f8ef29b0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1.h",
+      "bytes": 19589,
+      "sha256": "792980940c935b4393c7566fb77a36dd240c7c7836374b7f7af8dc7f9355f753",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1_lane.h",
+      "bytes": 18237,
+      "sha256": "e825691700ca762790923ffee478f4ed21cb9e479c90529ca4bd07c9200fab46",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1_x2.h",
+      "bytes": 10309,
+      "sha256": "e9e6c0dc05ba980dd3ff9472594ed798d62c06358b6445add5299d8bef249d96",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1_x3.h",
+      "bytes": 10966,
+      "sha256": "8a7eb0cb54298feb67851533bb6bb1a9f8ddf8888097bd4bdf1373f5764578f6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1_x4.h",
+      "bytes": 11596,
+      "sha256": "48b674ef9ace91ab7f398aa71892e31e197c72c3013a5e31f0872e03d0bc98d2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1q_x2.h",
+      "bytes": 10278,
+      "sha256": "88dcf42392ab4070ba21baf1cda0c8b32edc4bf65398d968daaca1e0693ea9db",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1q_x3.h",
+      "bytes": 10996,
+      "sha256": "dcc061211c7e5cd79cc08816411ccdd81876e54e09a29c168e8985f70ed381cf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st1q_x4.h",
+      "bytes": 11752,
+      "sha256": "df1a555840cd6100b78365d73194b8670c83cdfb08218d9103d6965c06a0360d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st2.h",
+      "bytes": 29655,
+      "sha256": "a9a19d81ad2dcacd33cb519b41f2c4ad5430f08ceccf09dfc1d2c4cb4720eeab",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st2_lane.h",
+      "bytes": 20836,
+      "sha256": "ba1aeb8436e67189fc33f21d9b9744dd332d1ee4cb624056b6987ec86beea937",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st3.h",
+      "bytes": 52431,
+      "sha256": "30c0cfd39050be7cbe39785ae4fab982da942460b94272c45b9e088918238312",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st3_lane.h",
+      "bytes": 20835,
+      "sha256": "f791ffb1db122969f82c50911bb7e498c49af9681e55d989509dedbaa7683cdf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st4.h",
+      "bytes": 36283,
+      "sha256": "6ec20df8d0b463823c13ed9d3a83d13859b00135873919e9743caf266ca04735",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/st4_lane.h",
+      "bytes": 20728,
+      "sha256": "570dd174ba330e72126a4274b27cc4629b1afc87a251bc6c7176e675d42f7110",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sub.h",
+      "bytes": 21841,
+      "sha256": "5199bdb45d0629b975c2392fc9d116b2f5b30d3be9a059bdd9a7d938c3433806",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subhn.h",
+      "bytes": 7275,
+      "sha256": "7a4e301dda4f65e9deab439932ec986d9d001d6a9504aea709993ddda98a141d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subhn_high.h",
+      "bytes": 3782,
+      "sha256": "2524e37db8d4a035af48e38d5651f36dcdad2eb53978c71302c506e068e1191c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subl.h",
+      "bytes": 3912,
+      "sha256": "feb6b7ce62ade36570c6853d565dbb52e9d9588c6f48f723969f5ac48646142f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subl_high.h",
+      "bytes": 4068,
+      "sha256": "780adf7312d3cbd1d44b153ba03f98a2563cb46f301719a3dd5863868daf5254",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subw.h",
+      "bytes": 7418,
+      "sha256": "d18c51badad0bc8d0a78c59e47ccecfa292b55bf5bebff3d6a47000ed627c49b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/subw_high.h",
+      "bytes": 7930,
+      "sha256": "aabdb6d5602b8b2ef21313e1c39a55a5338d2f11fde5bb51d1c4a6926ad62d49",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/sudot_lane.h",
+      "bytes": 6099,
+      "sha256": "ac3b51cc06d999fcdcf21045398a7c90ead4e20f51499757c7bc5fe4a4c6147a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/tbl.h",
+      "bytes": 10203,
+      "sha256": "827e71eb4491619dc0985c47854a5b5e625b42d8e4f09b7e6c7219e3424a4e71",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/tbx.h",
+      "bytes": 11729,
+      "sha256": "4b4cdf93a39641b334d2a30af8bb1e83b25df338d1fd4ee7494f017ac0ad76e8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/trn.h",
+      "bytes": 10108,
+      "sha256": "0c02f368a6ffe683300a84f4fcbcfc34f39274d97639bbfb016100dd3f6d3fcc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/trn1.h",
+      "bytes": 19965,
+      "sha256": "d10b4ccfb1da9d6aae1ac302f160eeb822616cab55cf740a76949b3ecdf93ed5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/trn2.h",
+      "bytes": 20156,
+      "sha256": "574665c4dbbff28fd3c4d9f7f033eb71d36c977e4189d998df806cb12ce2af77",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/tst.h",
+      "bytes": 21416,
+      "sha256": "f450bd9797651b4e71a8181655a036f81b5c0230adab462ab72812766a01f170",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/types.h",
+      "bytes": 52988,
+      "sha256": "cbd98bf4dd5a549f307ebd1698336643077a05c330cd237611af3467ab4df3a8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/uqadd.h",
+      "bytes": 10738,
+      "sha256": "8861912b5346f3333f554e07c4717f425d46d37e3fb61be9a89625ec2370cf3f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/usdot.h",
+      "bytes": 3360,
+      "sha256": "240421d4d450a8a62700f0776f4d5fda340a5b7d2ea099d455df4c89a1bd9286",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/usdot_lane.h",
+      "bytes": 6095,
+      "sha256": "431e69b0d160d0a7067049efbeb80ec0435c862aa4c1f3c1e452488f2d29ae1a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/uzp.h",
+      "bytes": 10108,
+      "sha256": "21b88e36759810f6200d9499c9ceba2b354499837c8cd61f84b75f195b91db02",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/uzp1.h",
+      "bytes": 27424,
+      "sha256": "8393f3ecb87999b80b97938af6b804c2fdad72802abca5e8d8fc58e4a5d55b05",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/uzp2.h",
+      "bytes": 27634,
+      "sha256": "687f6589491520d757d3bc47ad01adc8b85b155d924e53e57bea4189189878c8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/xar.h",
+      "bytes": 2272,
+      "sha256": "0d2b16d4783e187172485c2e93a74a2f6b37dabd4e432229af4e8a6acb709a95",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/zip.h",
+      "bytes": 10108,
+      "sha256": "2b8e67063958744da71d677cb9edacf895dcd14178b9865d1dd9e68edc9744ee",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/zip1.h",
+      "bytes": 27976,
+      "sha256": "aa24cb880d330e01b0fe8456ae45c7c44a747b5ba8f4fad21f5c0214a9c1c1d1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/neon/zip2.h",
+      "bytes": 26465,
+      "sha256": "da0751429b7805717ef2a1be756188cc04386b3640f6d5962142ea6669e9907f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve.h",
+      "bytes": 1606,
+      "sha256": "e17af7b90a4253e5d0a388dba8459755258bdaf299fbb7d17ce89740f835783a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/add.h",
+      "bytes": 55418,
+      "sha256": "8f3a8bdce682765992709eaa53465c5565f449c2b0215189e2f7779be08da45e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/and.h",
+      "bytes": 41391,
+      "sha256": "666e71c090cabbe5fe2a0725183a84d5f4d0ccba01808213e65bb3e9cd073b85",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/cmplt.h",
+      "bytes": 26247,
+      "sha256": "1176180ba5c08743fb2b364bc81cce1b21e1bf2f151f8ecfe5a8dd6be2b32385",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/cnt.h",
+      "bytes": 2576,
+      "sha256": "3f38254be171bbc5e27bb59cb462dd8ba84b1b4cffbc735cee92a5fed078860c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/dup.h",
+      "bytes": 43805,
+      "sha256": "73bc4fc759d4f457ca9e3f7ec73df5be78ab447ff3afcd7a61f90db59fa50ae0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/ld1.h",
+      "bytes": 14386,
+      "sha256": "1bea884cc71e1f53628ea4dacf5f4839b19298c4305cf6f697d65a41c68d535a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/ptest.h",
+      "bytes": 2399,
+      "sha256": "84684fe37f8f1e8caa9649d454e290dcc235d557629865b9ed2c11f3060e15d1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/ptrue.h",
+      "bytes": 4711,
+      "sha256": "739eb0e106ebc12b65688ea112a8a9cdaf43042aff45b33ab675adb8267b6023",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/qadd.h",
+      "bytes": 18612,
+      "sha256": "d41f6fcaf4ece845c3e4e156634e9984a85847f834804c21af805466c94d39ed",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/reinterpret.h",
+      "bytes": 66380,
+      "sha256": "0fc1c325518e056c58da5b7935d07be57a2d2322075c7835674a83a0effd8f20",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/sel.h",
+      "bytes": 28614,
+      "sha256": "7a0b813461efa66c1e80108b5db9ddde2daedd8ae71e949ceed091b2bca19539",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/st1.h",
+      "bytes": 13374,
+      "sha256": "baf693708251f08dcda6bde3a02631e873ac5977fbb41238ad9e22e9732bb17b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/sub.h",
+      "bytes": 55418,
+      "sha256": "238e656fa3b1949e65f8bc155941e919dc07f96427648e64f868c4a81845cec9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/types.h",
+      "bytes": 34178,
+      "sha256": "964fdc1bb983cb4b01f337ddf3e09ae062005d47311b497669c967543222e809",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/arm/sve/whilelt.h",
+      "bytes": 34501,
+      "sha256": "3409fe6e3043e0135ccedf1570f6d61eaf91200c9e9e7f860192be0863cc0484",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/check.h",
+      "bytes": 9847,
+      "sha256": "5fb278f5294101ce081f32ed0a931f994bf7dbd83ed69357703a2240a93151c6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/debug-trap.h",
+      "bytes": 3120,
+      "sha256": "ac2841ade8b99dd6d38bdebc59c1d1444f901baa1bd7b6b60f50317472d77c01",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/hedley.h",
+      "bytes": 77539,
+      "sha256": "322e5afc323320b13296972ca3b31d62ae7c0bf714e75536f020d28d20d87f3d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa.h",
+      "bytes": 1537,
+      "sha256": "f7ead7d5845b3b48a4ef1766374d6f8b441788e44f4696ed50e2d32bcff5b0bb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/add_a.h",
+      "bytes": 7730,
+      "sha256": "32d2202dad5327af5e0940fef5c9431e5dac9e1d6ad5296ac0e47018be184e18",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/adds.h",
+      "bytes": 14942,
+      "sha256": "fd250bd790ef468529c0ac70f80ba5f3556ce4a9aea26e68e42f000d17c88db9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/adds_a.h",
+      "bytes": 9262,
+      "sha256": "d319b0bc27dd4ad38af3ced6ab0e8b9d4ba586926c062152e964f7fd2abc6d93",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/addv.h",
+      "bytes": 5700,
+      "sha256": "eae816e56e08dfb0ab550ce78355f5e7153f19269fa9b046b2cc959fb401b181",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/addvi.h",
+      "bytes": 6970,
+      "sha256": "a00b443e7f06b0a4a59e66ad3feb7fc76ec052f4548a8fa9302a4c57aa25f015",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/and.h",
+      "bytes": 2495,
+      "sha256": "9b5c330b4038966d23273d16bc7f784ed6ce47a125201f54cb54ae90a9b54ce8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/andi.h",
+      "bytes": 2820,
+      "sha256": "ecb83dbca2f037772a78e33416494b205db01d09970009a6ee47bca3b628c959",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/ld.h",
+      "bytes": 6550,
+      "sha256": "6010c68e9c59550ede8d9fd51330dd694ef84811783bab88ac166bd148473330",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/madd.h",
+      "bytes": 4470,
+      "sha256": "abfaaf30b08b843191774239f52fbb752b21e43224d060b4a035ca59450f5fdc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/st.h",
+      "bytes": 3600,
+      "sha256": "574a43abb57d6997dc751db325a859098968f7f542c6fe0ad43a0ae59fc3b7f4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/subv.h",
+      "bytes": 5700,
+      "sha256": "e3f56a4e4af7c06a92833eca3b253b5771ba965a63e0d71b72d78a922412b387",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/mips/msa/types.h",
+      "bytes": 12045,
+      "sha256": "3596fe3c0d1e0e0b2ba0461bcf5caa44704ab6658101b9697ce49ba0d3368e3f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-aes.h",
+      "bytes": 19148,
+      "sha256": "1d47816b33a8191de3ecf0509a26fff2664e6c14274272a19167c3567c8438e3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-align.h",
+      "bytes": 18010,
+      "sha256": "948d91b0f12f49440cb2e73c09cee27d71679a7b8be4e55f174af0d3a88fcb2d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-arch.h",
+      "bytes": 20875,
+      "sha256": "5d8a8483e0411b3f4e80dccc2aa1af08109c36fc3cf880ae2923462c84188fa1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-bf16.h",
+      "bytes": 4455,
+      "sha256": "beb490f2e29a97d7257bc823758e59c739269b467fe1525d3925c9bdf44d63a1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-common.h",
+      "bytes": 47893,
+      "sha256": "061c858a9dad573a55365cbda4239ee748d3f951b468216377aca9ecd1e55e29",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-complex.h",
+      "bytes": 5257,
+      "sha256": "76427745a4368e462bf7c7c11f48b277c35dbce4d4f8881b0779862c0f65e0ae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-constify.h",
+      "bytes": 18585,
+      "sha256": "08e029bce27502966e7ba0a0886e17aea3ee997f9ec25f962529364d7c7d711d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-detect-clang.h",
+      "bytes": 6282,
+      "sha256": "aa20aa6ceeb69f2b675dd5ef8974ddd82db9d56570fa9570903c3f54f20a8f9f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-diagnostic.h",
+      "bytes": 21064,
+      "sha256": "8bb67c3af2f95306368829c778b0d6ff8419867566027d10a0df4f697dec96c9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-f16.h",
+      "bytes": 13909,
+      "sha256": "60a3db57d54ab0e8eb3da202e5979e5b994655c6b4d4f77bca57e546c470f308",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-features.h",
+      "bytes": 27856,
+      "sha256": "8e19781bd1fc77302e9b06e8c847816a604fb2726b6f2d8629a10f46ea0205de",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/simde-math.h",
+      "bytes": 63112,
+      "sha256": "ba322ecd4c4f2b9eb38233f6e1126e3cd0dfb4a792976f2047b6f0fd8e74ccfa",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/wasm/relaxed-simd.h",
+      "bytes": 22531,
+      "sha256": "f667738b6a697be345b11b7c8e353abc5820ac88a94fff1a009bf4f5b4ddb8c6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/wasm/simd128.h",
+      "bytes": 319399,
+      "sha256": "7e2fed8b9884a206dcf12951c6cc78e13f0db24076cf45b61a2da293089ce70b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/aes.h",
+      "bytes": 11532,
+      "sha256": "e17eada980838358bd3fd3f539d051fd981177d4aaa3c56a4866a09ed255f019",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx.h",
+      "bytes": 201888,
+      "sha256": "a86572da7805393f70d5baca7e138a1df1648fa24ed8b80eacd815c1bb647484",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx2.h",
+      "bytes": 199341,
+      "sha256": "afa339bb901ea2182ca0b6bb2ce06cd1682c4f0bd11ed4920af85eba53f728d8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512.h",
+      "bytes": 4370,
+      "sha256": "83cd78bdd2cba4d32feeca8febd119b074f62de3fe614b9a51bc3cbcb3d070ed",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/2intersect.h",
+      "bytes": 8019,
+      "sha256": "cfeb7483ff1ccc5a4fb9c12d2023ba8251a1a6942e946e370db3765061ca2ad5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/4dpwssd.h",
+      "bytes": 2637,
+      "sha256": "817ab2514b1f201dc24d13479d05b5295bd910e8028276554ae46108ed8abc10",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/4dpwssds.h",
+      "bytes": 2672,
+      "sha256": "1b3f472e726a37a760ee9fc15b4eb50f04e37c8db071a97ff0874fe1c6a27894",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/abs.h",
+      "bytes": 19017,
+      "sha256": "c60f9ea1d292d0f409bb1c9b679773829c2beeb8fae52b2e7acec835ccf830f4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/add.h",
+      "bytes": 20450,
+      "sha256": "39a2ff32436cff059d1c2d7fb8b045e0af714fdbf02d1dca606d9367147c9dc4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/adds.h",
+      "bytes": 18352,
+      "sha256": "00ebbeaf64968d3dfeaf90486451dd827e552fd03b9bf3dd529c6743e8963ce3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/and.h",
+      "bytes": 9570,
+      "sha256": "39d4d2821c85e9d6a5aff88146afbe6f603f1c4a95c4254fa4a0172bec9324f0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/andnot.h",
+      "bytes": 7564,
+      "sha256": "fe6b7ed5bc5ea3eac4f385b3e39ea0f754dbdf275eef4ce4120ba2d5948ea83e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/avg.h",
+      "bytes": 8799,
+      "sha256": "c66d95cad50751abc4d675e6b77162a5942b1bc3e075cf7bc64d595857daf13d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/bitshuffle.h",
+      "bytes": 7989,
+      "sha256": "e464e3ed5ba771275176e03b67451123b954745edb05e606417e0f4b4b0d742d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/blend.h",
+      "bytes": 9480,
+      "sha256": "104e9c23eda5cc2bef27ebb3672753a7626ac110cdd1192b16b2cb163a49c3a4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/broadcast.h",
+      "bytes": 29208,
+      "sha256": "08b00540cbc361b6ee92f93462c1777247e9f3f34e6fe29024cb27917e8f28d9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cast.h",
+      "bytes": 9905,
+      "sha256": "2a7f99edc6cc3abaed97708645a8772a6da105721e8cc17b37dfccdfda1200b9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmp.h",
+      "bytes": 61780,
+      "sha256": "6ab1cee74df1ebc4e68c4a216313afe2a8823809125af36da10b852669556140",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmpeq.h",
+      "bytes": 7901,
+      "sha256": "6f0659a3d2e7813dc4d2052fa163b5b028910b214b6030bb18dd3ad99df20be1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmpge.h",
+      "bytes": 50180,
+      "sha256": "dd968d1555cd89122168fa2e6f251a75f476a1e6aced9e274eae6a30ad6bc145",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmpgt.h",
+      "bytes": 6982,
+      "sha256": "22ae0a2d1234ede0bf260a71ad7507d9a513e9465cf2829e4192c2f3e822a30f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmple.h",
+      "bytes": 50071,
+      "sha256": "a4575dc91e301c890cb7377a3393ff97b0f0aca07767607c383e04ba0a4e88e8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmplt.h",
+      "bytes": 4022,
+      "sha256": "1b6b5bd23fa26da4cf1ea0ae4d070991dcc5a997d36860f9e546617cac178ee7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cmpneq.h",
+      "bytes": 17676,
+      "sha256": "073e58c04a116df2ba4849d64c219c6e62ffed2a73bc7287846ead2f4410b2b2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/compress.h",
+      "bytes": 24852,
+      "sha256": "94b5c56b1684b9fb79c6f5af19213f3a81bdef70f16926efbe01331cddaf7d2f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/conflict.h",
+      "bytes": 11984,
+      "sha256": "d639fda166eca6cef9512d8fac63f5e9a97e7ef7e4c5c2aa5ba2007288e3599c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/copysign.h",
+      "bytes": 3008,
+      "sha256": "3c91ea4558c560094fd91684f4d7401c3a67c57c6754d5ca64728df62df6aa43",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cvt.h",
+      "bytes": 13141,
+      "sha256": "df18ad8ea2cc158b3008a47224b8b5427b62487cd923d7e4dac957d41c7cedc4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cvts.h",
+      "bytes": 25514,
+      "sha256": "187f851de94744f16a5b4ec20db0c4b9920bc13804cedcac9455da1c9e3cd0de",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cvtt.h",
+      "bytes": 4519,
+      "sha256": "c31d35c052c7586f6d9971a97f725efd32be0b49cc409e711aad07bcecd20096",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/cvtus.h",
+      "bytes": 2475,
+      "sha256": "00e36b5e6a2ea746dccafa138f147bc49a3446c2cf6299a25b7960ab85c9f927",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dbsad.h",
+      "bytes": 15983,
+      "sha256": "206456e4e6cc85937af18baab3009243356f95dc6d4cef3614aea01fd6546309",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/div.h",
+      "bytes": 5289,
+      "sha256": "8ec0315ae3bfb216cdb9fef78ffbe5989659c4ccf009e6414320a2f2189377cf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dpbf16.h",
+      "bytes": 9991,
+      "sha256": "38f15daf0cee83392e89def82587b36a75f13627f18ad2554c0378c2e138da6b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dpbusd.h",
+      "bytes": 10824,
+      "sha256": "7884f8ff4f365595fd349d5a92e7b52501c786f9ca6e2316cd688b25f08a0017",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dpbusds.h",
+      "bytes": 13835,
+      "sha256": "6c0dfc205ffcf37fa44f41f4bd6c5ab3d268a4d33bca7193832e05c38b69b44f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dpwssd.h",
+      "bytes": 8962,
+      "sha256": "308fac307f456b1bfaaeb23f6595be5c5619b7f03f8a8d7e7857406d694c7ad1",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/dpwssds.h",
+      "bytes": 11188,
+      "sha256": "2784c3beaf4def1df9fd3803163c013be7d3ff7696019890e3fdc8f7d67cc154",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/expand.h",
+      "bytes": 3115,
+      "sha256": "6bae5f3f183a48085247b6130b748a567ab9835cfc6e0ff5f453eec21a2db529",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/extract.h",
+      "bytes": 12163,
+      "sha256": "6d7477cb365ebe4ad845055cd21f038ecae00ca074195eea505b4972b0a74da5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fixupimm.h",
+      "bytes": 28836,
+      "sha256": "cbcb417413838dc621a8af113f2aefde0bebfda0aba7cf29c8d2e7f6392fd1c7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fixupimm_round.h",
+      "bytes": 26373,
+      "sha256": "ca4b0318ed6587413f9167a65dbacbf7e0ad19f25dd413c2622b8507a94ff6b5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/flushsubnormal.h",
+      "bytes": 2380,
+      "sha256": "a15498373eb648f52842df69c0aee6a8f84214cc180950d1b45b8d9936a8dbc6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fmadd.h",
+      "bytes": 4563,
+      "sha256": "4206967251e2e390a1995036fc68ca74a2707c881f687a7fdffd0585b7974503",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fmsub.h",
+      "bytes": 9291,
+      "sha256": "35a4ff5a701d11e800840dcbd0930558d7588d1ab2c695df10c1cdc760d5e68a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fnmadd.h",
+      "bytes": 3620,
+      "sha256": "a0914b030e556d93b8e9731a5033553d8a001860729f712264fdfb44f09dc1e3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fnmsub.h",
+      "bytes": 3620,
+      "sha256": "d42b28abc9be47a64e3a45f075ff5979a2fe880c3b5ab2692a8ad33e408e8af5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/fpclass.h",
+      "bytes": 3609,
+      "sha256": "a9ebdfdbef37e5f7df60dfd2007158d167b12ffeffd414c3213fd5fe5334da52",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/gather.h",
+      "bytes": 16209,
+      "sha256": "c02a600d5ce5d3265cab506b63e6395f565fcac91d30857e0a4144483ff2c2fb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/insert.h",
+      "bytes": 18523,
+      "sha256": "2ee6f39aec6b264976218d109a6f7bfcbf4db55176ffbdf96b914dcf05c19395",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/kand.h",
+      "bytes": 1785,
+      "sha256": "ea5802fa617f95a5a604c1a1651164a00a70e3fa876f1d8bfea0ca60fb322dd7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/knot.h",
+      "bytes": 3435,
+      "sha256": "a063ba9c8df30f51d81dfa3c34c403698ade66b93ae46864463bc50eb2275a25",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/kshift.h",
+      "bytes": 6599,
+      "sha256": "b14df961abb2a98615a6542761d87f9f48d7324718fac36458afce0ff5641f33",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/kxor.h",
+      "bytes": 3559,
+      "sha256": "cb59bffb03c614d99d8677a11b077f594e30399d8d0bf84f9e8420fbafb7a2c5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/load.h",
+      "bytes": 3974,
+      "sha256": "9db421c2322f2243d59bb98dd2e9f16ed5358f3ca1f7bb90990b4d1621105474",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/loadu.h",
+      "bytes": 11094,
+      "sha256": "7c6ecbc01ae4965b01111816db00b87d97922a963c59d77505777bb5024ff15f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/lzcnt.h",
+      "bytes": 7815,
+      "sha256": "02fc9a483680456a9265322b865b8a11d0ff7a7e3cf2b347dcd5db8d20305102",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/madd.h",
+      "bytes": 5904,
+      "sha256": "2f6f1aaa3d8370d8bbf4aaa2c37ae2819c0dac9b8c60b8d643769c9b64c48bd4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/maddubs.h",
+      "bytes": 6192,
+      "sha256": "30062133f93b2eb05c24ed9b1abd5f2ee4c9879752c370c3f372edb32887d3e7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/max.h",
+      "bytes": 19300,
+      "sha256": "d0da06829e26c2302e530a4a5e46fdd8abfbca0a8e32b535fe03f08d20024a60",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/min.h",
+      "bytes": 19302,
+      "sha256": "1cd43c0cd05c15eae1a115473018e21b3995eecf741c6557deeeaa1fb4ab2abf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mov.h",
+      "bytes": 30522,
+      "sha256": "190a0ecaed31c8ee9fe2e0ff825720d44b8587f48f7ff8e47e826bcd834e340b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mov_mask.h",
+      "bytes": 11929,
+      "sha256": "65e494f74f2a03d601e0c1d16663bfe5c393388affefcf0acb651eb2873ed095",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/movm.h",
+      "bytes": 15715,
+      "sha256": "45f5261163712edb8aacd059cf18d6951bda552474bd373cfca5ff701f9ed620",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mul.h",
+      "bytes": 9151,
+      "sha256": "f37ef50a5ba6bd2c2f7da279eee499927843ab5cf10610155ce00272d1c85408",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mulhi.h",
+      "bytes": 2282,
+      "sha256": "f8c795082977366bfdd6aca7f5dd4c27bf9bdc1cead49b77887080b7cb666789",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mulhrs.h",
+      "bytes": 2272,
+      "sha256": "2d4c54ae59dfaa109a2355f4ee6f79702c836c5c4b10cb73a3c970dacf6fd65b",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/mullo.h",
+      "bytes": 5509,
+      "sha256": "288737a70c231a40eb739ae4e6815aee6ee0738b392720d4bdbe8c4602de0035",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/multishift.h",
+      "bytes": 6489,
+      "sha256": "cc459ab695384371ab1e2fbd5731dafb9c55f61a5d4aa26893bdaac5011a6c66",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/negate.h",
+      "bytes": 2639,
+      "sha256": "4d620464d030b547ec3a43795657e60220d37cc491be6eb6f0f94745be66a6c2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/or.h",
+      "bytes": 9812,
+      "sha256": "c98880b1857cfe18f8f1f670a0afafa50172003d50ab2ef92677c913cb5816b8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/packs.h",
+      "bytes": 6819,
+      "sha256": "182421d52a0f754f1e7caa1768a63261ee3747edee90d95469d201c7aec203b6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/packus.h",
+      "bytes": 6833,
+      "sha256": "4c11597ff6c06aba93c3e9a8f63cc498da0d70f846e10389f0b50d123443e5dc",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/permutex.h",
+      "bytes": 4051,
+      "sha256": "2ae3159697821ca76c07934ec2f6d2bc364b37830e1f81c3ef0782c28af87389",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/permutex2var.h",
+      "bytes": 69833,
+      "sha256": "0cf9489116b1d0c830b78b42c2dc84688f637b7c7c495c43d5c7cffaf9b4ec68",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/permutexvar.h",
+      "bytes": 50286,
+      "sha256": "5738bb83079833ae1c1f8edf26d72e2fc4cf6e47f150d8c857193c5a8ce8f17a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/popcnt.h",
+      "bytes": 46335,
+      "sha256": "1c422920b82111610e5a9700f3c8985b88e0584c5ca6c71d2a9edacf008c13ec",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/range.h",
+      "bytes": 28111,
+      "sha256": "96549e05aee5b46876db495593eead711d57432be387e0d38ccd4b752cf09b9e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/range_round.h",
+      "bytes": 25144,
+      "sha256": "eaf89c87e25af5a776af99f6d1eb2b57d5c5a7df450e9767f61ba6f70899cba2",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/rcp.h",
+      "bytes": 2133,
+      "sha256": "90738ef51e6172a9bdb1eb95e9e9cc3d7fd6ec878c11b2760bb6129c1efcad7f",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/reduce.h",
+      "bytes": 10010,
+      "sha256": "392adf625dee70d254ffc74767adda83413ab956e4b086b729bbc1ddbf8b8ed7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/rol.h",
+      "bytes": 14829,
+      "sha256": "2f917c2984645a558eba0a784a3d95af5b82714afe98464584863eea8678b07a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/rolv.h",
+      "bytes": 14812,
+      "sha256": "705a2a4e45f565d391969c9d6f6482860cd962a187e3e69e90552401e92351e3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/ror.h",
+      "bytes": 14859,
+      "sha256": "322e491d4cb29f6b1ff0c426c0a715a902f8f82c47f8b4f70fb44c26ede1b8fb",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/rorv.h",
+      "bytes": 14732,
+      "sha256": "5e4dc5ea42f29afb56162e51b00910257f52b572e14d716c346f60be505f8370",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/round.h",
+      "bytes": 13094,
+      "sha256": "fe4925c03000ee9c7690bc201a628b727b2c24096b5cda42c1dad019e2414e88",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/roundscale.h",
+      "bytes": 23297,
+      "sha256": "0263dd2f94e0618f86c1f650395cb35a688ba788bdc70cd49125a6771a38af52",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/roundscale_round.h",
+      "bytes": 26912,
+      "sha256": "c1d19aaa83b537b38c2954ead4898c3bb1a7fef1fbe2c71ec1c165753ddb7442",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sad.h",
+      "bytes": 2638,
+      "sha256": "c1fdb5b7be12d267e59d7950162acbb47ef087a24109c416bd6380a91fe1bc4e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/scalef.h",
+      "bytes": 14399,
+      "sha256": "3f6e736b730c9542df7f7182fb6031654b663c68b44b86345e7c6188d78d1c16",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/set.h",
+      "bytes": 18368,
+      "sha256": "47175aa7ffda3b7901e9855d594055b38b38c2dfab8fc0ba275fbca426604665",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/set1.h",
+      "bytes": 9713,
+      "sha256": "abee4f2cea42bc85f601e0cc85d72df8fccc41670a21de3d686ab76d1e4aa55d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/set4.h",
+      "bytes": 3705,
+      "sha256": "a03267e050b465c4e02daf709e4baaff063b72dd52db8d96dd7d4fe1615f27f5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/setone.h",
+      "bytes": 2243,
+      "sha256": "9cf60b236cfbbd6e03cd70a2e8f5db34d2f730ab272c2bacaec3d3198f5a9b85",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/setr.h",
+      "bytes": 4723,
+      "sha256": "fec4aa401eab261c539f7ae2ed71403402f3e15fec90d996b64b17c214ef0fc0",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/setr4.h",
+      "bytes": 3735,
+      "sha256": "c6ff48c15067dadd3af02d2d977d4537fb4b686578f449a473a418d99099a865",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/setzero.h",
+      "bytes": 3283,
+      "sha256": "14319f78fd1071603b130824229d988070091f53011d9705a0f6ec95b05487bf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/shldv.h",
+      "bytes": 5050,
+      "sha256": "68fdc27dee9c2e47861e1d523c899ad98bbe23de9f6bd63d5f5888b2b39463cf",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/shuffle.h",
+      "bytes": 19321,
+      "sha256": "4aa6831725357f7c84a36effa10ec523166c2bb2338067152b824fe7d0ae6e3d",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sll.h",
+      "bytes": 8159,
+      "sha256": "de2c6a91038e09a3182feae643359811b7bfa5b2429dbc4a3ce5e254f6b61fb8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/slli.h",
+      "bytes": 6854,
+      "sha256": "c82b3f8facb983741e79888d25679e6f81ff16daf1e52ad1a92516d3147f22b8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sllv.h",
+      "bytes": 4081,
+      "sha256": "1728f0209a0e211158bdf63f60ea9ceec5ef59e6e9a19790df966dad12f3fa7c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sqrt.h",
+      "bytes": 3977,
+      "sha256": "978367b984e66fd90960f528252007cb58b1aca64a9f12a6d5779ba9c7d8666a",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sra.h",
+      "bytes": 2684,
+      "sha256": "04cd7985602b21644c91c45c8e9daf09c47ea1da38152ebe6174dd88e4f9cce4",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/srai.h",
+      "bytes": 3086,
+      "sha256": "95a56cbcc68dad77fd8d3441ce787c6c94dfc52b347f381bc455ea6d7cfcbf90",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/srav.h",
+      "bytes": 2271,
+      "sha256": "3685e91e68a7ffaecd4b2698b07616b2eb726c005fefefbf46956fcb327f2fe8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/srl.h",
+      "bytes": 6928,
+      "sha256": "a3a03500b5b1a048601538434cb848474cc9fd5505f622bd471dcf73a28b86a3",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/srli.h",
+      "bytes": 6641,
+      "sha256": "3fc9576e6ec94889703cf7a5b7eba207ac03e52f149452ca32c83259647ea320",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/srlv.h",
+      "bytes": 9485,
+      "sha256": "dd124b5bdeecc7c4830906017811d5822fefa6de590b82675f322fe333bc8512",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/store.h",
+      "bytes": 3507,
+      "sha256": "03b19778a382e438cadfebf59eaf95c5acca1394e3861f0c4d23e38394779fae",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/storeu.h",
+      "bytes": 8464,
+      "sha256": "7526f05329ca405aac79d7eb2fbeaeb01859dc1f4d75ac4fee7c95dba90da018",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/sub.h",
+      "bytes": 10888,
+      "sha256": "4457c0d32da23e35c0cd52ebbb3e52d7d7087d14b1a1e37b5dd7c19ec53db135",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/subs.h",
+      "bytes": 7107,
+      "sha256": "c2510817ead7ff553321953da71d2cdc55aee01c71bad0c23430f752d6327fb8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/ternarylogic.h",
+      "bytes": 112262,
+      "sha256": "35dfc3915387d4951137068dc5ec8f11877a047c285af08f18b07d6eb541dfa9",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/test.h",
+      "bytes": 7540,
+      "sha256": "4c7ab52ee01e626dc2e141353f0a28a39ee058a35de288a38d5a34c09fde8e64",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/testn.h",
+      "bytes": 2130,
+      "sha256": "c99d0345128e37bb871216a540c52fec106ff9bf83256769b2cddc199d4e9ed7",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/types.h",
+      "bytes": 37598,
+      "sha256": "bbdf184a40afc942ef623c61bc4ba42defcb5142615cc13465b1b982d65967f5",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/unpackhi.h",
+      "bytes": 28925,
+      "sha256": "9218564390d134e4c7693f6a8128d539ff12dea1139ca10231e6aabb48093d96",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/unpacklo.h",
+      "bytes": 28831,
+      "sha256": "785ac55eaa86fbfef4762abe4d28dff1c7d137058e105886866c8254464d479e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/xor.h",
+      "bytes": 10505,
+      "sha256": "7d29456f531d1633da67b6e5c6ff2fa1bc5204380cd3f4bbe924307dfda5a572",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/avx512/xorsign.h",
+      "bytes": 2427,
+      "sha256": "f675cc4bc39aab2eeab03befdaa69b43d755f5c0d0c49241326b9f4c2da36709",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/clmul.h",
+      "bytes": 14519,
+      "sha256": "daa43b9558c7dd3a925a98601a6397fbf95198938f2679ca9a7ead04a39a7996",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/f16c.h",
+      "bytes": 5603,
+      "sha256": "326c08ca4b262ca7bede2a1c96f13b8aecd0c39326179f8f3c399e274ad96706",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/fma.h",
+      "bytes": 22157,
+      "sha256": "ccf582e8ab5f46a4ce2ddd5860052afb6e699b5f01de89a179b1211a191a33dd",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/gfni.h",
+      "bytes": 53223,
+      "sha256": "8953157a8389b836ec99f0b1af1fa67b0c2ab849bcc843a7b05fe09bd0aca9a8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/mmx.h",
+      "bytes": 76650,
+      "sha256": "a475f7a029bb99465bac4ec71ae62368b5003826ccbe9b859eeb83e4b4eb4aac",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/sse.h",
+      "bytes": 167095,
+      "sha256": "885b6fc1fbcafc00e87d1e1eee190039b5a71c7ab48c048802b67b9fb8850fa8",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/sse2.h",
+      "bytes": 269556,
+      "sha256": "10ecee99fa92a066973679bac07d375ea0fdc995f9596cc925c39f5d23719929",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/sse3.h",
+      "bytes": 17131,
+      "sha256": "191c9e912f3a0791955e7a8452889cec3db6bf0f3fcc6baf982aa5a6b74fa8b6",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/sse4.1.h",
+      "bytes": 84598,
+      "sha256": "85f5096012792ae439e5c2882f2820562a7778290acafe0ad8708aea2d5bb12c",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/sse4.2.h",
+      "bytes": 13142,
+      "sha256": "6b9e66a63b12d347750faddf388491544d15c9bd475b09a9313654bc6583247e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/ssse3.h",
+      "bytes": 37052,
+      "sha256": "6fc8b4e3db96530dcd6bb2a997f256a5a688b200d730d7bd3d31e0d0d1620c07",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/svml.h",
+      "bytes": 398564,
+      "sha256": "9e98c09dd765246abae21a33fb35fec4bb36a8eaaaf6481b4e15eb3d78d4d38e",
+      "mode": 420
+    },
+    {
+      "path": "native/thirdparty/simde/x86/xop.h",
+      "bytes": 118334,
+      "sha256": "0f68cb6e1e778e1641c91434dbc64f26815bbd3be8b81a505590d23931f0baf0",
+      "mode": 420
+    },
+    {
+      "path": "native/write_watch_trace_probe.cpp",
+      "bytes": 12248,
+      "sha256": "58fb06d5158d727e0fa4d8ed57214b550d55630b24b54b02097b00c418b31f96",
+      "mode": 420
+    },
+    {
+      "path": "resources/fonts/LICENSE.txt",
+      "bytes": 4414,
+      "sha256": "93fed46019c38bbe566b479d22148e2e8a1e85ada614accb0211c37b2c61c19b",
+      "mode": 420
+    },
+    {
+      "path": "resources/fonts/LiberationSans-Regular.ttf",
+      "bytes": 410820,
+      "sha256": "baccc64becc3eb7d104b7c84d99f5314a0a1f896e2b3ea6c2f22fc08d2003bee",
+      "mode": 420
+    },
+    {
+      "path": "thirdparty/nuklear/LICENSE.txt",
+      "bytes": 1279,
+      "sha256": "20887d55b6a2a2f924e1207f8d52134682492cd2ae5c9e92234c6f7bbcffd61a",
+      "mode": 420
+    },
+    {
+      "path": "thirdparty/nuklear/nuklear.h",
+      "bytes": 1187583,
+      "sha256": "e4c80dcdf1b568dd31624fa552ae339fe2abb710f9ba5166b41e55372ae02ff5",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/apply_guest_delay_hints.py",
+      "bytes": 11619,
+      "sha256": "f554bbb4448a192a7bf24c62cd8a3f61f91bedabe94b2f6deaccc0506a743644",
+      "mode": 493
+    },
+    {
+      "path": "tools/native_graphics/bench_replay.py",
+      "bytes": 9686,
+      "sha256": "fba8a27075daca3aea6c1c62fee0a4c17d7b5704a4f822e27963d777ec30d274",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/emit_hooks.py",
+      "bytes": 6082,
+      "sha256": "1910bd20401810ad7eb34b9b87cd7f3ec3e35049252194f04f1aa490cd054d08",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/guest_delay_hint_probe.cpp",
+      "bytes": 1269,
+      "sha256": "0357bdf935f4203b6e4c1c1551314c451abcdc8a455670672c8acd54a9ef29a4",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/oracle_probe.cpp",
+      "bytes": 10095,
+      "sha256": "340789df30ead03734dfd2a5f806da1f2ffc220d9431a68adb5edcad93af8c3e",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/test_emit_hooks.py",
+      "bytes": 3012,
+      "sha256": "01cb501fb8c41f55cefdd5e0a862a51f464cd8e43430706e34e845296756bbcd",
+      "mode": 420
+    },
+    {
+      "path": "tools/native_graphics/verify_hooks.py",
+      "bytes": 8281,
+      "sha256": "e348e3f8672461093adf42d6660ef384c2e2e638d1d6084f0bd742b1e7ed13e6",
+      "mode": 420
+    },
+    {
+      "path": "tools/prepare_fmv.sh",
+      "bytes": 1846,
+      "sha256": "cd94ce211d726af546a931a6802a6adfe2f78bb5019963c7c4fb2237dd61ffab",
+      "mode": 493
+    },
+    {
+      "path": "tools/setup_import.py",
+      "bytes": 15386,
+      "sha256": "cf3652481fd7ba2986b5a9ce5e61d3fb302eaa5be2a821f9c44e6eba813a2939",
+      "mode": 420
+    }
+  ],
+  "total_bytes": 19033938,
+  "licensed_binary": "resources/fonts/LiberationSans-Regular.ttf",
+  "content_sha256": "8a0b25bcf723fd6a086c051f8c075a8c886bb683ae42da533b8693c0881ee7e7"
+}

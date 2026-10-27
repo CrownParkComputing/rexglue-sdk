@@ -1,0 +1,25 @@
+version = 1
+title = "forza4"
+
+[[hook]]
+address = 0x82316A28
+profile = "forza4_float4"
+min_count = 16
+constants_offset = 1920
+dirty_offset = 0
+source_sha256 = "19182be10d50ce6e87d0a0b6b5a6136bb12cd31692e65b5ea342c9d612b9650a"
+
+[[hook]]
+address = 0x82332F08
+profile = "forza4_float4"
+min_count = 16
+constants_offset = 6016
+dirty_offset = 8
+source_sha256 = "089832b8c6d4ee87e7f9eadbb587998b224ec0dee3fb395b399b1a88ffbc8ae3"
+
+[[hook]]
+address = 0x82310E78
+profile = "grouped_float4_emitter"
+min_count = 64
+entry_after_save_lr = 0x82310E80
+source_sha256 = "d4a619de65171bf9fd20efe7d14c50d3546b1fafdc06f2d6e42575bcddade568"

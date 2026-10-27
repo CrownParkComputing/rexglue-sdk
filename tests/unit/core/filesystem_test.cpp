@@ -1,12 +1,15 @@
 /**
- * Unit tests for FileHandle::OpenExisting access mode handling.
+ * Unit tests for host filesystem handles and directory enumeration.
  *
  * Covers the host-side handle only; guest path translation is out of scope.
  */
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
@@ -125,3 +128,44 @@ TEST_CASE("OpenExisting failed read reports zero bytes", "[filesystem]") {
   CHECK_FALSE(handle->Read(0, buffer.data(), buffer.size(), &bytes_read));
   CHECK(bytes_read == 0);
 }
+
+#ifndef _WIN32
+TEST_CASE("ListFiles follows shared content links and skips dangling links", "[filesystem]") {
+  struct TempDirectory {
+    std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        ("rexglue_directory_test_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    TempDirectory() { REQUIRE(std::filesystem::create_directory(path)); }
+    ~TempDirectory() {
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  } temp;
+
+  std::filesystem::create_directory(temp.path / "content");
+  {
+    std::ofstream payload(temp.path / "payload.bin", std::ios::binary);
+    payload << kPayload;
+    REQUIRE(payload.good());
+  }
+  std::filesystem::create_directory_symlink("content", temp.path / "shared-dlc");
+  std::filesystem::create_symlink("payload.bin", temp.path / "shared-file");
+  std::filesystem::create_symlink("missing", temp.path / "dangling");
+
+  const auto entries = rex::filesystem::ListFiles(temp.path);
+  REQUIRE(entries.size() == 4);
+  using Type = rex::filesystem::FileInfo::Type;
+  for (const auto& name : {"content", "shared-dlc", "payload.bin", "shared-file"}) {
+    CAPTURE(name);
+    const auto entry = std::find_if(entries.begin(), entries.end(),
+                                    [&](const auto& info) { return info.name == name; });
+    REQUIRE(entry != entries.end());
+    const bool directory = std::string_view(name) == "content" ||
+                           std::string_view(name) == "shared-dlc";
+    CHECK(entry->type == (directory ? Type::kDirectory : Type::kFile));
+    CHECK(entry->total_size == (directory ? 0 : kPayload.size()));
+    CHECK(entry->path == temp.path);
+  }
+}
+#endif

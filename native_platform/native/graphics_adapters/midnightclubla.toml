@@ -1,0 +1,25 @@
+version = 1
+title = "midnightclubla"
+
+[[hook]]
+address = 0x82417678
+profile = "mcla_float4"
+min_count = 16
+constants_offset = 1920
+dirty_offset = 0
+source_sha256 = "419d7a6475033dddfaa8ad2bd969eae74629b55fbdfe7c94fe4b619e164e2c60"
+
+[[hook]]
+address = 0x82417758
+profile = "mcla_float4"
+min_count = 16
+constants_offset = 6016
+dirty_offset = 8
+source_sha256 = "c716804f3ec032683b33b53d464913c69ccee6f45a4a6c7ac4fc97ba9f24256a"
+
+[[hook]]
+address = 0x824238E0
+profile = "grouped_float4_emitter"
+min_count = 64
+entry_after_save_lr = 0x824238E8
+source_sha256 = "8ae36ec7335d51932ab8e2e5a1cf0adef0635f485d048c6e1103d913b6785401"

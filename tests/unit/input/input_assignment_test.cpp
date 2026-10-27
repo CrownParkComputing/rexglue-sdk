@@ -236,3 +236,23 @@ TEST_CASE("A synthetic device does not push the first pad off guest user 0", "[i
   REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_B);
   REQUIRE(system->GetState(1, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
 }
+
+TEST_CASE("Overlay physical input excludes emulated pad buttons", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  driver->Add(2, true);
+  driver->SetButtons(1, X_INPUT_GAMEPAD_A);
+  driver->SetButtons(2, X_INPUT_GAMEPAD_B);
+
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetStateRaw(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == (X_INPUT_GAMEPAD_A | X_INPUT_GAMEPAD_B));
+  REQUIRE(system->GetPhysicalStateRaw(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_A);
+
+  driver->Remove(1);
+  REQUIRE(system->GetPhysicalStateRaw(0, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
+  REQUIRE(system->GetStateRaw(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_B);
+}

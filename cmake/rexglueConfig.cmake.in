@@ -10,6 +10,27 @@ include(CMakeFindDependencyMacro)
 
 include("${CMAKE_CURRENT_LIST_DIR}/rexglue_helpers.cmake")
 
+# Installing this optional component exposes functions; it enables no hooks or
+# backend until a title explicitly calls the relevant setup function.
+set(rexglue_NativeGraphics_FOUND FALSE)
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/rexglue_native_graphics.cmake" AND
+   EXISTS "${CMAKE_CURRENT_LIST_DIR}/rexglue_native_target.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/rexglue_native_graphics.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/rexglue_native_target.cmake")
+    set(rexglue_NativeGraphics_FOUND TRUE)
+endif()
+
+
+# The standalone backend is a separate optional source component.
+set(rexglue_NativeBackend_FOUND FALSE)
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/rexglue_native_target.cmake" AND
+   EXISTS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/rexglue/native_platform/native/platform.cmake" AND
+   EXISTS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/rexglue/native_platform/manifest.json")
+    include("${CMAKE_CURRENT_LIST_DIR}/rexglue_native_target.cmake")
+    set(REXGLUE_NATIVE_PLATFORM_ROOT "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/rexglue/native_platform/native")
+    set(rexglue_NativeBackend_FOUND TRUE)
+endif()
+
 list(PREPEND CMAKE_PREFIX_PATH "${PACKAGE_PREFIX_DIR}")
 
 find_dependency(fmt CONFIG)

@@ -13,6 +13,7 @@
 // TOML config file loading
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 
@@ -116,6 +117,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("non_volatile_as_local"), "non_volatile_as_local");
   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
             hasBool("generate_exception_handlers"), "generate_exception_handlers");
+  MergeBool(cfg.nonVolatileMemory, toml["nonvolatile_memory"].value_or(false),
+            hasBool("nonvolatile_memory"), "nonvolatile_memory");
   if (hasBool("is_dll")) {
     cfg.isDll = toml["is_dll"].value_or(false);
   }
@@ -198,6 +201,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
       fcfg.name = (*table)["name"].value_or(std::string{});
       fcfg.parent = (*table)["parent"].value_or(0u);
       fcfg.shareRegisters = (*table)["share_registers"].value_or(false);
+      if ((*table)["non_volatile_as_local"].is_boolean()) {
+        fcfg.nonVolatileAsLocal = (*table)["non_volatile_as_local"].value_or(false);
+      }
 
       if (fcfg.size && fcfg.end) {
         REXCODEGEN_ERROR("Function 0x{:08X}: cannot specify both 'size' and 'end'", address);
@@ -218,6 +224,38 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
     }
     if (added > 0) {
       REXCODEGEN_DEBUG("[config]   [functions] added/updated {} entries from {}", added, filePath);
+    }
+  }
+
+  // [signatures] -- address -> "R(Args...)" (opt-in typed wrappers)
+  if (auto* sigTable = toml["signatures"].as_table()) {
+    size_t added = 0;
+    for (auto& [key, value] : *sigTable) {
+      std::string keyStr(key.str());
+      auto addrOpt = ParseHexAddress(keyStr);
+      if (!addrOpt) {
+        REXCODEGEN_ERROR("Invalid [signatures] address key: {}", keyStr);
+        continue;
+      }
+      auto text = value.value<std::string>();
+      if (!text) {
+        REXCODEGEN_ERROR("Invalid [signatures] entry at 0x{:08X}: expected string", *addrOpt);
+        continue;
+      }
+      std::string error;
+      auto sig = ParseTypedSignature(*text, error);
+      if (!sig) {
+        REXCODEGEN_ERROR("[signatures] 0x{:08X} = \"{}\": {}", *addrOpt, *text, error);
+        continue;
+      }
+      if (cfg.signatures.contains(*addrOpt)) {
+        REXCODEGEN_DEBUG("[config]   [signatures] 0x{:08X} overridden from {}", *addrOpt, filePath);
+      }
+      cfg.signatures.insert_or_assign(*addrOpt, std::move(*sig));
+      ++added;
+    }
+    if (added > 0) {
+      REXCODEGEN_DEBUG("[config]   [signatures] added/updated {} entries from {}", added, filePath);
     }
   }
 
@@ -489,6 +527,171 @@ bool FinalizeConfig(RecompilerConfig& cfg) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Typed signature grammar
+//   sig  := type '(' [ type { ',' type } ] ')'      ("void" alone means no args)
+//   type := 'void' | 'int32' | 'uint32' | 'int64' | 'uint64' | 'float' | 'double'
+//         | ident '*'            (any pointer -> guest u32)
+//         | 'be' '<' cxx '>'     (rex::be<T>)
+//         | 'MappedPtr' '<' cxx '>'
+//   cxx  := anything up to the matching '>' (spelled as C++, e.g. uint16_t)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string Trim(std::string_view v) {
+  size_t b = 0, e = v.size();
+  while (b < e && std::isspace(static_cast<unsigned char>(v[b])))
+    ++b;
+  while (e > b && std::isspace(static_cast<unsigned char>(v[e - 1])))
+    --e;
+  return std::string(v.substr(b, e - b));
+}
+
+bool IsIdent(std::string_view v) {
+  if (v.empty())
+    return false;
+  for (char c : v) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == ':'))
+      return false;
+  }
+  return true;
+}
+
+std::optional<SigType> ParseSigType(std::string_view raw, std::string& error) {
+  std::string t = Trim(raw);
+  SigType out;
+  if (t == "void") {
+    out.kind = SigType::Kind::Void;
+    out.cpp = "void";
+    return out;
+  }
+  static const std::unordered_map<std::string, std::string> kInts = {
+      {"int32", "int32_t"},
+      {"uint32", "uint32_t"},
+      {"int64", "int64_t"},
+      {"uint64", "uint64_t"},
+  };
+  if (auto it = kInts.find(t); it != kInts.end()) {
+    out.kind = SigType::Kind::Int;
+    out.cpp = it->second;
+    return out;
+  }
+  if (t == "float" || t == "double") {
+    out.kind = SigType::Kind::Float;
+    out.cpp = t;
+    return out;
+  }
+  if (t.back() == '*') {
+    std::string pointee = Trim(std::string_view(t).substr(0, t.size() - 1));
+    if (!pointee.empty() && !pointee.ends_with('*') && !IsIdent(pointee)) {
+      error = fmt::format("bad pointee type '{}'", pointee);
+      return std::nullopt;
+    }
+    out.kind = SigType::Kind::Pointer;
+    out.cpp = "uint32_t";
+    out.inner = pointee;
+    return out;
+  }
+  auto parseTemplate = [&](std::string_view head, SigType::Kind kind,
+                           const char* cppHead) -> std::optional<SigType> {
+    if (!t.starts_with(head) || t.back() != '>')
+      return std::nullopt;
+    std::string inner = Trim(std::string_view(t).substr(head.size(), t.size() - head.size() - 1));
+    if (inner.empty()) {
+      error = fmt::format("empty template argument in '{}'", t);
+      return std::nullopt;
+    }
+    out.kind = kind;
+    out.inner = inner;
+    out.cpp = fmt::format("{}<{}>", cppHead, inner);
+    return out;
+  };
+  if (auto r = parseTemplate("be<", SigType::Kind::BigEndian, "rex::be"); r)
+    return r;
+  if (!error.empty())
+    return std::nullopt;
+  if (auto r = parseTemplate("MappedPtr<", SigType::Kind::MappedPtr, "rex::MappedPtr"); r)
+    return r;
+  if (!error.empty())
+    return std::nullopt;
+  error = fmt::format("unknown type '{}' (allowed: void int32 uint32 int64 uint64 float double T* "
+                      "be<T> MappedPtr<T>)",
+                      t);
+  return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<TypedSignature> ParseTypedSignature(std::string_view text, std::string& error) {
+  error.clear();
+  auto open = text.find('(');
+  auto close = text.rfind(')');
+  if (open == std::string_view::npos || close == std::string_view::npos || close < open ||
+      Trim(text.substr(close + 1)).size() != 0) {
+    error = "expected 'R(Args...)'";
+    return std::nullopt;
+  }
+  TypedSignature sig;
+  sig.text = std::string(text);
+  auto ret = ParseSigType(text.substr(0, open), error);
+  if (!ret)
+    return std::nullopt;
+  sig.ret = *ret;
+
+  std::string_view argList = text.substr(open + 1, close - open - 1);
+  std::vector<std::string_view> parts;
+  {
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < argList.size(); ++i) {
+      char c = argList[i];
+      if (c == '<')
+        ++depth;
+      else if (c == '>')
+        --depth;
+      else if (c == ',' && depth == 0) {
+        parts.push_back(argList.substr(start, i - start));
+        start = i + 1;
+      }
+    }
+    if (depth != 0) {
+      error = "unbalanced '<' '>'";
+      return std::nullopt;
+    }
+    parts.push_back(argList.substr(start));
+  }
+  if (parts.size() == 1 && (Trim(parts[0]).empty() || Trim(parts[0]) == "void")) {
+    parts.clear();
+  }
+  size_t ints = 0, floats = 0;
+  for (auto part : parts) {
+    auto t = ParseSigType(part, error);
+    if (!t)
+      return std::nullopt;
+    if (t->isVoid()) {
+      error = "'void' is not a parameter type";
+      return std::nullopt;
+    }
+    if (t->isFloat())
+      ++floats;
+    else
+      ++ints;
+    sig.args.push_back(std::move(*t));
+  }
+  if (ints > 8) {
+    error = fmt::format("{} integer-class parameters; the typed wrapper marshals at most 8 (r3-r10)",
+                        ints);
+    return std::nullopt;
+  }
+  if (floats > 13) {
+    error = fmt::format("{} float parameters; the typed wrapper marshals at most 13 (f1-f13)",
+                        floats);
+    return std::nullopt;
+  }
+  return sig;
+}
 
 bool RecompilerConfig::Load(const std::string_view& configFilePath) {
   std::set<std::string> visited;

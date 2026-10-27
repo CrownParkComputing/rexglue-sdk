@@ -53,6 +53,13 @@ struct FunctionConfig {
   // from a local. Callers sync their localized copies across the call site.
   bool shareRegisters = false;
 
+  // Per-function override of the module-wide non_volatile_as_local flag.
+  // nullopt inherits the module setting; true localizes r14-r31/f14-f31/
+  // v14-v31,v64-v127 in this function even when the module keeps them in ctx;
+  // false keeps them in ctx for this function only (like share_registers but
+  // without the caller-side sync). Opt-in: see docs/native/CODEGEN_FLAGS.md.
+  std::optional<bool> nonVolatileAsLocal;
+
   // Get effective size (prefers size over end)
   uint32_t getSize(uint32_t address) const {
     return size ? size : (end > address ? end - address : 0);
@@ -60,6 +67,41 @@ struct FunctionConfig {
   // Returns true if this is a discontinuous chunk belonging to a parent function
   bool isChunk() const { return parent != 0; }
 };
+
+// One parameter or return type of a typed signature ([entrypoint.signatures]).
+// `cpp` is the host-side spelling the wrapper uses; `kind` selects the PPC
+// ABI register class. Grammar (docs/native/CODEGEN_FLAGS.md):
+//   void | int32 | uint32 | int64 | uint64 | float | double
+//   | <ident>* (any pointer: a guest address, passed as uint32_t)
+//   | be<T>  | MappedPtr<T>  (T spelled as C++, passed through verbatim)
+struct SigType {
+  enum class Kind : uint8_t {
+    Void,
+    Int,        // int32/uint32/int64/uint64 -> rN.u64
+    Float,      // float/double -> fN.f64
+    Pointer,    // T* -> guest u32 in rN
+    BigEndian,  // rex::be<T> -> rN via operator T()
+    MappedPtr,  // rex::MappedPtr<T> -> rN via guest_address()
+  };
+  Kind kind = Kind::Void;
+  std::string cpp;    // e.g. "uint32_t", "float", "rex::be<uint16_t>"
+  std::string inner;  // T for be<T>/MappedPtr<T>, empty otherwise
+
+  bool isFloat() const { return kind == Kind::Float; }
+  bool isVoid() const { return kind == Kind::Void; }
+};
+
+// A parsed `R(Args...)` signature attached to one guest function.
+struct TypedSignature {
+  std::string text;  // as written in the manifest
+  SigType ret;
+  std::vector<SigType> args;
+};
+
+/// Parse one signature string. Returns nullopt and fills `error` on a
+/// grammar violation or on an argument the wrapper cannot marshal (more than
+/// 8 integer-class or 13 float-class parameters).
+std::optional<TypedSignature> ParseTypedSignature(std::string_view text, std::string& error);
 
 // Section info for analysis output
 struct SectionInfo {
@@ -98,6 +140,10 @@ struct RecompilerConfig {
   bool nonVolatileRegistersAsLocalVariables = false;
   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
 
+  /// Opt-in: emit REX_LOAD_*/REX_STORE_* without `volatile` in the generated
+  /// PCH (defines REX_CONFIG_NONVOLATILE_MEMORY). MMIO macros stay volatile.
+  bool nonVolatileMemory = false;
+
   // === Analysis tuning (optional) ===
   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
   uint32_t dataRegionThreshold = 16;  ///< Consecutive invalid instructions to mark as data region
@@ -111,6 +157,11 @@ struct RecompilerConfig {
   std::unordered_map<uint32_t, FunctionConfig> functions;  ///< Function/chunk configuration
   std::unordered_map<uint32_t, JumpTable> switchTables;
   std::unordered_map<uint32_t, MidAsmHook> midAsmHooks;
+
+  /// Opt-in typed wrappers, from `[signatures]` (`[entrypoint.signatures]` in
+  /// a manifest): guest address -> parsed signature. Codegen emits
+  /// `R <name>_typed(uint8_t* base, Args...)` beside the raw body.
+  std::unordered_map<uint32_t, TypedSignature> signatures;
   uint32_t longJmpAddress = 0;
   uint32_t setJmpAddress = 0;
 

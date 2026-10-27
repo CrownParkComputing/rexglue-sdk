@@ -344,6 +344,9 @@ void emit_print(std::string& out, fmt::format_string<Args...> fmt, Args&&... arg
   fmt::vformat_to(std::back_inserter(out), fmt.get(), fmt::make_format_args(args...));
 }
 
+std::string EmitTypedWrapper(uint32_t address, const std::string& name,
+                             const TypedSignature& sig);
+
 }  // namespace
 
 std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
@@ -601,6 +604,15 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
       blockBase += 4;
       ++data;
     }
+
+    // A branch can target the address right at a block's end (the point after
+    // its last instruction, e.g. the continuation following a bl). The label is
+    // inside the function but never matches a block base, so emit it here or
+    // the generated goto has no target.
+    if (labels.find(blockEnd) != labels.end() && emittedLabels.insert(blockEnd).second) {
+      emit_println(body, "loc_{:X}:", blockEnd);
+      csrState = CSRState::Unknown;
+    }
   }
 
   // --- Close function body (or SEH try block) ---
@@ -690,8 +702,127 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     out += body;
   }
 
+  // --- Opt-in typed wrapper ([entrypoint.signatures]) ---
+  if (auto sigIt = ctx.config.signatures.find(static_cast<uint32_t>(base()));
+      sigIt != ctx.config.signatures.end()) {
+    out += EmitTypedWrapper(static_cast<uint32_t>(base()), name, sigIt->second);
+  }
+
   return out;
 }
+
+// Emits `R <name>_typed(uint8_t* base, Args...)`: marshals the arguments into a
+// fresh rex::CallFrame on the current thread's context by the PPC ABI (ints and
+// guest pointers in r3-r10 by integer ordinal, float/double in f1-f13 by float
+// ordinal, matching rex::ppc::GatherFunctionArgumentsFromTypes), calls the raw
+// body, and reads r3/f1 back. Under -DREX_VERIFY_TYPED the same call is also
+// made through rex::ppc::ImportFunction (the SDK's independent marshaller) on a
+// copy of the frame and r3/f1 are compared; a mismatch is logged as an error.
+namespace {
+
+std::string EmitTypedWrapper(uint32_t address, const std::string& name,
+                             const TypedSignature& sig) {
+  std::string out;
+  std::string params;
+  std::string abiTypes;
+  std::string abiArgs;
+  std::string marshal;
+  size_t intOrd = 0, floatOrd = 0;
+  for (size_t i = 0; i < sig.args.size(); ++i) {
+    const auto& a = sig.args[i];
+    std::string arg = fmt::format("a{}", i);
+    params += fmt::format(", {} {}", a.cpp, arg);
+    if (i)
+      abiTypes += ", ";
+    std::string abiVal;
+    switch (a.kind) {
+      case SigType::Kind::Float:
+        abiTypes += a.cpp;
+        abiVal = arg;
+        emit_println(marshal, "\tctx.f{}.f64 = static_cast<double>({});", 1 + floatOrd++, arg);
+        break;
+      case SigType::Kind::Int:
+        abiTypes += a.cpp;
+        abiVal = arg;
+        emit_println(marshal, "\tctx.r{}.u64 = static_cast<uint64_t>({});", 3 + intOrd++, arg);
+        break;
+      case SigType::Kind::Pointer:
+        abiTypes += "uint32_t";
+        abiVal = arg;
+        emit_println(marshal, "\tctx.r{}.u64 = {};", 3 + intOrd++, arg);
+        break;
+      case SigType::Kind::BigEndian:
+        abiTypes += "uint64_t";
+        abiVal = fmt::format("static_cast<uint64_t>(static_cast<{}>({}))", a.inner, arg);
+        emit_println(marshal, "\tctx.r{}.u64 = {};", 3 + intOrd++, abiVal);
+        break;
+      case SigType::Kind::MappedPtr:
+        abiTypes += "uint32_t";
+        abiVal = fmt::format("{}.guest_address()", arg);
+        emit_println(marshal, "\tctx.r{}.u64 = {};", 3 + intOrd++, abiVal);
+        break;
+      case SigType::Kind::Void:
+        break;
+    }
+    abiArgs += fmt::format(", {}", abiVal);
+  }
+
+  std::string abiRet;
+  switch (sig.ret.kind) {
+    case SigType::Kind::Void: abiRet = "void"; break;
+    case SigType::Kind::Int:
+    case SigType::Kind::Float: abiRet = sig.ret.cpp; break;
+    case SigType::Kind::Pointer:
+    case SigType::Kind::MappedPtr: abiRet = "uint32_t"; break;
+    case SigType::Kind::BigEndian: abiRet = "uint64_t"; break;
+  }
+
+  emit_println(out, "// Typed wrapper: [entrypoint.signatures] 0x{:08X} = \"{}\"", address,
+               sig.text);
+  emit_println(out, "{} {}_typed(uint8_t* base{}) {{", sig.ret.cpp, name, params);
+  emit_println(out, "\trex::CallFrame frame(*rex::runtime::current_ppc_context());");
+  emit_println(out, "\tPPCContext& ctx = frame.ctx;");
+  out += marshal;
+  emit_println(out, "#if defined(REX_VERIFY_TYPED)");
+  emit_println(out, "\tPPCContext verify = ctx;");
+  emit_println(out, "\t(void)rex::ppc::ImportFunction<{}({})>{{{}}}(verify, base{});", abiRet,
+               abiTypes, name, abiArgs);
+  emit_println(out, "#endif");
+  emit_println(out, "\t{}(ctx, base);", name);
+  emit_println(out, "#if defined(REX_VERIFY_TYPED)");
+  emit_println(out, "\tif (verify.r3.u64 != ctx.r3.u64 || verify.f1.u64 != ctx.f1.u64) {{");
+  emit_println(out,
+               "\t\tREXLOG_ERROR(\"REX_VERIFY_TYPED {}_typed: r3 {{:#x}}/{{:#x}} f1 {{}}/{{}}\", "
+               "ctx.r3.u64, verify.r3.u64, ctx.f1.f64, verify.f1.f64);",
+               name);
+  emit_println(out, "\t}}");
+  emit_println(out, "#endif");
+  switch (sig.ret.kind) {
+    case SigType::Kind::Void:
+      break;
+    case SigType::Kind::Int:
+      emit_println(out, "\treturn static_cast<{}>(ctx.r3.u64);", sig.ret.cpp);
+      break;
+    case SigType::Kind::Float:
+      emit_println(out, "\treturn static_cast<{}>(ctx.f1.f64);", sig.ret.cpp);
+      break;
+    case SigType::Kind::Pointer:
+      emit_println(out, "\treturn ctx.r3.u32;");
+      break;
+    case SigType::Kind::BigEndian:
+      emit_println(out, "\treturn {}(static_cast<{}>(ctx.r3.u64));", sig.ret.cpp, sig.ret.inner);
+      break;
+    case SigType::Kind::MappedPtr:
+      emit_println(out, "\tif (!ctx.r3.u32) return {}(nullptr);", sig.ret.cpp);
+      emit_println(out, "\treturn {}(rex::memory::GuestPtr<{}*>(base, ctx.r3.u32), ctx.r3.u32);",
+                   sig.ret.cpp, sig.ret.inner);
+      break;
+  }
+  emit_println(out, "}}\n");
+  return out;
+}
+
+}  // namespace
 
 void FunctionGraph::addCodeBuffer(uint32_t baseAddress, const uint8_t* data, size_t size) {
   assert_always("FunctionGraph::addCodeBuffer not implemented. Use Recompiler with builders");

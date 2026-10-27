@@ -1509,20 +1509,19 @@ bool build_vupkd3d128(BuilderContext& ctx) {
     {
       auto vSrc = ctx.v(ctx.insn.operands[1]);
       auto vDst = ctx.v(ctx.insn.operands[0]);
-      // Format: w(4 bits):z(20 bits):y(20 bits):x(20 bits) in 64 bits
-      // x, y, z --> floats, w --> float
-      ctx.println("\t{}.u64[0] = {}.u64[1];", ctx.v_temp(), vSrc);
-      // x (bits 0-19) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 44) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[0] = float({}.s32);", vDst, ctx.temp());
-      // y (bits 20-39) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 24) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[1] = float({}.s32);", vDst, ctx.temp());
-      // z (bits 40-59) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 4) >> 44);", ctx.temp(), ctx.v_temp());
-      ctx.println("\t{}.f32[2] = float({}.s32);", vDst, ctx.temp());
-      // w (bits 60-63) - 4 bits
-      ctx.println("\t{}.f32[3] = float({}.u64[0] >> 60);", vDst, ctx.v_temp());
+      // Format: w(4 bits):z(20 bits):y(20 bits):x(20 bits) in the guest's LOW
+      // doubleword (host u64[0]), the same half NORMSHORT4/FLOAT16_4 read.
+      // x, y, z --> 3.0+X form, w --> 1.0+w form, reversed host lane order:
+      // Guest element 0 --> host u32[3] ... Guest element 3 --> host u32[0].
+      //
+      // The source is read in full before any lane is written, so vSrc == vDst
+      // (how PGR4 uses this) is safe.
+      ctx.println("\t{{");
+      ctx.println("\t\tconst auto unpacked = rex::ppc::UnpackNormPacked64({}.u64[0]);", vSrc);
+      for (size_t i = 0; i < 4; i++) {
+        ctx.println("\t\t{}.u32[{}] = unpacked[{}];", vDst, i, i);
+      }
+      ctx.println("\t}}");
       break;
     }
 

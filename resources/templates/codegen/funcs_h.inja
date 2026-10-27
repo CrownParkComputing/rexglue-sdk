@@ -10,3 +10,15 @@
 
 {% for fn in functions %}DECLARE_REX_FUNC({{ fn.name }});
 {% endfor %}
+{% if has_signatures %}
+//=============================================================================
+// Typed Wrappers ([entrypoint.signatures])
+//=============================================================================
+// R <name>_typed(uint8_t* base, Args...) marshals through the current thread's
+// PPCContext (rex::CallFrame) and calls the raw body. <name>_sig_t is the ABI
+// signature for rex::ppc::ImportFunction / REX_IMPORT(<name>, callable, sig).
+
+{% for fn in typed_functions %}// {{ fn.address }} = "{{ fn.signature }}"
+{{ fn.ret }} {{ fn.name }}_typed(uint8_t* base{{ fn.params }});
+using {{ fn.name }}_sig_t = {{ fn.abi_sig }};
+{% endfor %}{% endif %}

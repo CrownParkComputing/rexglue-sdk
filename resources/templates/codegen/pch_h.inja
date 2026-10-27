@@ -16,6 +16,7 @@
 {% endif %}{% if config_flags.cr_as_local %}#define REX_CONFIG_CR_AS_LOCAL
 {% endif %}{% if config_flags.non_argument_as_local %}#define REX_CONFIG_NON_ARGUMENT_AS_LOCAL
 {% endif %}{% if config_flags.non_volatile_as_local %}#define REX_CONFIG_NON_VOLATILE_AS_LOCAL
+{% endif %}{% if config_flags.nonvolatile_memory %}#define REX_CONFIG_NONVOLATILE_MEMORY
 {% endif %}
 #define REX_IMAGE_BASE {{ image_base }}ull
 #define REX_IMAGE_SIZE {{ image_size }}ull
@@ -36,7 +37,13 @@
 #include <rex/perf/counter.h>
 #include <rex/thread/mutex.h>
 #include <rex/system/mmio_handler.h>
-
+{% if has_signatures %}
+// [entrypoint.signatures]: typed wrappers need the call frame, the current
+// thread's context and guest pointer translation.
+#include <rex/hook.h>
+#include <rex/system/thread_state.h>
+#include <rex/system/xmemory.h>
+{% endif %}
 #include <atomic>
 #include <cassert>
 #include <csetjmp>
@@ -94,31 +101,47 @@ extern PPCFuncMapping PPCFuncMappings[];
 #if defined(REXGLUE_PROFILE_GUEST_FUNCTIONS) && defined(REXGLUE_ENABLE_PROFILING)
 #include <tracy/Tracy.hpp>
 #if defined(__clang__)
-#define REX_FUNC_PROLOGUE()                     \
+#define REX_FUNC_PROLOGUE_BASE()                     \
   __builtin_assume(((size_t)base & 0x1F) == 0); \
   ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #elif defined(__GNUC__)
-#define REX_FUNC_PROLOGUE()         \
+#define REX_FUNC_PROLOGUE_BASE()         \
   do {                              \
     if (((size_t)base & 0x1F) != 0) \
       __builtin_unreachable();      \
   } while (0);                      \
   ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #else
-#define REX_FUNC_PROLOGUE() ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
+#define REX_FUNC_PROLOGUE_BASE() ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #endif
 #else
 #if defined(__clang__)
-#define REX_FUNC_PROLOGUE() __builtin_assume(((size_t)base & 0x1F) == 0)
+#define REX_FUNC_PROLOGUE_BASE() __builtin_assume(((size_t)base & 0x1F) == 0)
 #elif defined(__GNUC__)
-#define REX_FUNC_PROLOGUE()         \
+#define REX_FUNC_PROLOGUE_BASE()         \
   do {                              \
     if (((size_t)base & 0x1F) != 0) \
       __builtin_unreachable();      \
   } while (0)
 #else
-#define REX_FUNC_PROLOGUE() ((void)0)
+#define REX_FUNC_PROLOGUE_BASE() ((void)0)
 #endif
+#endif
+
+// Guest reach counters (opt-in, see docs/native/FORMATS.md): a port that
+// compiles its generated OBJECT library with -DREX_GUEST_REACH gets one
+// zero-initialised static Slot per function (no guard variable) and a relaxed
+// atomic increment on every entry; the first call registers the slot with
+// the runtime, which dumps addr,count to REX_TRACE_REACH=<path>. Without the
+// define the prologue is exactly the base form above.
+#if defined(REX_GUEST_REACH)
+#include <rex/system/reach_trace.h>
+#define REX_FUNC_PROLOGUE()                        \
+  REX_FUNC_PROLOGUE_BASE();                        \
+  static ::rex::reach::Slot ___rex_reach_slot;     \
+  ::rex::reach::Hit(___rex_reach_slot, __func__)
+#else
+#define REX_FUNC_PROLOGUE() REX_FUNC_PROLOGUE_BASE()
 #endif
 
 //=============================================================================
@@ -133,7 +156,21 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
 
-#define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+{% if config_flags.nonvolatile_memory %}// nonvolatile_memory = true: plain (non-volatile) guest memory accesses. The
+// compiler may combine, reorder or hoist them like any other load/store; the
+// REX_MM_* MMIO macros below stay volatile. See docs/native/CODEGEN_FLAGS.md.
+#define REX_LOAD_U8(x) (*(u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+#define REX_LOAD_U16(x) __builtin_bswap16(*(u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+#define REX_LOAD_U32(x) __builtin_bswap32(*(u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+#define REX_LOAD_U64(x) __builtin_bswap64(*(u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
+#define REX_LOAD_STRING(x, len) \
+  std::string_view(reinterpret_cast<const char*>(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)), (len))
+
+#define REX_STORE_U8(x, y)  (*(u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = (y))
+#define REX_STORE_U16(x, y) (*(u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
+#define REX_STORE_U32(x, y) (*(u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
+#define REX_STORE_U64(x, y) (*(u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
+{% else %}#define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U32(x) __builtin_bswap32(*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U64(x) __builtin_bswap64(*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
@@ -144,7 +181,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_STORE_U16(x, y) (*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap16(y))
 #define REX_STORE_U32(x, y) (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
 #define REX_STORE_U64(x, y) (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
-
+{% endif %}
 #define REX_MEMORY_SIZE 0x100000000ull
 
 //=============================================================================

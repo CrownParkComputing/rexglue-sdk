@@ -62,10 +62,14 @@ class InputSystem : public system::IInputSystem {
   /// The pad as it really is, ignoring GuestInputSuppressed. For the overlay
   /// that did the suppressing and still has to read the button that closes it.
   X_RESULT GetStateRaw(uint32_t user_index, X_INPUT_STATE* out_state);
+  /// Raw physical pads only, excluding keyboard/mouse emulation. For overlays
+  /// that have a separate keyboard navigation path.
+  X_RESULT GetPhysicalStateRaw(uint32_t user_index, X_INPUT_STATE* out_state);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
 
  private:
+  X_RESULT GetStateRawImpl(uint32_t user_index, X_INPUT_STATE* out_state, bool physical_only);
   /// Re-enumerates every driver and notifies the assignment when the set
   /// changed.
   void RefreshDevices();

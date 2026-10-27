@@ -119,6 +119,22 @@ macro(rexglue_setup_target target_name)
     rexglue_configure_target({{ cmake_var("target_name") }} {{ cmake_var("ARGN") }})
 endmacro()
 
+# Link the SDK's standalone Xenos shader translator (microcode -> SPIR-V plus
+# the register/ucode model, without the EDRAM/shared-memory/PM4 emulation) into
+# a target that hosts a native graphics device. Call after rexglue_setup_target().
+# Equivalent to: target_link_libraries(<target> PRIVATE rex::shader-translator)
+# See <sdk>/docs/native/SHADER_TRANSLATOR_TARGET.md.
+# Usage: rexglue_link_shader_translator(<target>)
+macro(rexglue_link_shader_translator target_name)
+    if(TARGET rex::shader-translator)
+        target_link_libraries({{ cmake_var("target_name") }} PRIVATE rex::shader-translator)
+    else()
+        message(FATAL_ERROR
+            "rexglue_link_shader_translator: rex::shader-translator is not available "
+            "(SDK built without REXGLUE_USE_VULKAN, or an SDK older than the target)")
+    endif()
+endmacro()
+
 # Codegen is a HOST tool: it translates the XEX to C++ on the machine doing the
 # build, and nothing on a target device runs it. A cross-compile therefore has
 # no rex::rexglue target to point at, and the generator expression below fails
@@ -146,6 +162,48 @@ add_custom_target({{ names.snake_case }}_codegen
     DEPENDS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp")
 
 endif()  # NOT CMAKE_CROSSCOMPILING
+
+# native-check: the guest-code gate (docs/native/FORMATS.md, "native.toml").
+# Inert unless the project has a native.toml next to this CMakeLists.txt; then
+# 'cmake --build . --target native-check' maps the linked image
+# (tools/native_map.py -> out/native/symbols.json) and fails when a module's
+# policy is violated (tools/native_check.py). Set REXGLUE_NATIVE_REACH to a
+# REX_TRACE_REACH / reach_from_perf.sh CSV to add the dynamic check. A project
+# whose generated/rexglue.cmake predates this block adds the same thing itself:
+#   add_custom_target(native-check COMMAND python3 ${REXSDK_DIR}/tools/native_check.py
+#       ${CMAKE_CURRENT_SOURCE_DIR} --binary $<TARGET_FILE:<target>> DEPENDS <target>)
+if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/native.toml" AND NOT TARGET native-check)
+    set(REXGLUE_NATIVE_REACH "" CACHE FILEPATH "Reach CSV for the dynamic part of native-check")
+    if(REXSDK_DIR)
+        set(_rexglue_tools_dir "{{ cmake_var("REXSDK_DIR") }}/tools")
+    elseif(DEFINED REXGLUE_SHARE_DIR)
+        set(_rexglue_tools_dir "{{ cmake_var("REXGLUE_SHARE_DIR") }}/tools")
+    else()
+        set(_rexglue_tools_dir "")
+    endif()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND AND EXISTS "{{ cmake_var("_rexglue_tools_dir") }}/native_check.py")
+        set(_rexglue_native_reach_arg "")
+        if(REXGLUE_NATIVE_REACH)
+            set(_rexglue_native_reach_arg --reach "{{ cmake_var("REXGLUE_NATIVE_REACH") }}")
+        endif()
+        add_custom_target(native-check
+            COMMAND "{{ cmake_var("Python3_EXECUTABLE") }}" "{{ cmake_var("_rexglue_tools_dir") }}/native_map.py"
+                    "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}"
+                    --binary "$<TARGET_FILE:{{ cmake_var("REXGLUE_HOST_TARGET") }}>"
+            COMMAND "{{ cmake_var("Python3_EXECUTABLE") }}" "{{ cmake_var("_rexglue_tools_dir") }}/native_check.py"
+                    "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}"
+                    --binary "$<TARGET_FILE:{{ cmake_var("REXGLUE_HOST_TARGET") }}>"
+                    {{ cmake_var("_rexglue_native_reach_arg") }}
+            DEPENDS {{ cmake_var("REXGLUE_HOST_TARGET") }}
+            WORKING_DIRECTORY {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}
+            COMMENT "native-check: guest-code gate from native.toml"
+            USES_TERMINAL VERBATIM)
+    else()
+        message(STATUS "native.toml present but native-check target not created "
+            "(need python3 and <sdk>/tools/native_check.py; tools dir: '{{ cmake_var("_rexglue_tools_dir") }}')")
+    endif()
+endif()
 
 # Include DLL module shared library targets if codegen has generated them
 if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/dll_targets.cmake")

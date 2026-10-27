@@ -281,20 +281,10 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
     }
 
     FileInfo info;
-
-    info.name = ent->d_name;
-    struct stat st;
-    stat((path / info.name).c_str(), &st);
-    info.create_timestamp = convertUnixtimeToWinFiletime(st.st_ctime);
-    info.access_timestamp = convertUnixtimeToWinFiletime(st.st_atime);
-    info.write_timestamp = convertUnixtimeToWinFiletime(st.st_mtime);
-    info.path = path;
-    if (ent->d_type == DT_DIR) {
-      info.type = FileInfo::Type::kDirectory;
-      info.total_size = 0;
-    } else {
-      info.type = FileInfo::Type::kFile;
-      info.total_size = st.st_size;
+    // Follow links to shared content and handle filesystems reporting DT_UNKNOWN.
+    // Skip entries that disappeared or whose link target is unavailable.
+    if (!GetInfo(path / ent->d_name, &info)) {
+      continue;
     }
     result.push_back(info);
   }

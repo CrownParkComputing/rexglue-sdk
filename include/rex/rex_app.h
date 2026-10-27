@@ -219,10 +219,27 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   virtual void OnWindowMinimized() {}
   virtual void OnWindowRestored() {}
 
+  /// Whether the developer overlays exist at all: the F3 debug overlay, the
+  /// backtick console, and the F4 settings page. Titles shipping their own UI
+  /// return false and none of those binds are registered.
+  virtual bool EnableDevOverlays() { return true; }
+
+  /// Whether the achievements (F7) and high-scores (F6) pages exist. Titles
+  /// that fold achievements into their own menu return false and none of
+  /// those binds are registered.
+  virtual bool EnableAchievementPages() { return true; }
+
+  /// Creates the side-panel/bezel dialog (logo badge, rails, FPS readout and
+  /// the F8/F10 binds). Override to replace it; returning nullptr disables it
+  /// entirely. Titles with their own menu/UI typically return nullptr.
+  virtual std::unique_ptr<ui::SidePanelsDialog> CreateSidePanels();
+
   /// Creates the overlay toggled by bind_achievements. Override to replace the
   /// built-in achievement UI. Returning nullptr disables the overlay.
   virtual std::unique_ptr<ui::ImGuiDialog> CreateAchievementsOverlay();
-  std::unique_ptr<ui::ImGuiDialog> CreateHighScoresOverlay();
+  /// Creates the overlay toggled by bind_high_scores / bind_high_scores_open.
+  /// Returning nullptr disables the overlay.
+  virtual std::unique_ptr<ui::ImGuiDialog> CreateHighScoresOverlay();
 
   /// Creates the achievement notification UI. Override to replace the
   /// built-in toast renderer. Returning nullptr disables notifications.

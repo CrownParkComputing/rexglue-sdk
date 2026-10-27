@@ -79,6 +79,51 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
     });
   }
 
+  // Opt-in typed wrappers: declarations for {project}_funcs.h
+  nlohmann::json typedFunctions = nlohmann::json::array();
+  for (const auto* fn : functions) {
+    auto sigIt = cfg.signatures.find(static_cast<uint32_t>(fn->base()));
+    if (sigIt == cfg.signatures.end() || fn->authority() == rex::codegen::FunctionAuthority::IMPORT)
+      continue;
+    std::string funcName;
+    if (fn->base() == ctx.analysisState().entryPoint) {
+      funcName = "xstart";
+    } else if (!fn->name().empty()) {
+      funcName = fn->name();
+    } else {
+      funcName = fmt::format("sub_{:08X}", fn->base());
+    }
+    const auto& sig = sigIt->second;
+    std::string params;
+    std::string abiTypes;
+    for (size_t i = 0; i < sig.args.size(); ++i) {
+      params += fmt::format(", {} a{}", sig.args[i].cpp, i);
+      if (i)
+        abiTypes += ", ";
+      switch (sig.args[i].kind) {
+        case rex::codegen::SigType::Kind::Pointer:
+        case rex::codegen::SigType::Kind::MappedPtr: abiTypes += "uint32_t"; break;
+        case rex::codegen::SigType::Kind::BigEndian: abiTypes += "uint64_t"; break;
+        default: abiTypes += sig.args[i].cpp; break;
+      }
+    }
+    std::string abiRet;
+    switch (sig.ret.kind) {
+      case rex::codegen::SigType::Kind::Pointer:
+      case rex::codegen::SigType::Kind::MappedPtr: abiRet = "uint32_t"; break;
+      case rex::codegen::SigType::Kind::BigEndian: abiRet = "uint64_t"; break;
+      default: abiRet = sig.ret.cpp; break;
+    }
+    typedFunctions.push_back({
+        {"address", fmt::format("0x{:08X}", fn->base())},
+        {"name", funcName},
+        {"signature", sig.text},
+        {"ret", sig.ret.cpp},
+        {"params", params},
+        {"abi_sig", fmt::format("{}({})", abiRet, abiTypes)},
+    });
+  }
+
   // Build config flags
   nlohmann::json configFlags = {
       {"skip_lr", cfg.skipLr},
@@ -89,6 +134,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       {"cr_as_local", cfg.crRegistersAsLocalVariables},
       {"non_argument_as_local", cfg.nonArgumentRegistersAsLocalVariables},
       {"non_volatile_as_local", cfg.nonVolatileRegistersAsLocalVariables},
+      {"nonvolatile_memory", cfg.nonVolatileMemory},
   };
 
   return {
@@ -103,6 +149,8 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
       {"is_dll", ctx.isDllModule()},
       {"config_flags", configFlags},
       {"functions", functionsJson},
+      {"has_signatures", !typedFunctions.empty()},
+      {"typed_functions", typedFunctions},
       {"recomp_files", nlohmann::json::array()},
   };
 }
@@ -262,9 +310,17 @@ bool CodegenWriter::write(bool force) {
   const size_t maxFileBytes = REXCVAR_GET(max_file_size_bytes);
   std::unordered_set<std::string> referenced;
   emitCtx.referenced = &referenced;
+  size_t emitCount = 0;
   for (const auto* fn : functions) {
     referenced.clear();
+    auto t0 = std::chrono::steady_clock::now();
     std::string code = fn->emitCpp(emitCtx);
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    if (++emitCount % 100 == 0 || ms > 500) {
+      REXCODEGEN_INFO("emit {}/{} fn 0x{:08X} size={} t={}ms", emitCount, functions.size(),
+                      fn->base(), code.size(), ms);
+    }
     if (code.size() > maxFileBytes) {
       REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})", fn->base(),
                       code.size(), maxFileBytes);

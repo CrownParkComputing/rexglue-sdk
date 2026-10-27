@@ -44,8 +44,18 @@ const FunctionGraph& BuilderContext::graph() const {
 
 // Localizing a non-volatile assumes the function owns it across its whole body.
 // An SEH funclet does not: it inherits its owner's live registers through ctx.
+// A per-function `non_volatile_as_local` in [functions] overrides the module
+// flag (tri-state: absent inherits). share_registers still wins: a funclet can
+// never own its registers.
 bool BuilderContext::localizeNonVolatiles() const {
-  return config().nonVolatileRegistersAsLocalVariables && !fn.sharesRegisters();
+  if (fn.sharesRegisters())
+    return false;
+  const auto& cfg = config();
+  if (auto it = cfg.functions.find(static_cast<uint32_t>(fn.base()));
+      it != cfg.functions.end() && it->second.nonVolatileAsLocal.has_value()) {
+    return *it->second.nonVolatileAsLocal;
+  }
+  return cfg.nonVolatileRegistersAsLocalVariables;
 }
 
 std::string BuilderContext::r(size_t index) {
@@ -202,7 +212,10 @@ void BuilderContext::emit_function_call(uint32_t address) {
       // function's: the helper bodies are emitted under it too, so once they
       // spill to locals they are no-ops that scribble zeros on the caller's
       // frame. A share_registers function still has to elide them.
-      if (cfg.nonVolatileRegistersAsLocalVariables &&
+      // A function localized by a per-function override under a module that
+      // keeps non-volatiles in ctx also elides them: the helpers would only
+      // round-trip ctx values this body never reads.
+      if ((cfg.nonVolatileRegistersAsLocalVariables || localizeNonVolatiles()) &&
           (name.find("__rest") == 0 || name.find("__save") == 0)) {
         // print nothing - these are handled by local variable tracking
         return;

@@ -17,11 +17,11 @@
 // Codegen/Output
 //=============================================================================
 
-REXCVAR_DEFINE_UINT32(max_file_size_bytes, 1048576, "Codegen",
+REXCVAR_DEFINE_UINT32(max_file_size_bytes, 67108864, "Codegen",
                       "Target source file size in bytes; sets how many recomp files a project "
                       "is split into, chosen once and then persisted")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly)
-    .range(65536, 67108864);
+    .range(65536, 1073741824);
 
 REXCVAR_DEFINE_UINT32(progress_log_frequency, 100, "Codegen",
                       "Log progress every N functions")

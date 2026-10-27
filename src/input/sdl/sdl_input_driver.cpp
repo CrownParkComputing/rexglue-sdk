@@ -567,6 +567,9 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
   }
   auto& controller = controllers_.at(*idx);
 
+  // L3/R3 pass through to the guest like any other button: the title menus own
+  // them now (R3 opens the nuklear menu, L3 toggles the FPS counter).
+
   uint16_t xbuttons = controller.state.gamepad.buttons;
   // Lookup the XInput button code.
   if (event.gbutton.button >= xbutton_lookup.size()) {

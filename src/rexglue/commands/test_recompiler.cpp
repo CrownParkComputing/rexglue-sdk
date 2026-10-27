@@ -299,7 +299,32 @@ std::string CategoryFromStem(std::string_view stem) {
   return "misc";
 }
 
-bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::string_view outDir) {
+// Codegen flags for the A/B protocol (docs/native/CODEGEN_FLAGS.md): the same
+// instruction tests are regenerated once per flag set and every executable is
+// checked against the qemu-derived expectations. Names match the manifest keys.
+struct TestCodegenFlags {
+  bool nonVolatileAsLocal = false;
+  bool nonVolatileMemory = false;
+  bool ctrAsLocal = false;
+  bool xerAsLocal = false;
+  bool crAsLocal = false;
+  bool nonArgumentAsLocal = false;
+};
+
+bool ParseTestCodegenFlag(std::string_view name, TestCodegenFlags& flags) {
+  if (name == "non_volatile_as_local") flags.nonVolatileAsLocal = true;
+  else if (name == "nonvolatile_memory") flags.nonVolatileMemory = true;
+  else if (name == "ctr_as_local") flags.ctrAsLocal = true;
+  else if (name == "xer_as_local") flags.xerAsLocal = true;
+  else if (name == "cr_as_local") flags.crAsLocal = true;
+  else if (name == "non_argument_as_local") flags.nonArgumentAsLocal = true;
+  else if (name == "default" || name.empty()) {}
+  else return false;
+  return true;
+}
+
+bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::string_view outDir,
+                    const TestCodegenFlags& flags = {}) {
   std::array<ui::KeyValueRow, 3> header_rows = {{
       {"Bin dir", std::string(binDir)},
       {"ASM dir", std::string(asmDir)},
@@ -347,6 +372,12 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
 
     codegen::RecompilerConfig config;
     config.outDirectoryPath = std::string(outDir);
+    config.nonVolatileRegistersAsLocalVariables = flags.nonVolatileAsLocal;
+    config.nonVolatileMemory = flags.nonVolatileMemory;
+    config.ctrAsLocalVariable = flags.ctrAsLocal;
+    config.xerAsLocalVariable = flags.xerAsLocal;
+    config.crRegistersAsLocalVariables = flags.crAsLocal;
+    config.nonArgumentRegistersAsLocalVariables = flags.nonArgumentAsLocal;
     auto ctx =
         codegen::CodegenContext::Create(codegen::BinaryView::fromModule(module), std::move(config));
 
@@ -416,6 +447,14 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
   templateData["image_size"] = "100000";
   templateData["code_base"] = "82010000";
   templateData["code_size"] = "100000";
+  templateData["config_flags"] = {
+      {"non_volatile_as_local", flags.nonVolatileAsLocal},
+      {"nonvolatile_memory", flags.nonVolatileMemory},
+      {"ctr_as_local", flags.ctrAsLocal},
+      {"xer_as_local", flags.xerAsLocal},
+      {"cr_as_local", flags.crAsLocal},
+      {"non_argument_as_local", flags.nonArgumentAsLocal},
+  };
 
   templateData["tests"] = nlohmann::json::array();
   size_t totalTests = 0;
@@ -456,6 +495,7 @@ struct RecompileTestsArgs {
   std::string bin_dir;
   std::string asm_dir;
   std::string output;
+  std::vector<std::string> codegen_flags;
 };
 
 }  // namespace
@@ -474,9 +514,22 @@ void RegisterRecompileTests(CLI::App& parent, const CliContext& ctx, DeferredAct
   sub->add_option("--output", args->output, "Output path for recompile-tests")
       ->type_name("PATH")
       ->required();
+  sub->add_option("--codegen-flag", args->codegen_flags,
+                  "Manifest codegen flag to enable for this test set (repeatable): "
+                  "non_volatile_as_local, nonvolatile_memory, ctr_as_local, xer_as_local, "
+                  "cr_as_local, non_argument_as_local")
+      ->type_name("NAME")
+      ->take_all();
   sub->callback([args, &pending]() {
     pending = [args]() -> rex::Result<void> {
-      if (!RecompileTests(args->bin_dir, args->asm_dir, args->output)) {
+      TestCodegenFlags flags;
+      for (const auto& name : args->codegen_flags) {
+        if (!ParseTestCodegenFlag(name, flags)) {
+          return Err<void>(rex::ErrorCategory::Validation,
+                           fmt::format("unknown --codegen-flag '{}'", name));
+        }
+      }
+      if (!RecompileTests(args->bin_dir, args->asm_dir, args->output, flags)) {
         return Err<void>(rex::ErrorCategory::Validation, "Test recompilation failed");
       }
       return rex::Ok();

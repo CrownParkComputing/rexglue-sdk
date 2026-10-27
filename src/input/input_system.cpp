@@ -30,6 +30,11 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
     .allowed({"sdl", "xinput"});
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+REXCVAR_DEFINE_BOOL(input_shared_pads, false, "Input",
+                    "Route every connected pad to guest user 0 instead of one pad per user\n"
+                    "by connection order. For single-player titles that only poll user 0:\n"
+                    "with two pads attached, the second one is otherwise player 2 and its\n"
+                    "presses never reach the game (SEGA Rally sat on its title screen).");
 namespace rex::input {
 
 namespace {
@@ -246,6 +251,15 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 }
 
 X_RESULT InputSystem::GetStateRaw(uint32_t user_index, X_INPUT_STATE* out_state) {
+  return GetStateRawImpl(user_index, out_state, false);
+}
+
+X_RESULT InputSystem::GetPhysicalStateRaw(uint32_t user_index, X_INPUT_STATE* out_state) {
+  return GetStateRawImpl(user_index, out_state, true);
+}
+
+X_RESULT InputSystem::GetStateRawImpl(uint32_t user_index, X_INPUT_STATE* out_state,
+                                      bool physical_only) {
   std::lock_guard<std::recursive_mutex> lock(device_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
@@ -259,6 +273,10 @@ X_RESULT InputSystem::GetStateRaw(uint32_t user_index, X_INPUT_STATE* out_state)
   X_INPUT_STATE merged = {};
   bool any = false;
   for (DeviceId id : ids) {
+    if (physical_only) {
+      const DeviceInfo* info = DeviceInfoFor(id);
+      if (!info || info->synthetic) continue;
+    }
     auto* driver = DriverForDevice(id);
     if (!driver) {
       continue;
@@ -387,7 +405,11 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   // NOP driver (primary in tool mode, fallback otherwise)
   uint8_t nop_index = tool_mode ? 0 : 1;
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
-  input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+  if (REXCVAR_GET(input_shared_pads)) {
+    input->SetDeviceAssignment(std::make_unique<SharedAssignment>());
+  } else {
+    input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+  }
   return input;
 }
 

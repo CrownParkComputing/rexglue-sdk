@@ -1559,7 +1559,9 @@ RenderTargetCache::RenderTarget* D3D12RenderTargetCache::CreateRenderTarget(Rend
   resource_desc.Alignment = 0;
   resource_desc.Width = key.GetWidth() * draw_resolution_scale_x();
   resource_desc.Height =
-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) * draw_resolution_scale_y();
+      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples,
+                            draw_resolution_scale_y()) *
+      draw_resolution_scale_y();
   resource_desc.DepthOrArraySize = 1;
   resource_desc.MipLevels = 1;
   if (key.is_depth) {
@@ -3870,8 +3872,9 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
                                                       host_depth_store_descriptor_source.second);
         // Render target constant.
         HostDepthStoreRenderTargetConstant host_depth_store_render_target_constant =
-            GetHostDepthStoreRenderTargetConstant(dest_rt_key.pitch_tiles_at_32bpp,
-                                                  msaa_2x_supported_);
+            GetHostDepthStoreRenderTargetConstant(
+                dest_rt_key.pitch_tiles_at_32bpp, draw_resolution_scale_x(),
+                draw_resolution_scale_y(), msaa_2x_supported_);
         command_list.D3DSetComputeRoot32BitConstants(
             kHostDepthStoreRootParameterConstants,
             sizeof(host_depth_store_render_target_constant) / sizeof(uint32_t),
@@ -3901,6 +3904,7 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
       for (uint32_t j = 0; j < transfer_rectangle_count; ++j) {
         uint32_t group_count_x, group_count_y;
         GetHostDepthStoreRectangleInfo(transfer_rectangles[j], dest_rt_key.msaa_samples,
+                                       draw_resolution_scale_x(), draw_resolution_scale_y(),
                                        host_depth_store_rectangle_constant, group_count_x,
                                        group_count_y);
         command_list.D3DSetComputeRoot32BitConstants(

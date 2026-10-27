@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -20,6 +21,7 @@
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/graphics/vulkan/deferred_command_buffer.h>
 #include <rex/graphics/vulkan/shared_memory.h>
+#include <rex/hash.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/ui/vulkan/util.h>
@@ -28,7 +30,56 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
                     "Use sparse shared memory on Vulkan")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(gpu_check_staging_range, "", "GPU/Vulkan",
+                      "Diagnostic: hex physical range lo-hi. Every upload staging chunk that "
+                      "intersects it is hashed when written and re-hashed when its submission's "
+                      "fence is observed complete; a mismatch means the staging page was reused "
+                      "before the GPU copied it.");
+
 namespace rex::graphics::vulkan {
+
+namespace {
+// Staging integrity diagnostic (gpu_check_staging_range). One shared memory
+// instance per process, so file statics are enough.
+struct StagingCheck {
+  const uint8_t* mapping;
+  size_t size;
+  uint64_t hash;
+  uint64_t submission;
+  uint32_t guest_address;
+};
+std::vector<StagingCheck> g_staging_checks;
+uint32_t g_staging_check_lo = 0, g_staging_check_hi = 0;
+int g_staging_check_state = -1;  // -1 unparsed, 0 off, 1 on
+uint64_t g_staging_checked = 0, g_staging_mismatches = 0;
+
+bool StagingCheckEnabled() {
+  if (g_staging_check_state < 0) {
+    const std::string& spec = REXCVAR_GET(gpu_check_staging_range);
+    if (spec.empty()) {
+      g_staging_check_state = 0;
+    } else if (spec == "auto") {
+      // Range supplied at run time (SetStagingCheckRangeForDiagnostics).
+      g_staging_check_state = 1;
+    } else {
+      const char* dash = std::strchr(spec.c_str(), '-');
+      g_staging_check_lo = uint32_t(std::strtoul(spec.c_str(), nullptr, 16));
+      g_staging_check_hi =
+          dash ? uint32_t(std::strtoul(dash + 1, nullptr, 16)) : g_staging_check_lo + 0x1000;
+      g_staging_check_state = 1;
+    }
+  }
+  return g_staging_check_state == 1;
+}
+}  // namespace
+
+void SetStagingCheckRangeForDiagnostics(uint32_t lo, uint32_t hi) {
+  if (g_staging_check_lo != lo || g_staging_check_hi != hi) {
+    g_staging_check_lo = lo;
+    g_staging_check_hi = hi;
+    REXGPU_INFO("[STAGING] checking uploads intersecting 0x{:08X}-0x{:08X}", lo, hi);
+  }
+}
 
 VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
                                        memory::Memory& memory,
@@ -191,7 +242,39 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
 }
 
 void VulkanSharedMemory::CompletedSubmissionUpdated() {
-  upload_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
+  const uint64_t completed = command_processor_.GetCompletedSubmission();
+  if (!g_staging_checks.empty()) {
+    // Re-hash the staging bytes of every chunk whose submission the GPU has
+    // now finished, before the pool may hand the page out again. The bytes
+    // must still be exactly what UploadRanges wrote.
+    size_t kept = 0;
+    for (size_t i = 0; i < g_staging_checks.size(); ++i) {
+      const StagingCheck& check = g_staging_checks[i];
+      if (check.submission > completed) {
+        g_staging_checks[kept++] = check;
+        continue;
+      }
+      ++g_staging_checked;
+      const uint64_t now_hash = XXH3_64bits(check.mapping, check.size);
+      if (now_hash != check.hash) {
+        ++g_staging_mismatches;
+        if (g_staging_mismatches <= 50) {
+          REXGPU_ERROR("[STAGING] chunk for guest 0x{:08X}+0x{:X} (submission {}, completed {}) "
+                       "changed between upload and fence: {:016X} -> {:016X}",
+                       check.guest_address, check.size, check.submission, completed, check.hash,
+                       now_hash);
+        }
+      }
+    }
+    g_staging_checks.resize(kept);
+    static uint64_t next_report = 0;
+    if (g_staging_checked >= next_report) {
+      next_report = g_staging_checked + 500;
+      REXGPU_INFO("[STAGING] {} chunks verified at fence, {} mismatches, {} pending",
+                  g_staging_checked, g_staging_mismatches, g_staging_checks.size());
+    }
+  }
+  upload_buffer_pool_->Reclaim(completed);
 }
 
 void VulkanSharedMemory::EndSubmission() {
@@ -330,6 +413,8 @@ bool VulkanSharedMemory::UploadRanges(
       NotePagesUploaded(upload_range.first, upload_range.first + upload_range.second - 1);
       if (MakeRangeValid(range_start, range_length, false, false)) {
         ArmWriteWatches(range_start, range_length);
+      } else {
+        ShmemRangeLogHit(range_start, range_length, "upload-already-valid");
       }
     }
   }
@@ -358,6 +443,18 @@ bool VulkanSharedMemory::UploadRanges(
       std::memcpy(upload_buffer_mapping,
                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
                   upload_buffer_size);
+      if (StagingCheckEnabled()) {
+        const uint32_t chunk_start = upload_range_start << page_size_log2();
+        const uint32_t chunk_end = chunk_start + uint32_t(upload_buffer_size);
+        if (chunk_start < g_staging_check_hi && chunk_end > g_staging_check_lo) {
+          StagingCheck& check = g_staging_checks.emplace_back();
+          check.mapping = upload_buffer_mapping;
+          check.size = size_t(upload_buffer_size);
+          check.hash = XXH3_64bits(upload_buffer_mapping, check.size);
+          check.submission = submission_current;
+          check.guest_address = chunk_start;
+        }
+      }
       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,

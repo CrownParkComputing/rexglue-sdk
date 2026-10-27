@@ -25,6 +25,9 @@ REXCVAR_DEFINE_BOOL(gamma_render_target_as_unorm16, true, "GPU",
                     "Use R16G16B16A16_UNORM for gamma render targets (more accurate than sRGB)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
+REXCVAR_DEFINE_BOOL(gpu_vertex_nan_kill_debug, false, "GPU",
+                    "Diagnostic: draw NaN/inf-position vertices at the screen centre instead of "
+                    "discarding their primitives.");
 REXCVAR_DEFINE_STRING(dump_textures, "", "GPU",
                       "Directory to dump each bound texture's guest bytes to, untiled into linear "
                       "order. Answers whether a colour fault is in the title's data or in our "

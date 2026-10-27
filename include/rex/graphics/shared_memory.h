@@ -55,6 +55,11 @@ class AtomicU64Array {
 // Manages memory for unconverted textures, resolve targets, vertex and index
 // buffers that can be accessed from shaders with Xenon physical addresses, with
 // system page size granularity.
+// Diagnostic (gpu_log_shmem_range): log a shared-memory event touching the range.
+bool ShmemRangeLogHit(uint32_t start, uint32_t length, const char* what);
+// steady_clock nanoseconds until which ShmemRangeLogHit logs every event.
+extern std::atomic<int64_t> g_shmem_force_log_until_ns;
+
 class SharedMemory {
  public:
   static constexpr uint32_t kBufferSizeLog2 = 29;

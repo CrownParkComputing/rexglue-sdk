@@ -9,6 +9,10 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/thread.h>
+#include <rex/graphics/shared_memory.h>
+#include <filesystem>
+#include <chrono>
 #include <chrono>
 #include <algorithm>
 #include <cinttypes>
@@ -28,6 +32,7 @@
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/sampler_info.h>
 #include <rex/graphics/xenos.h>
+#include <rex/hash.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory.h>
@@ -42,10 +47,33 @@ REXCVAR_DEFINE_BOOL(gpu_ignore_bin_predication, false, "GPU",
                     "ignoring it costs draws but cannot remove geometry that belongs in a tile.\n"
                     "Needed by titles that compute their bin masks from memexported data that\n"
                     "never reaches the CPU (readback_memexport disabled).");
+REXCVAR_DEFINE_BOOL(gpu_check_ib_replay, false, "GPU",
+                    "Diagnostic: hash every indirect buffer as it is parsed. Reports an IB whose "
+                    "bytes change while the CP parses it (the guest rewriting its push buffer "
+                    "under the command processor) and an IB re-submitted in the same frame "
+                    "(predicated-tiling replay) with different contents than its first pass.");
 REXCVAR_DEFINE_BOOL(gpu_skip_tile_replay, false, "GPU",
                     "Execute each indirect buffer only once per frame, suppressing the guest's\n"
                     "per-EDRAM-tile replay (diagnostic).");
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+static std::chrono::steady_clock::time_point g_kick_log_until{};
+REXCVAR_DEFINE_INT32(
+    gpu_max_kicks_ahead, -1, "GPU",
+    "How many ring-buffer kicks (write pointer updates) the guest may have outstanding beyond "
+    "what the GPU thread has executed. A console GPU trails the CPU by a few milliseconds, and "
+    "titles reuse dynamic vertex buffers on that assumption (PGR4 alternates two crowd skinning "
+    "palette buffers ~7 times a frame); an asynchronous GPU thread that falls further behind "
+    "reads buffers the CPU has already refilled. 0 = each kick waits for the previous one to be "
+    "executed; -1 disables.");
+
+REXCVAR_DEFINE_INT32(
+    gpu_min_kick_lag_ms, 0, "GPU",
+    "Minimum age, in milliseconds, of a ring-buffer kick before the GPU thread executes it. A "
+    "console GPU fetches vertex data when a draw actually runs, a few milliseconds after the CPU "
+    "submitted it, and titles finish writing dynamic buffers in that window (PGR4 fills its crowd "
+    "skinning palette while the draws using it are already queued). Executing a kick the instant "
+    "it is submitted copies half-written buffers. 0 disables.");
+
 
 REXCVAR_DEFINE_INT32(vsync_fps_cap, 0, "GPU",
                      "Pace the guest vblank at this rate when vsync is on, instead of the\n"
@@ -53,10 +81,17 @@ REXCVAR_DEFINE_INT32(vsync_fps_cap, 0, "GPU",
                      "launcher's FPS cap selection drives this.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(gpu_bulk_register_writes, true, "GPU",
+                    "Write sequential register ranges (Type0 packets, LOAD_ALU_CONSTANT, "
+                    "SET_CONSTANT) in bulk instead of one WriteRegister per dword. Diagnostic "
+                    "switch: turn off to A/B rendering glitches against the per-register path.");
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
                     "Disable for minor CPU overhead reduction, but may break memory coherency.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+// Diagnostic counter for the [KICKS] statistics line.
+static std::atomic<uint32_t> g_load_alu_constant_packets{0};
 
 REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -102,6 +137,7 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 #include <atomic>
+#include <unordered_map>
 
 #include <rex/graphics/present_stats.h>
 
@@ -263,8 +299,73 @@ void CommandProcessor::WorkerThreadMain() {
     }
     assert_true(read_ptr_index_ != write_ptr_index);
 
-    // Execute. Note that we handle wraparound transparently.
-    read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    // Minimum kick age (gpu_min_kick_lag_ms): only execute up to the newest
+    // kick that is old enough; if even the oldest pending kick is too young,
+    // wait for it to age.
+    {
+      const int32_t lag_ms = REXCVAR_GET(gpu_min_kick_lag_ms);
+      if (lag_ms > 0 && kicks_pending_count_.load(std::memory_order_acquire)) {
+        const auto lag = std::chrono::milliseconds(lag_ms);
+        for (;;) {
+          uint32_t eligible_write_ptr = UINT32_MAX;
+          std::chrono::steady_clock::time_point oldest{};
+          {
+            std::lock_guard<std::mutex> lock(kicks_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& kick : kicks_pending_) {
+              if (now - kick.second >= lag) {
+                eligible_write_ptr = kick.first;
+              } else {
+                break;
+              }
+            }
+            if (!kicks_pending_.empty()) {
+              oldest = kicks_pending_.front().second;
+            }
+          }
+          if (eligible_write_ptr != UINT32_MAX) {
+            write_ptr_index = eligible_write_ptr;
+            break;
+          }
+          if (write_ptr_index == read_ptr_index_) {
+            break;  // nothing pending in the ring anyway
+          }
+          if (!worker_running_ || !pending_fns_.empty()) {
+            break;
+          }
+          const auto wait_until = oldest + lag;
+          const auto now = std::chrono::steady_clock::now();
+          if (wait_until > now) {
+            rex::thread::Sleep(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::min(wait_until - now, std::chrono::steady_clock::duration(
+                                               std::chrono::milliseconds(2)))));
+          }
+        }
+      }
+    }
+
+    if (read_ptr_index_ != write_ptr_index) {
+      // Execute. Note that we handle wraparound transparently.
+      read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+    }
+    if (kicks_pending_count_.load(std::memory_order_acquire)) {
+      // Kicks are submitted in ring order and we executed exactly up to
+      // write_ptr_index: pop every kick up to and including the one whose
+      // write pointer that is. A kick equal to the current read pointer is
+      // executed too (it can be the very first one after a wrap).
+      std::lock_guard<std::mutex> lock(kicks_mutex_);
+      size_t executed = 0;
+      for (size_t i = 0; i < kicks_pending_.size(); ++i) {
+        if (kicks_pending_[i].first == write_ptr_index) {
+          executed = i + 1;
+        }
+      }
+      if (!executed && !kicks_pending_.empty() && kicks_pending_.front().first == read_ptr_index_) {
+        executed = 1;
+      }
+      kicks_pending_.erase(kicks_pending_.begin(), kicks_pending_.begin() + executed);
+      kicks_pending_count_.store(uint32_t(kicks_pending_.size()), std::memory_order_release);
+    }
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
@@ -352,7 +453,72 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
   read_ptr_update_freq_ = uint32_t(1) << block_size_log2 >> 2;
 }
 
+REXCVAR_DEFINE_STRING(gpu_kick_log_trigger_file, "", "GPU",
+                      "Diagnostic: when this file appears, log every ring-buffer kick and "
+                      "WAIT_REG_MEM for two seconds, then delete the file.");
+
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
+  const int32_t max_kicks = REXCVAR_GET(gpu_max_kicks_ahead);
+  {
+    const std::string& trig = REXCVAR_GET(gpu_kick_log_trigger_file);
+    if (!trig.empty()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (g_kick_log_until == std::chrono::steady_clock::time_point{} &&
+          std::filesystem::exists(trig)) {
+        std::filesystem::remove(trig);
+        g_kick_log_until = now + std::chrono::seconds(2);
+        g_shmem_force_log_until_ns.store(g_kick_log_until.time_since_epoch().count(),
+                                         std::memory_order_relaxed);
+        REXGPU_WARN("[KICK] logging window armed");
+      }
+      if (g_kick_log_until != std::chrono::steady_clock::time_point{} && now < g_kick_log_until) {
+        REXGPU_WARN("[KICK] wptr {:08X} read {:08X} backlog {}", value, read_ptr_index_,
+                    kicks_pending_count_.load());
+      }
+    }
+  }
+  const bool track_kicks = max_kicks >= 0 || REXCVAR_GET(gpu_min_kick_lag_ms) > 0;
+  {
+    // Kick statistics, every 2 s: kicks/s, how many had to wait, swaps/s.
+    static std::atomic<uint32_t> kicks{0}, kick_waits{0};
+    static std::atomic<uint64_t> next_report{0};
+    static uint32_t last_counter = 0;
+    kicks.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    uint64_t due = next_report.load(std::memory_order_relaxed);
+    if (now_ms >= due && next_report.compare_exchange_strong(due, now_ms + 2000)) {
+      REXGPU_INFO("[KICKS] {} kicks/2s, {} waited, {} timed out, {} swaps+vblanks/2s, backlog now {}, "
+                  "wait_reg_mem mem {} reg {}, load_alu_constant {}",
+                  kicks.exchange(0), kick_waits.exchange(0), kick_timeouts_.exchange(0),
+                  counter_ - last_counter, kicks_pending_count_.load(),
+                  wait_reg_mem_memory_.exchange(0), wait_reg_mem_register_.exchange(0),
+                  g_load_alu_constant_packets.exchange(0));
+      last_counter = counter_;
+    }
+    if (max_kicks >= 0 &&
+        int32_t(kicks_pending_count_.load(std::memory_order_acquire)) > max_kicks) {
+      kick_waits.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  if (max_kicks >= 0) {
+    // Wait for the backlog to drain before accepting this kick, bounded so a
+    // stalled worker cannot hang the guest.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (int32_t(kicks_pending_count_.load(std::memory_order_acquire)) > max_kicks) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        kick_timeouts_.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+      rex::thread::Sleep(std::chrono::microseconds(100));
+    }
+  }
+  if (track_kicks) {
+    std::lock_guard<std::mutex> lock(kicks_mutex_);
+    kicks_pending_.emplace_back(value, std::chrono::steady_clock::now());
+    kicks_pending_count_.store(uint32_t(kicks_pending_.size()), std::memory_order_release);
+  }
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
 }
@@ -376,8 +542,14 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   // it does not, something computed it.
   // Both debug hooks gate on the same slow-path predicate; read the cvars once
   // per write and take one branch in the common (all hooks off) case.
-  const uint32_t scan_needle = REXCVAR_GET(scan_guest_u32);
-  const int32_t trace_constant = REXCVAR_GET(trace_float_constant);
+  // The storage address is stable for the process lifetime, so resolve the
+  // accessor once and load the value through the pointer per write — this is
+  // the hottest function in the GPU thread and the cvar accessor call was the
+  // dominant cost of the debug path being off.
+  static uint32_t* const scan_guest_u32_storage = &REXCVAR_GET(scan_guest_u32);
+  static int32_t* const trace_constant_storage = &REXCVAR_GET(trace_float_constant);
+  const uint32_t scan_needle = *scan_guest_u32_storage;
+  const int32_t trace_constant = *trace_constant_storage;
   if (scan_needle != 0 || trace_constant >= 0) {
     if (scan_needle != 0 && value == scan_needle) {
       static std::once_flag scanned;
@@ -819,7 +991,7 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
-  if (!write_one_reg) {
+  if (!write_one_reg && REXCVAR_GET(gpu_bulk_register_writes)) {
     // Sequential range: take the bulk path so constant blocks reach the
     // Vulkan override's copy_and_swap fast path instead of paying one virtual
     // WriteRegister dispatch per dword.
@@ -828,7 +1000,7 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
   }
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
-    WriteRegister(base_index, reg_data);
+    WriteRegister(write_one_reg ? base_index : base_index + m, reg_data);
   }
 
   return true;
@@ -1131,6 +1303,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
   ++counter_;
+  swaps_processed_.fetch_add(1, std::memory_order_release);
   return true;
 }
 
@@ -1153,6 +1326,78 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
       return true;
     }
   }
+  if (REXCVAR_GET(gpu_check_ib_replay)) {
+    static std::unordered_map<uint64_t, std::vector<uint32_t>> ib_copies;  // (ptr,len) -> pass 1
+    static std::unordered_map<uint64_t, uint64_t> ib_hashes;  // (ptr,len) -> first hash
+    static uint32_t ib_hash_swap = UINT32_MAX;
+    static uint32_t reports = 0, ibs = 0, replays = 0, replay_mismatches = 0, parse_mismatches = 0;
+    if (ib_hash_swap != counter_) {
+      if (ib_hash_swap != UINT32_MAX && (counter_ % 100) == 0) {
+        REXGPU_INFO("[IBCHECK] swap {}: totals {} IBs, {} replays, {} replay mismatches, {} "
+                    "rewritten during parse",
+                    counter_, ibs, replays, replay_mismatches, parse_mismatches);
+      }
+      ib_hash_swap = counter_;
+      ib_hashes.clear();
+      ib_copies.clear();
+    }
+    const uint32_t cpu_ptr = GpuToCpu(list_ptr);
+    const size_t bytes = size_t(list_length) * sizeof(uint32_t);
+    const void* data = memory_->TranslatePhysical(cpu_ptr);
+    const uint64_t before = XXH3_64bits(data, bytes);
+    ++ibs;
+    const uint64_t key = (uint64_t(list_ptr) << 20) | list_length;
+    auto it = ib_hashes.find(key);
+    if (it == ib_hashes.end()) {
+      ib_hashes.emplace(key, before);
+      const uint32_t* words = reinterpret_cast<const uint32_t*>(data);
+      ib_copies.emplace(key, std::vector<uint32_t>(words, words + list_length));
+    } else {
+      ++replays;
+      if (it->second != before) {
+        ++replay_mismatches;
+        if (reports++ < 100) {
+          // Which dwords changed: a few tile registers (viewport/scissor/
+          // predication) are the tiling contract; constants or draw packets
+          // are not.
+          const uint32_t* now = reinterpret_cast<const uint32_t*>(data);
+          const std::vector<uint32_t>& first = ib_copies[key];
+          uint32_t diffs = 0;
+          std::string detail;
+          for (uint32_t k = 0; k < list_length && k < first.size(); ++k) {
+            if (first[k] != now[k]) {
+              if (diffs < 12) {
+                // The packet header preceding the changed dword, for context.
+                uint32_t h = k;
+                while (h > 0 && (rex::byte_swap(first[h]) >> 30) != 3 &&
+                       (rex::byte_swap(first[h]) >> 30) != 0 && k - h < 64) {
+                  --h;
+                }
+                detail += fmt::format(" [+{:X}] {:08X}->{:08X} (pkt@+{:X} {:08X})", k * 4,
+                                      rex::byte_swap(first[k]), rex::byte_swap(now[k]), h * 4,
+                                      rex::byte_swap(first[h]));
+              }
+              ++diffs;
+            }
+          }
+          REXGPU_ERROR("[IBCHECK] swap {} IB {:08X} len {:05X}: replay differs from first pass, "
+                       "{} dwords:{}",
+                       counter_, list_ptr, list_length, diffs, detail);
+        }
+      }
+    }
+    ExecuteIndirectBuffer(cpu_ptr, list_length);
+    const uint64_t after = XXH3_64bits(data, bytes);
+    if (after != before) {
+      ++parse_mismatches;
+      if (reports++ < 100) {
+        REXGPU_ERROR("[IBCHECK] swap {} IB {:08X} len {:05X}: rewritten by the guest while "
+                     "being parsed ({:016X} -> {:016X})",
+                     counter_, list_ptr, list_length, before, after);
+      }
+    }
+    return true;
+  }
   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
   return true;
 }
@@ -1170,6 +1415,12 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   uint32_t wait = reader->ReadAndSwap<uint32_t>();
 
   bool is_memory = (wait_info & 0x10) != 0;
+  (is_memory ? wait_reg_mem_memory_ : wait_reg_mem_register_).fetch_add(1, std::memory_order_relaxed);
+  if (g_kick_log_until != std::chrono::steady_clock::time_point{} &&
+      std::chrono::steady_clock::now() < g_kick_log_until) {
+    REXGPU_WARN("[WAITREG] {} addr {:08X} func {} ref {:08X} mask {:08X} wait {}",
+                is_memory ? "mem" : "reg", poll_reg_addr, wait_info & 7, ref, mask, wait);
+  }
 
   bool matched = false;
   do {
@@ -1654,6 +1905,7 @@ bool CommandProcessor::ExecutePacketType3_SET_CONSTANT2(memory::RingBuffer* read
 bool CommandProcessor::ExecutePacketType3_LOAD_ALU_CONSTANT(memory::RingBuffer* reader,
                                                             uint32_t packet, uint32_t count) {
   // load constants from memory
+  g_load_alu_constant_packets.fetch_add(1, std::memory_order_relaxed);
   uint32_t address = reader->ReadAndSwap<uint32_t>();
   address &= 0x3FFFFFFF;
   uint32_t offset_type = reader->ReadAndSwap<uint32_t>();
@@ -1661,6 +1913,35 @@ bool CommandProcessor::ExecutePacketType3_LOAD_ALU_CONSTANT(memory::RingBuffer* 
   uint32_t size_dwords = reader->ReadAndSwap<uint32_t>();
   size_dwords &= 0xFFF;
   uint32_t type = (offset_type >> 16) & 0xFF;
+  {
+    // Where the guest keeps the constants it loads this way (diagnostic, part
+    // of the [KICKS] line): the source address range and how many loads cover
+    // the crowd's per-instance block (ALU constants 52..55 = dwords 208..223).
+    static uint32_t lo = UINT32_MAX, hi = 0, crowd_loads = 0, total = 0;
+    static uint64_t next_report_ms = 0;
+    lo = std::min(lo, address);
+    hi = std::max(hi, address + size_dwords * 4);
+    ++total;
+    if (type == 0 && index <= 223 && index + size_dwords > 208) ++crowd_loads;
+    // This packet type is hit ~100k+/s on titles that stream constants through
+    // memory; only pay for a clock read every 256th call — the report interval
+    // is seconds long either way.
+    if ((total & 0xFF) == 0) {
+      const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now().time_since_epoch())
+                                           .count());
+      if (now_ms >= next_report_ms) {
+        next_report_ms = now_ms + 2000;
+        REXGPU_INFO("[LOADALU] {} loads/2s from 0x{:08X}-0x{:08X}, {} covering c52..c55; this "
+                    "one: type {} index {} size {} from 0x{:08X}",
+                    total, lo, hi, crowd_loads, type, index, size_dwords, address);
+        lo = UINT32_MAX;
+        hi = 0;
+        total = 0;
+        crowd_loads = 0;
+      }
+    }
+  }
   uint32_t* xlat_address = memory_->TranslatePhysical<uint32_t*>(address);
   switch (type) {
     case 0:  // ALU

@@ -10,6 +10,10 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <cstdint>
 #include <utility>
 #include <mutex>
@@ -31,6 +35,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/system/kernel_state.h>
 
 REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                      "Texture cache memory limit for render-to-texture (MB)")
@@ -328,14 +333,15 @@ void TextureCache::BeginFrame() {
   ResetTextureBindings();
 }
 
-void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
+void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled,
+                                       bool scaled) {
   if (length_unscaled == 0) {
     return;
   }
   start_unscaled &= 0x1FFFFFFF;
   length_unscaled = std::min(length_unscaled, 0x20000000 - start_unscaled);
 
-  if (IsDrawResolutionScaled()) {
+  if (scaled && IsDrawResolutionScaled()) {
     uint32_t page_first = start_unscaled >> 12;
     uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
     uint32_t block_first = page_first >> 5;
@@ -366,6 +372,198 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_
 // address function is the part that is easy to get subtly wrong, and it is
 // already right here - reimplementing it in a script would just add a second
 // thing to doubt.
+//=============================================================================
+// [NATIVE FMV] Host-decoded video planes substituted for the guest decoder's
+// output. The recompiled XMediaFacade WMV decoder corrupts its own Y/U/V planes
+// (8x8-block spurious AC; see the forza4-fmv-corruption notes), and the fault is
+// upstream of a verified-correct IDCT. Rather than fix the decoder, swap its
+// output: the guest keeps all sequencing, timing and audio, and we overwrite the
+// decoded planes in guest memory with frames decoded on the host by ffmpeg.
+//
+// Enable with REX_FMV_NATIVE=<dir containing <clip>.yuv>, each file raw
+// yuv420p at 1280x720. The known splash order and alternating Y buffers
+// provide frame identity even though the decoded pixels are badly damaged.
+//=============================================================================
+namespace {
+
+struct FmvClip {
+  std::string name;
+  const uint8_t* data = nullptr;
+  size_t bytes = 0;
+  uint32_t frames = 0;
+};
+
+struct FmvState {
+  bool inited = false;
+  bool enabled = false;
+  std::vector<FmvClip> clips;
+  int cur_clip = -1;
+  int cur_frame = -1;
+  uint64_t subs = 0;
+  std::mutex m;
+};
+
+FmvState& fmv_state() { static FmvState s; return s; }
+
+constexpr uint32_t kFmvW = 1280, kFmvH = 720;
+constexpr size_t kFmvY = size_t(kFmvW) * kFmvH;
+constexpr size_t kFmvC = kFmvY / 4;
+constexpr size_t kFmvFrame = kFmvY + 2 * kFmvC;
+
+void FmvInit() {
+  FmvState& s = fmv_state();
+  s.inited = true;
+  const char* dir = std::getenv("REX_FMV_NATIVE");
+  if (!dir || !*dir) return;
+  // The clip order table below hardcodes Forza 4's splash sequence. On any
+  // other title a leaked REX_FMV_NATIVE would overwrite that game's own
+  // 720p video planes with Forza frames and stall the render thread on the
+  // detile walk, so refuse to arm unless this actually is Forza 4.
+  constexpr uint32_t kForza4TitleId = 0x4D530910;
+  const system::KernelState* kernel_state = system::kernel_state();
+  if (!kernel_state || kernel_state->title_id() != kForza4TitleId) {
+    REXGPU_WARN(
+        "[FMV] REX_FMV_NATIVE is set but this title ({:08X}) is not Forza 4; "
+        "native video substitution disabled",
+        kernel_state ? kernel_state->title_id() : 0);
+    return;
+  }
+  std::error_code ec;
+  for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+    if (ec || e.path().extension() != ".yuv") continue;
+    int fd = ::open(e.path().c_str(), O_RDONLY);
+    if (fd < 0) continue;
+    size_t sz = size_t(e.file_size(ec));
+    void* m = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (m == MAP_FAILED || sz < kFmvFrame) continue;
+    FmvClip c;
+    c.name = e.path().stem().string();
+    c.data = static_cast<const uint8_t*>(m);
+    c.bytes = sz;
+    c.frames = uint32_t(sz / kFmvFrame);
+    REXGPU_WARN("[FMV] reference clip '{}' {} frames", c.name, c.frames);
+    s.clips.push_back(c);
+  }
+  s.enabled = !s.clips.empty();
+  if (s.enabled) REXGPU_WARN("[FMV] native substitution active, {} clip(s)", s.clips.size());
+}
+
+}  // namespace
+
+void TextureCache::SubstituteNativeFmvPlane(const TextureKey& key) {
+  // [NATIVE FMV] Swap the guest decoder's corrupt plane for a host-decoded one.
+  {
+    FmvState& fs = fmv_state();
+    std::lock_guard<std::mutex> lk(fs.m);
+    if (!fs.inited) FmvInit();
+    const uint32_t tw = key.GetWidth(), th = key.GetHeight();
+    const bool is_luma = tw == kFmvW && th == kFmvH;
+    const bool is_chroma = tw == kFmvW / 2 && th == kFmvH / 2;
+    if (fs.enabled && key.format == xenos::TextureFormat::k_8 && (is_luma || is_chroma)) {
+      const FormatInfo* fi = FormatInfo::Get(key.format);
+      const uint32_t pitch_blocks = (key.pitch << 5) / fi->block_width;
+      uint8_t* gbase =
+          shared_memory_.memory().TranslatePhysical<uint8_t*>(key.base_page << 12);
+      if (gbase && pitch_blocks) {
+        const size_t plane = size_t(tw) * th;
+        std::vector<uint8_t> cur(plane);
+        auto walk = [&](bool write) {
+          for (uint32_t by = 0; by < th; ++by)
+            for (uint32_t bx = 0; bx < tw; ++bx) {
+              size_t off = key.tiled
+                               ? size_t(texture_util::GetTiledOffset2D(int32_t(bx), int32_t(by),
+                                                                       pitch_blocks, 0))
+                               : size_t(by) * pitch_blocks + bx;
+              if (write) gbase[off] = cur[size_t(by) * tw + bx];
+              else cur[size_t(by) * tw + bx] = gbase[off];
+            }
+        };
+        walk(false);
+        // The decoder alternates between two Y/U/V triplets per clip; each
+        // luma upload is a new frame. Damaged pixels cannot identify it.
+        const uint8_t* chosen = nullptr;
+        const uint32_t address = key.base_page << 12;
+        static uint32_t chroma_slot = 0;
+        static uint32_t primary = 0, secondary = 0;
+        static int sequence = 0;
+        static const char* const order[] = {
+            "t10_ms_combined", "dolby_corona_intro", "forza_intro", "IE_Welcome_Video"};
+        if (is_luma) {
+          auto clip_index = [&](const char* name) {
+            for (size_t i = 0; i < fs.clips.size(); ++i)
+              if (fs.clips[i].name == name) return int(i);
+            return -1;
+          };
+          if (!primary) {
+            primary = address;
+            fs.cur_clip = clip_index(order[sequence]);
+            fs.cur_frame = -1;
+          } else if (address != primary && address != secondary) {
+            if (!secondary) {
+              secondary = address;
+            } else {
+              sequence = std::min(sequence + 1, int(std::size(order)) - 1);
+              primary = address;
+              secondary = 0;
+              fs.cur_clip = clip_index(order[sequence]);
+              fs.cur_frame = -1;
+              REXGPU_WARN("[FMV] switched to clip '{}'", order[sequence]);
+            }
+          }
+          // The two luma buffers alternate on successive decoded frames.
+          ++fs.cur_frame;
+          if (fs.cur_clip >= 0 &&
+              fs.cur_frame >= int(fs.clips[fs.cur_clip].frames)) {
+            if (sequence + 1 < int(std::size(order))) {
+              ++sequence;
+              primary = address;
+              secondary = 0;
+              fs.cur_clip = clip_index(order[sequence]);
+              fs.cur_frame = 0;
+              REXGPU_WARN("[FMV] completed clip, switched to '{}'", order[sequence]);
+            } else {
+              fs.cur_frame = int(fs.clips[fs.cur_clip].frames) - 1;
+            }
+          }
+          if (fs.cur_clip >= 0 && fs.cur_frame >= 0 &&
+              fs.cur_frame < int(fs.clips[fs.cur_clip].frames))
+            chosen = fs.clips[fs.cur_clip].data + size_t(fs.cur_frame) * kFmvFrame;
+          chroma_slot = 0;
+        } else if (fs.cur_clip >= 0 && fs.cur_frame >= 0 &&
+                   fs.cur_frame < int(fs.clips[fs.cur_clip].frames)) {
+          const uint8_t* frame = fs.clips[fs.cur_clip].data + size_t(fs.cur_frame) * kFmvFrame;
+          chosen = frame + kFmvY + size_t(chroma_slot++ & 1) * kFmvC;
+        }
+        if (chosen) {
+          std::memcpy(cur.data(), chosen, plane);
+          walk(true);
+          // The page was already resident on prior frames. A direct CPU write
+          // does not hit the memory protection callback, so invalidate it now
+          // before RequestRanges copies the planes to the GPU.
+          const uint32_t height_storage = key.tiled ? rex::round_up(th, 32u) : th;
+          shared_memory_.MemoryInvalidationCallback(address,
+                                                    pitch_blocks * height_storage, true);
+          // Verify the write actually landed in guest memory.
+          static bool verified = false;
+          if (!verified) {
+            verified = true;
+            std::vector<uint8_t> back(plane);
+            std::swap(back, cur);
+            walk(false);
+            REXGPU_WARN("[FMV] write-back check: {} of {} bytes match",
+                        std::equal(cur.begin(), cur.end(), back.begin()) ? plane : 0, plane);
+            cur = back;
+          }
+          if ((++fs.subs % 240) == 0)
+            REXGPU_WARN("[FMV] substituted {} planes, now clip '{}' frame {}", fs.subs,
+                        fs.clips[fs.cur_clip].name, fs.cur_frame);
+        }
+      }
+    }
+  }
+}
+
 void TextureCache::DumpTextureToDisk(const TextureKey& key, const std::string& dir) {
   const FormatInfo* format_info = FormatInfo::Get(key.format);
   uint32_t bytes_per_block = format_info->bytes_per_block();
@@ -737,6 +935,11 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {
       pending_shared_memory_range_pairs.emplace_back(pending_range.start, pending_range.length);
     }
+    // [NATIVE FMV] Substitute host-decoded planes BEFORE the upload - the GPU
+    // reads the shared-memory copy made by RequestRanges, so writing to guest
+    // memory after it has no effect.
+    for (const PendingTextureLoad& pending_load : pending_texture_loads)
+      if (pending_load.texture) SubstituteNativeFmvPlane(pending_load.texture->key());
     batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
         pending_shared_memory_range_pairs.data(), pending_shared_memory_range_pairs.size());
   }

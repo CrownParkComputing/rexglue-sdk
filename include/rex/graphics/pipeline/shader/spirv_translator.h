@@ -70,6 +70,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
       Shader::HostVertexShaderType host_vertex_shader_type : Shader::kHostVertexShaderTypeBitCount;
       // For domain host vertex shader types only, xenos::TessellationMode.
       uint32_t tessellation_mode : 2;
+      // Write one extra clip distance that removes any primitive containing a
+      // vertex whose position is NaN. The Xbox 360 (and Direct3D) discard such
+      // primitives, and titles rely on it to hide geometry (PGR4 stores NaN
+      // translations for hidden crowd instances); Vulkan leaves it undefined
+      // and NVIDIA rasterizes them as huge triangles.
+      uint32_t nan_kill : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -88,6 +94,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
       uint32_t param_gen_point : 1;
       // For host render targets - depth / stencil output mode.
       DepthStencilMode depth_stencil_mode : 3;
+      // Read gl_ClipDistance (clip_distance_count entries, matching the vertex
+      // shader) and discard fragments whose last entry is NaN - the vertex
+      // shader's NaN vertex kill (Modification::vertex.nan_kill) poisons every
+      // fragment of a primitive that has a NaN-position vertex.
+      uint32_t nan_kill : 1;
+      uint32_t clip_distance_count : 3;
     } pixel;
     uint64_t value = 0;
 
@@ -96,7 +108,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     }
 
     uint32_t GetVertexClipDistanceCount() const {
-      return vertex.user_clip_plane_cull ? 0 : vertex.user_clip_plane_count;
+      return (vertex.user_clip_plane_cull ? 0 : vertex.user_clip_plane_count) + vertex.nan_kill;
     }
     uint32_t GetVertexCullDistanceCount() const {
       return (vertex.user_clip_plane_cull ? vertex.user_clip_plane_count : 0) +
@@ -909,6 +921,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id input_fragment_coordinates_;
   // PS, only when needed - bool.
   spv::Id input_front_facing_;
+  spv::Id input_clip_distance_;
   // PS, only when needed - int.
   spv::Id input_sample_id_;
   // PS, only when needed - int[1].

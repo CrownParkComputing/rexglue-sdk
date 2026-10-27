@@ -266,7 +266,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout resolve_copy_pipeline_layout_ = VK_NULL_HANDLE;
   static const ResolveCopyShaderCode
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
-  std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
+  // [0] - guest-resolution, [1] - draw_resolution_scale. Both exist under
+  // selective per-class scaling; otherwise only the variant matching the
+  // global scale is created.
+  std::array<std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>, 2>
       resolve_copy_pipelines_{};
 
   // On the fragment shader interlock path, the render pass key is used purely
@@ -530,6 +533,15 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // as it doesn't matter in this case.
       xenos::MsaaSamples host_depth_source_msaa_samples : xenos::kMsaaSamplesBits;
       uint32_t source_resource_format : xenos::kRenderTargetFormatBits;
+      // Whether each axis is at draw_resolution_scale rather than guest
+      // resolution, for the destination and the source respectively. When they
+      // differ, the transfer resamples the source into the destination's scale
+      // (same aspect and format only - other cross-class transfers are still
+      // rejected when invocations are built).
+      uint32_t resolution_scaled_x : 1;
+      uint32_t resolution_scaled_y : 1;
+      uint32_t source_resolution_scaled_x : 1;
+      uint32_t source_resolution_scaled_y : 1;
 
       // Last bits because this affects the pipeline layout - after sorting,
       // only change it as fewer times as possible. Depth buffers have an
@@ -641,6 +653,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     struct {
       xenos::MsaaSamples msaa_samples : 2;
       uint32_t resource_format : 4;
+      // Whether the source render target is at draw_resolution_scale rather
+      // than guest resolution (per target class under selective scaling).
+      uint32_t resolution_scaled_x : 1;
+      uint32_t resolution_scaled_y : 1;
       // Last bit because this affects the pipeline - after sorting, only change
       // it at most once. Depth buffers have an additional stencil SRV.
       uint32_t is_depth : 1;

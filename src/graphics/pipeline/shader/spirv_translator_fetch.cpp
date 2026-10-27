@@ -23,10 +23,17 @@
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/math.h>
 
+#if defined(REX_SHADER_TRANSLATOR_STANDALONE)
+// rex::shader-translator: the storage lives in standalone_flags.cpp and is
+// registered under a namespaced cvar name so the copy inside a port cannot
+// collide with the GPU plugin's registration of the same name.
+REXCVAR_DECLARE(bool, texture_exp_bias_ignore);
+#else
 REXCVAR_DEFINE_BOOL(texture_exp_bias_ignore, false, "GPU/Shader",
                     "Ignore the texture fetch constant result exponent bias (exp_adjust). "
                     "Per-title workaround for HDR titles whose bloom chain blows out when the "
                     "bias is honored. Changing this requires clearing the title's shader cache.");
+#endif
 
 namespace rex::graphics {
 

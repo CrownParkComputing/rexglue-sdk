@@ -164,6 +164,12 @@ class RenderTargetCache {
     return draw_resolution_scale_x() > 1 || draw_resolution_scale_y() > 1;
   }
 
+  // Scale of the draw currently being prepared or issued. Same as
+  // draw_resolution_scale_*() outside the host-RT path or when selective
+  // scaling is off.
+  uint32_t current_draw_scale_x() const { return current_draw_scale_x_; }
+  uint32_t current_draw_scale_y() const { return current_draw_scale_y_; }
+
   // Virtual (both the common code and the implementation may do something
   // here), don't call from destructors (does work not needed for shutdown
   // also).
@@ -184,9 +190,11 @@ class RenderTargetCache {
   RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
       : register_file_(register_file),
-        draw_extent_estimator_(register_file, memory),
         draw_resolution_scale_x_(draw_resolution_scale_x),
-        draw_resolution_scale_y_(draw_resolution_scale_y) {
+        draw_resolution_scale_y_(draw_resolution_scale_y),
+        current_draw_scale_x_(draw_resolution_scale_x),
+        current_draw_scale_y_(draw_resolution_scale_y),
+        draw_extent_estimator_(register_file, memory) {
     assert_not_zero(draw_resolution_scale_x);
     assert_not_zero(draw_resolution_scale_y);
   }
@@ -283,6 +291,21 @@ class RenderTargetCache {
                          uint32_t(1) << uint32_t(msaa_samples), GetFormatName());
     }
   };
+
+  // Selective per-target-class scaling ("the census of passes"). The scene's
+  // targets (guest pitch 1280) get the configured draw_resolution_scale;
+  // shadow (640-pitch 4x), reflection (520-pitch 4x) and post-chain
+  // (640/320-pitch 1x) buffers stay at guest resolution unless their cvar
+  // opts them in, since they only ever feed 1x effects anyway. The class is
+  // a pure function of pitch + MSAA - shared by every target a draw binds -
+  // so a draw's colour and depth never get different scales, and a given
+  // RenderTargetKey always maps to the same scale. Only enabled on the
+  // host-render-target path; elsewhere everything stays at the configured
+  // scale exactly as before.
+  enum class ScaleClass : uint8_t { kBase, kScene, kShadow, kReflection, kPost };
+  ScaleClass ClassOf(RenderTargetKey key) const;
+  uint32_t ScaleForKeyX(RenderTargetKey key) const;
+  uint32_t ScaleForKeyY(RenderTargetKey key) const;
 
   class RenderTarget {
    public:
@@ -472,7 +495,8 @@ class RenderTargetCache {
   // render pass (on Vulkan, the actually used height is specified in
   // VkFramebuffer).
   uint32_t GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
-                                 xenos::MsaaSamples msaa_samples) const;
+                                 xenos::MsaaSamples msaa_samples,
+                                 uint32_t resolution_scale_y) const;
 
   virtual RenderTarget* CreateRenderTarget(RenderTargetKey key) = 0;
 
@@ -498,19 +522,21 @@ class RenderTargetCache {
   }
 
   HostDepthStoreRenderTargetConstant GetHostDepthStoreRenderTargetConstant(
-      uint32_t pitch_tiles, bool msaa_2x_supported) const {
+      uint32_t pitch_tiles, uint32_t resolution_scale_x, uint32_t resolution_scale_y,
+      bool msaa_2x_supported) const {
     HostDepthStoreRenderTargetConstant constant;
     constant.pitch_tiles = pitch_tiles;
     // 3 bits for each.
-    assert_true(draw_resolution_scale_x() <= 7);
-    assert_true(draw_resolution_scale_y() <= 7);
-    constant.resolution_scale_x = draw_resolution_scale_x();
-    constant.resolution_scale_y = draw_resolution_scale_y();
+    assert_true(resolution_scale_x <= 7);
+    assert_true(resolution_scale_y <= 7);
+    constant.resolution_scale_x = resolution_scale_x;
+    constant.resolution_scale_y = resolution_scale_y;
     constant.msaa_2x_supported = uint32_t(msaa_2x_supported);
     return constant;
   }
   void GetHostDepthStoreRectangleInfo(const Transfer::Rectangle& transfer_rectangle,
                                       xenos::MsaaSamples msaa_samples,
+                                      uint32_t resolution_scale_x, uint32_t resolution_scale_y,
                                       HostDepthStoreRectangleConstant& rectangle_constant_out,
                                       uint32_t& group_count_x_out,
                                       uint32_t& group_count_y_out) const;
@@ -548,10 +574,22 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
+ protected:
+  // Cached selective-scaling cvar values (init-only: existing targets keep
+  // the scale they were created with anyway).
+  bool selective_rt_scale_ = false;
+  bool rt_scale_shadow_ = false;
+  bool rt_scale_reflection_ = false;
+  bool rt_scale_post_ = false;
+
  private:
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  // Scale of the draw whose targets were bound by the latest Update() -
+  // the configured scale on non-host paths / when selective scaling is off.
+  uint32_t current_draw_scale_x_;
+  uint32_t current_draw_scale_y_;
 
   DrawExtentEstimator draw_extent_estimator_;
 

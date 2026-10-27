@@ -13,6 +13,8 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <unordered_set>
 #include <utility>
 
 #include <rex/assert.h>
@@ -1215,6 +1217,39 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                                bool load_mips) {
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
+
+  // Diagnostic: dump guest texture bytes through the shared untile path (the
+  // pipeline cache's dump trigger never fires on the Vulkan load path).
+  // Answers whether an FMV colour fault is in the title's decoded data or in
+  // our reading of it. Gated on dump_textures. Plane-sized k_8 textures (the
+  // FMV's Y/U/V planes) re-upload every frame, so they are dumped on every
+  // load with a sequence number instead of once.
+  if (!REXCVAR_GET(dump_textures).empty()) {
+    static std::unordered_set<uint64_t> dumped_video_keys;
+    static uint32_t video_dump_seq = 0;
+    const uint64_t video_key_id =
+        (uint64_t(texture_key.base_page) << 32) |
+        (uint64_t(texture_key.pitch) << 8) | uint64_t(texture_key.format);
+    const bool is_video_plane =
+        texture_key.format == xenos::TextureFormat::k_8 &&
+        ((texture_key.GetWidth() == 1280 && texture_key.GetHeight() == 720) ||
+         (texture_key.GetWidth() == 640 && texture_key.GetHeight() == 360));
+    if (is_video_plane || dumped_video_keys.insert(video_key_id).second) {
+      DumpTextureToDisk(texture_key, REXCVAR_GET(dump_textures));
+      if (is_video_plane) {
+        // DumpTextureToDisk names the file <addr>_<WxH>_<format>.bin; tag it
+        // with a sequence number so every upload is kept.
+        const FormatInfo* fi = FormatInfo::Get(texture_key.format);
+        const std::string stem = fmt::format(
+            "{}/{:08X}_{}x{}_{}", REXCVAR_GET(dump_textures),
+            texture_key.base_page << 12, texture_key.GetWidth(),
+            texture_key.GetHeight(), fi->name);
+        std::filesystem::rename(
+            stem + ".bin",
+            fmt::format("{}_seq{:05d}.bin", stem, video_dump_seq++));
+      }
+    }
+  }
 
   // Get the pipeline.
   const HostFormatPair& host_format_pair = GetHostFormatPair(texture_key);

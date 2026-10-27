@@ -170,10 +170,26 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+        int32_t last_fps_cap = -1;
+        uint64_t capped_interval_ticks = vsync_interval_ticks;
         while (vsync_worker_running_) {
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
-          uint64_t interval_ticks =
-              REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
+          // The cap is re-read every pass: the pause menu's FPS limiter and
+          // the L3/R3 stick-click controls change vsync_fps_cap at runtime,
+          // and a cap read only at thread start silently ignores them.
+          uint64_t interval_ticks = no_vsync_interval_ticks;
+          if (REXCVAR_GET(vsync)) {
+            const int32_t fps_cap = REXCVAR_QUERY(int32_t, vsync_fps_cap);
+            if (fps_cap != last_fps_cap) {
+              last_fps_cap = fps_cap;
+              capped_interval_ticks =
+                  fps_cap > 0
+                      ? std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) /
+                                                       double(fps_cap)))
+                      : vsync_interval_ticks;
+            }
+            interval_ticks = capped_interval_ticks;
+          }
           while (current_time - last_frame_time >= interval_ticks) {
             MarkVblank();
             last_frame_time += interval_ticks;
@@ -337,6 +353,10 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   uint64_t args[] = {source, interrupt_callback_data_};
   function_dispatcher_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_, args,
                                          rex::countof(args));
+}
+
+uint32_t GraphicsSystem::SwapsProcessed() const {
+  return command_processor_ ? command_processor_->swaps_processed() : 0;
 }
 
 void GraphicsSystem::MarkVblank() {

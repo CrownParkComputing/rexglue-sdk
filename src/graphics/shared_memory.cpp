@@ -28,6 +28,37 @@
 
 namespace rex::graphics {
 
+REXCVAR_DEFINE_STRING(gpu_log_shmem_range, "", "GPU",
+                      "Diagnostic: physical range (hex start-end) whose shared-memory events "
+                      "(request, upload, made valid, watch armed, invalidated) are logged, "
+                      "rate limited.");
+
+std::atomic<int64_t> g_shmem_force_log_until_ns{0};
+
+bool ShmemRangeLogHit(uint32_t start, uint32_t length, const char* what) {
+  const std::string& spec = REXCVAR_GET(gpu_log_shmem_range);
+  if (spec.empty()) return false;
+  const int64_t force_until = g_shmem_force_log_until_ns.load(std::memory_order_relaxed);
+  const bool forced =
+      force_until &&
+      std::chrono::steady_clock::now().time_since_epoch().count() < force_until;
+  static uint32_t lo = 0, hi = 0;
+  static bool parsed = false;
+  if (!parsed) {
+    parsed = true;
+    const char* dash = std::strchr(spec.c_str(), '-');
+    lo = uint32_t(std::strtoul(spec.c_str(), nullptr, 16));
+    hi = dash ? uint32_t(std::strtoul(dash + 1, nullptr, 16)) : lo + 0x1000;
+  }
+  if (start >= hi || start + length <= lo) return false;
+  static std::atomic<uint32_t> logged{0};
+  uint32_t n = logged.fetch_add(1);
+  if (forced || n < 400 || (n % 1000) == 0) {
+    REXLOG_WARN("[SHMEM-RANGE] {} 0x{:08X}+0x{:X} (event {})", what, start, length, n);
+  }
+  return true;
+}
+
 REXCVAR_DEFINE_UINT32(
     gpu_hot_page_frames, 0, "GPU",
     "Treat a 256 KB shared-memory block dirtied this many frames running as permanently dirty: "
@@ -313,6 +344,7 @@ bool SharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
 
 bool SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu,
                                   bool arm_watches) {
+  ShmemRangeLogHit(start, length, arm_watches ? "make-valid+arm" : "make-valid");
   if (length == 0 || start >= kBufferSize) {
     return false;
   }
@@ -383,6 +415,7 @@ bool SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
 }
 
 void SharedMemory::ArmWriteWatches(uint32_t start, uint32_t length) {
+  ShmemRangeLogHit(start, length, "arm-watches");
   const uint32_t valid_page_first = start >> page_size_log2_;
   const uint32_t valid_page_last = (start + length - 1) >> page_size_log2_;
   NoteBlocksUploaded(valid_page_first, valid_page_last);
@@ -451,6 +484,10 @@ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
 
 bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count,
                                  bool ranges_sorted_and_merged) {
+  for (size_t ri = 0; ri < count; ++ri) {
+    ShmemRangeLogHit(ranges[ri].first, ranges[ri].second, "request");
+  }
+
   if (ranges == nullptr || !count) {
     return true;
   }
@@ -947,6 +984,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallbackThunk(
 
 std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
+  ShmemRangeLogHit(physical_address_start, length, exact_range ? "invalidate-exact" : "invalidate");
   if (length == 0 || physical_address_start >= kBufferSize) {
     return std::make_pair(uint32_t(0), UINT32_MAX);
   }

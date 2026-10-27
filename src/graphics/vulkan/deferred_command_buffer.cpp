@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include <string>
 #include <rex/assert.h>
 #include <rex/dbg.h>
 #include <rex/graphics/flags.h>
@@ -30,6 +31,51 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
 
 void DeferredCommandBuffer::Reset() {
   command_stream_.clear();
+}
+
+std::string DeferredCommandBuffer::DescribeCommands() const {
+  static const char* const kNames[] = {
+      "BeginRenderPass", "BeginQuery",   "BindDescriptorSets", "BindIndexBuffer",
+      "BindPipeline",    "BindVertexBuffers", "ClearAttachments", "ClearColorImage",
+      "CopyBuffer",      "CopyBufferToImage", "CopyQueryPoolResults", "Dispatch",
+      "Draw",            "DrawIndexed",   "EndQuery",           "EndRenderPass",
+      "BeginRendering",  "EndRendering",  "PipelineBarrier",    "PushConstants",
+      "ResetQueryPool",  "WriteTimestamp", "SetBlendConstants", "SetDepthBias",
+      "SetScissor",      "SetStencilCompareMask", "SetStencilReference",
+      "SetStencilWriteMask", "SetViewport"};
+  uint32_t counts[sizeof(kNames) / sizeof(kNames[0])] = {};
+  const uintmax_t* stream = command_stream_.data();
+  size_t stream_remaining = command_stream_.size();
+  std::string first;
+  uint32_t listed = 0;
+  while (stream_remaining >= kCommandHeaderSizeElements) {
+    const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
+    const size_t index = size_t(header.command);
+    if (index < sizeof(kNames) / sizeof(kNames[0])) {
+      ++counts[index];
+      if (listed < 8) {
+        first += kNames[index];
+        first += ' ';
+        ++listed;
+      }
+    }
+    const size_t advance = kCommandHeaderSizeElements + header.arguments_size_elements;
+    if (advance > stream_remaining) {
+      break;
+    }
+    stream += advance;
+    stream_remaining -= advance;
+  }
+  std::string result = "first: " + first + "| counts:";
+  for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
+    if (counts[i]) {
+      result += ' ';
+      result += kNames[i];
+      result += '=';
+      result += std::to_string(counts[i]);
+    }
+  }
+  return result;
 }
 
 void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {

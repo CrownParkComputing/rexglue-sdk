@@ -29,6 +29,7 @@
 #include <rex/assert.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
+#include <rex/hash.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/graphics/util/draw.h>
@@ -42,6 +43,7 @@
 #include <rex/graphics/vulkan/render_target_cache.h>
 #include <rex/graphics/vulkan/shader.h>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 #include <filesystem>
 #include <fstream>
@@ -126,6 +128,15 @@ REXCVAR_DEFINE_BOOL(gpu_skip_nonfinite_draws, false, "GPU",
                     "Skip draws whose float3 position stream is mostly non-finite (diagnostic).");
 REXCVAR_DEFINE_UINT32(gpu_nonfinite_threshold_pct, 25, "GPU",
                       "Percentage of sampled vertices that must be non-finite to drop a draw.");
+REXCVAR_DEFINE_BOOL(gpu_skip_huge_draws, false, "GPU",
+                    "Skip draws whose position-like float or half-float vertex streams hold "
+                    "huge or non-finite values in guest memory (diagnostic). Unlike "
+                    "gpu_skip_nonfinite_draws this covers every float/half stream at any offset, "
+                    "decodes the fetch constant's endianness, and logs the per-frame draw index "
+                    "of each offender.");
+REXCVAR_DEFINE_UINT32(gpu_huge_draw_threshold, 100000, "GPU",
+                      "Absolute component magnitude past which a sampled vertex is considered "
+                      "huge for gpu_skip_huge_draws.");
 REXCVAR_DEFINE_UINT32(gpu_skip_sweep_chunk, 0, "GPU",
                       "Diagnostic: if non-zero, arm an automatic draw-range bisection sweep -- "
                       "swap N suppresses draws [base + k*chunk, base + k*chunk + chunk - 1] where "
@@ -135,6 +146,16 @@ REXCVAR_DEFINE_UINT32(gpu_skip_sweep_base, 0, "GPU",
                       "First draw index of the gpu_skip_sweep_chunk sweep.");
 REXCVAR_DEFINE_UINT32(gpu_skip_sweep_start, 0, "GPU",
                       "Swap index at which to arm the sweep (0 = arm at the first swap).");
+REXCVAR_DEFINE_UINT32(gpu_skip_vs_sweep_frames, 0, "GPU",
+                      "Diagnostic: once armed by gpu_draw_trace_trigger_file, suppress every draw "
+                      "using vertex shader #k (in first-seen order, logged as [VSSWEEP]) for this "
+                      "many swaps, then move to #k+1. Attributes a visual glitch to a vertex shader "
+                      "in one run. 0 disables.");
+REXCVAR_DEFINE_UINT32(gpu_skip_vs_sweep_start, 0, "GPU",
+                      "First vertex shader index (first-seen order) for gpu_skip_vs_sweep_frames.");
+REXCVAR_DEFINE_STRING(gpu_skip_vs, "", "GPU",
+                      "Diagnostic: comma-separated 16-hex-digit vertex shader ucode hashes whose "
+                      "draws are suppressed.");
 REXCVAR_DEFINE_STRING(gpu_skip_draws, "", "GPU",
                       "Diagnostic: suppress an inclusive per-frame draw range \"first:last\" (or "
                       "a single index). Bisects a visible bad material without touching guest "
@@ -151,12 +172,58 @@ static uint32_t g_frame_draw_index = 0;
 // frame dump written for the same swap.
 static uint32_t g_skip_sweep_start_swap = 0;
 static bool g_skip_sweep_armed = false;
+static bool g_vs_sweep_armed = false;
+static uint32_t g_vs_sweep_start_swap = 0;
+static uint32_t g_vs_sweep_last_index = UINT32_MAX;
+static std::vector<uint64_t> g_vs_sweep_order;
 static uint32_t g_nonfinite_draws_skipped = 0;
 static std::unordered_set<uint64_t> g_corrupt_vb_logged;
 static std::unordered_set<uint64_t> g_memexport_logged;
 static uint32_t g_draw_trace_swap_count = 0;
 static uint32_t g_draw_trace_draw_index = 0;
 static uint32_t g_draw_trace_forced_start = 0;
+REXCVAR_DECLARE(std::string, gpu_check_staging_range);
+namespace rex::graphics::vulkan {
+void SetStagingCheckRangeForDiagnostics(uint32_t lo, uint32_t hi);
+}
+namespace {
+// Uniform-pool integrity diagnostic (gpu_check_instanced_vs): the constant
+// blocks written for the checked shader's draws are hashed when written and
+// re-hashed when the frame they belong to is observed complete, before the
+// pool page can be handed out again.
+struct UniformCheck {
+  const uint8_t* mapping;
+  size_t size;
+  uint64_t hash;
+  uint64_t frame;
+  uint32_t kind;  // 1 = VS float constants, 2 = fetch constants
+};
+std::vector<UniformCheck> g_uniform_checks;
+uint64_t g_uniform_checked = 0, g_uniform_mismatches = 0;
+bool g_uniform_check_armed = false;  // the checked shader is the current VS
+}  // namespace
+
+REXCVAR_DEFINE_UINT32(gpu_check_gpu_readback_every, 0, "GPU",
+                      "Diagnostic (with gpu_check_instanced_vs): every Nth checked draw per swap, "
+                      "synchronously read the draw's largest vertex buffer back from the GPU "
+                      "copy of shared memory and compare it with guest memory. Slow.");
+REXCVAR_DEFINE_STRING(gpu_check_instanced_dump, "", "GPU",
+                      "Diagnostic (with gpu_check_instanced_vs): binary file receiving one "
+                      "record per checked draw: u32 swap, u32 draw index, u32 index count, u32 "
+                      "index base, u32 largest vf address, u32 largest vf size, u32 mesh address, u32 "
+                      "mesh size, c52..c55 and c4..c7 as 32 big-endian dwords, then 10 dwords of "
+                      "host draw state (viewport, scissor, system-constant hash, pipeline). "
+                      "Mesh, index and per-swap palette bytes go to <file>.d/.");
+REXCVAR_DEFINE_STRING(gpu_check_instanced_vs, "", "GPU",
+                      "Diagnostic: hex ucode hash of a vertex shader that derives an instance "
+                      "number from the vertex index (instance = trunc((index + c255.y) / c55.y), "
+                      "a0 = instance * c255.x, per-instance constants c[52+a0..55+a0]). At record "
+                      "time every draw with that shader has c52..c55/c255 checked for sanity and "
+                      "its 16-bit guest index buffer scanned for an index >= c55.y, which would "
+                      "make the shader read the next constant block. Violations are logged.");
+REXCVAR_DEFINE_STRING(gpu_draw_trace_vs, "", "GPU",
+                      "Restrict the per-draw trace (and its dumps) to draws using this vertex "
+                      "shader ucode hash (16 hex digits). Empty traces every draw.");
 REXCVAR_DEFINE_STRING(gpu_draw_trace_dump_dir, "", "GPU",
                       "If set, traced draws also write their vertex/index buffers here");
 
@@ -2330,6 +2397,10 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
     return;
   }
   uint32_t end_index = start_index + num_registers - 1;
+  if (!REXCVAR_GET(gpu_bulk_register_writes)) {
+    CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+    return;
+  }
 
   auto range_has_any_constant_usage = [](const uint64_t* usage_map, uint32_t first_constant,
                                          uint32_t last_constant) -> bool {
@@ -2412,7 +2483,14 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
   // registers 0x1922-0x1925) nor the extended store past kRegisterCount behave
   // identically whether written one by one or copied in bulk - per-register
   // processing only pays the virtual dispatch and hook checks for nothing.
-  if (end_index < RegisterFile::kRegisterCount &&
+  // A range that straddles a constant region boundary (float, bool/loop, fetch)
+  // did not match the dedicated paths above, and copying it here would skip
+  // their dirty tracking: fall through to per-register writes for those.
+  const bool overlaps_constants =
+      !(end_index < XE_GPU_REG_SHADER_CONSTANT_000_X || start_index > XE_GPU_REG_SHADER_CONSTANT_511_W) ||
+      !(end_index < XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 || start_index > XE_GPU_REG_SHADER_CONSTANT_LOOP_31) ||
+      !(end_index < XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 || start_index > XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5);
+  if (!overlaps_constants && end_index < RegisterFile::kRegisterCount &&
       (end_index < XE_GPU_REG_SCRATCH_REG0 || start_index > XE_GPU_REG_SCRATCH_REG7) &&
       (end_index < XE_GPU_REG_COHER_STATUS_HOST || start_index > XE_GPU_REG_COHER_STATUS_HOST) &&
       (end_index < XE_GPU_REG_DC_LUT_RW_INDEX || start_index > XE_GPU_REG_DC_LUT_30_COLOR)) {
@@ -2552,6 +2630,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
       std::filesystem::remove(trig);
       g_draw_trace_forced_start = g_draw_trace_swap_count;
       REXGPU_WARN("[DRAWTRACE] triggered at swap {}", g_draw_trace_swap_count);
+      if (REXCVAR_GET(gpu_skip_vs_sweep_frames) && !g_vs_sweep_armed) {
+        g_vs_sweep_armed = true;
+        g_vs_sweep_start_swap = g_draw_trace_swap_count;
+        REXGPU_WARN("[VSSWEEP] armed by trigger at swap {} ({} swaps per vertex shader, {} seen)",
+                    g_vs_sweep_start_swap, REXCVAR_GET(gpu_skip_vs_sweep_frames),
+                    g_vs_sweep_order.size());
+      }
       if (REXCVAR_GET(gpu_skip_sweep_chunk) && !g_skip_sweep_armed) {
         // The same trigger file arms the bisection sweep, so a sweep can be started
         // at a chosen moment (a static scene) without knowing the swap index up front.
@@ -4017,6 +4102,94 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // makes, and it is the one a "this element is the wrong colour" bug needs:
   // the texture tells you what was drawn, the shader tells you how. Logged once
   // per distinct (pixel shader, texture set) so a whole run stays greppable.
+  // xn-diag (uncommitted, env-gated, default off): REX_DRAW_LIMIT=<n> drops
+  // every non-resolve draw after the first n in each swap, so the presented
+  // frame shows the state after exactly n draws. Sweeping n gives the same
+  // per-draw pixel sequence that XN_DEBUG_PROBE_PX gives on the native side,
+  // using the frame-dump path that already works rather than a mid-frame
+  // readback. Resolve (kCopy) draws are never skipped or the frame never
+  // reaches the front buffer.
+  {
+    static const char* draw_limit_env = getenv("REX_DRAW_LIMIT");
+    if (draw_limit_env && draw_limit_env[0]) {
+      const bool is_copy =
+          regs.Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy;
+      if (!is_copy) {
+        static uint32_t limit_swap = ~0u;
+        static uint32_t limit_index = 0;
+        if (limit_swap != g_draw_trace_swap_count) {
+          limit_swap = g_draw_trace_swap_count;
+          limit_index = 0;
+        }
+        const uint32_t n = uint32_t(atoi(draw_limit_env));
+        const uint32_t step = limit_index++;
+        // The guest primitive type and vertex count of every admitted draw, so
+        // the two runtimes' sequences can be aligned on those rather than on
+        // the step index, which does not correspond.
+        if (step < 64) {
+          if (FILE* lf = fopen(getenv("REX_DRAW_LIMIT_LOG") ? getenv("REX_DRAW_LIMIT_LOG")
+                                                            : "/dev/null",
+                               "a")) {
+            auto si = regs.Get<reg::RB_SURFACE_INFO>();
+            auto ci = regs.Get<reg::RB_COLOR_INFO>();
+            auto vte_d = regs.Get<reg::PA_CL_VTE_CNTL>();
+            char vpbuf[320];
+            snprintf(vpbuf, sizeof(vpbuf),
+                     "VTE=%#x(xs=%u xo=%u ys=%u yo=%u zs=%u zo=%u) vport=(%g,%g %g,%g %g,%g) "
+                     "win_scissor_tl=%#x br=%#x win_off=%#x",
+                     regs[XE_GPU_REG_PA_CL_VTE_CNTL], uint32_t(vte_d.vport_x_scale_ena),
+                     uint32_t(vte_d.vport_x_offset_ena), uint32_t(vte_d.vport_y_scale_ena),
+                     uint32_t(vte_d.vport_y_offset_ena), uint32_t(vte_d.vport_z_scale_ena),
+                     uint32_t(vte_d.vport_z_offset_ena),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE),
+                     regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET),
+                     regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
+                     regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+                     regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
+            auto bcw = regs.Get<reg::RB_BLENDCONTROL>(XE_GPU_REG_RB_BLENDCONTROL0);
+            char texbuf[256];
+            snprintf(texbuf, sizeof(texbuf), " tex=none");
+            for (uint32_t t = 0; t < 32; ++t) {
+              xenos::xe_gpu_texture_fetch_t tf = regs.GetTextureFetch(t);
+              if (tf.type != xenos::FetchConstantType::kTexture || !tf.base_address) continue;
+              snprintf(texbuf, sizeof(texbuf),
+                       " tf%u=%#x/%ux%u/magf=%u/minf=%u/mipf=%u/aniso=%u/clamp=%u,%u"
+                       "/border=%u/lodbias=%u",
+                       t, tf.base_address << 12, tf.size_2d.width + 1, tf.size_2d.height + 1,
+                       uint32_t(tf.mag_filter), uint32_t(tf.min_filter), uint32_t(tf.mip_filter),
+                       uint32_t(tf.aniso_filter), uint32_t(tf.clamp_x), uint32_t(tf.clamp_y),
+                       uint32_t(tf.border_size), uint32_t(tf.lod_bias));
+              break;
+            }
+            fprintf(lf,
+                    "swap=%u step=%u prim=%u guest_count=%u color_base=%u pitch=%u fmt=%u "
+                    "msaa=%u blend=%#010x csrc=%u cdst=%u cop=%u asrc=%u adst=%u aop=%u "
+                    "const=%.5g,%.5g,%.5g,%.5g\n",
+                    g_draw_trace_swap_count, step, uint32_t(prim_type), index_count,
+                    uint32_t(ci.color_base), uint32_t(si.surface_pitch),
+                    uint32_t(ci.color_format), uint32_t(si.msaa_samples), bcw.value,
+                    uint32_t(bcw.color_srcblend), uint32_t(bcw.color_destblend),
+                    uint32_t(bcw.color_comb_fcn), uint32_t(bcw.alpha_srcblend),
+                    uint32_t(bcw.alpha_destblend), uint32_t(bcw.alpha_comb_fcn),
+                    regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+                    regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+                    regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+                    regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA));
+            fprintf(lf, "swap=%u step=%u%s\n", g_draw_trace_swap_count, step, texbuf);
+            fprintf(lf, "swap=%u step=%u %s\n", g_draw_trace_swap_count, step, vpbuf);
+            fclose(lf);
+          }
+        }
+        if (step >= n) {
+          return true;
+        }
+      }
+    }
+  }
   if (REXCVAR_GET(log_draw_shaders) || REXCVAR_GET(log_draw_texture)) {
     uint32_t bases[32];
     size_t base_count = 0;
@@ -4406,8 +4579,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   bool host_render_targets_used =
       render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets;
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+  // On the host-RT path the bound targets' scale class applies (configured
+  // scale on other paths, where current_draw_scale equals it).
+  uint32_t draw_resolution_scale_x =
+      host_render_targets_used ? render_target_cache_->current_draw_scale_x()
+                               : texture_cache_->draw_resolution_scale_x();
+  uint32_t draw_resolution_scale_y =
+      host_render_targets_used ? render_target_cache_->current_draw_scale_y()
+                               : texture_cache_->draw_resolution_scale_y();
 
   // Get dynamic rasterizer state.
   draw_util::ViewportInfo viewport_info;
@@ -4598,7 +4777,478 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  // Diagnostic: generalised "exploding geometry" detector. Decodes every
+  // float/half position-like stream with the fetch constant's own endianness
+  // and flags draws whose sampled components are non-finite or astronomical in
+  // guest memory. Half-float streams also catch skinning matrix palettes held
+  // in vertex buffers. Logs the per-frame draw index so an offender can be fed
+  // straight to --gpu_skip_draws.
+  if (REXCVAR_GET(gpu_skip_huge_draws) && memory_) {
+    const float huge_threshold = float(REXCVAR_GET(gpu_huge_draw_threshold));
+    auto decode_word = [](const uint8_t* q, xenos::Endian endian) -> uint32_t {
+      uint32_t w;
+      std::memcpy(&w, q, 4);
+      switch (endian) {
+        case xenos::Endian::k8in16:
+          return ((w & 0xFF00FF00u) >> 8) | ((w & 0x00FF00FFu) << 8);
+        case xenos::Endian::k8in32:
+          return rex::byte_swap(w);
+        case xenos::Endian::k16in32:
+          return (w >> 16) | (w << 16);
+        default:
+          return w;
+      }
+    };
+    auto half_to_float = [](uint16_t h) -> float {
+      uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+      float v;
+      if (e == 0) {
+        v = std::ldexp(float(m) / 1024.0f, -14);
+      } else if (e == 31) {
+        v = m ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+      } else {
+        v = std::ldexp(1.0f + float(m) / 1024.0f, int(e) - 15);
+      }
+      return s ? -v : v;
+    };
+    bool drop = false;
+    for (const auto& binding : vertex_shader->vertex_bindings()) {
+      if (drop) break;
+      uint32_t stride = binding.stride_words * 4;
+      if (stride < 4) continue;
+      xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(binding.fetch_constant);
+      uint32_t addr = vf.address << 2, size = vf.size << 2;
+      if (!addr || size < stride) continue;
+      const uint8_t* p8 = memory_->TranslatePhysical<const uint8_t*>(addr);
+      for (const auto& attr : binding.attributes) {
+        const auto& a = attr.fetch_instr.attributes;
+        const bool is_f32 = a.data_format == xenos::VertexFormat::k_32_32_32_FLOAT ||
+                            a.data_format == xenos::VertexFormat::k_32_32_32_32_FLOAT;
+        const bool is_f16 = a.data_format == xenos::VertexFormat::k_16_16_16_16_FLOAT;
+        if (!is_f32 && !is_f16) continue;
+        const uint32_t comp_bytes = is_f32 ? 4 : 2;
+        const uint32_t num_comps = 3;
+        const uint32_t attr_bytes = a.offset * 4;
+        if (attr_bytes + num_comps * comp_bytes > stride) continue;
+        uint32_t n = std::min<uint32_t>(size / stride, 256), bad = 0, tot = 0;
+        uint32_t first_bad = UINT32_MAX;
+        float worst = 0.0f;
+        for (uint32_t v = 0; v < n; ++v) {
+          const uint8_t* q = p8 + size_t(v) * stride + attr_bytes;
+          bool vbad = false;
+          for (uint32_t c = 0; c < num_comps; ++c) {
+            float f;
+            if (is_f32) {
+              uint32_t w = decode_word(q + c * 4, vf.endian);
+              std::memcpy(&f, &w, 4);
+            } else {
+              // 16-bit components live inside the enclosing 32-bit word; the
+              // endian permutation applies to the whole word.
+              uint32_t w = decode_word(q + (c & ~1u) * 2, vf.endian);
+              f = half_to_float(uint16_t(w >> ((c & 1) * 16)));
+            }
+            if (!std::isfinite(f) || std::fabs(f) > huge_threshold) {
+              vbad = true;
+              if (std::isfinite(f)) worst = std::max(worst, std::fabs(f));
+            }
+          }
+          if (vbad && first_bad == UINT32_MAX) first_bad = v * stride;
+          ++tot;
+          bad += vbad ? 1 : 0;
+        }
+        if (tot >= 8 && bad * 100 >= tot * REXCVAR_GET(gpu_nonfinite_threshold_pct)) {
+          drop = true;
+          REXGPU_WARN("[HUGE-VB] swap={} draw={} vs={:016X} ps={:016X} vf{} addr=0x{:08X} "
+                      "size={} stride={} off={} fmt={} endian={} bad={}/{} first_bad_off={} "
+                      "worst={:.4g}",
+                      g_draw_trace_swap_count, g_frame_draw_index,
+                      vertex_shader->ucode_data_hash(),
+                      pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+                      binding.fetch_constant, addr, size, stride, attr_bytes,
+                      uint32_t(a.data_format), uint32_t(vf.endian), bad, tot, first_bad, worst);
+          break;
+        }
+      }
+    }
+    if (drop) {
+      ++g_nonfinite_draws_skipped;
+      return true;  // pretend the draw succeeded
+    }
+  }
+
   const uint32_t frame_draw_index = g_frame_draw_index;
+
+  // Diagnostic: per-draw constant/index consistency for an index-instanced
+  // vertex shader (--gpu_check_instanced_vs=HASH), see the cvar description.
+  {
+    const std::string& check_vs = REXCVAR_GET(gpu_check_instanced_vs);
+    if (!check_vs.empty() &&
+        check_vs.find(fmt::format("{:016X}", vertex_shader->ucode_data_hash())) !=
+            std::string::npos) {
+      static uint32_t checked = 0, violations = 0, last_report_swap = 0;
+      static uint32_t swap_draws = 0, swap_violations = 0, swap_palette_flags = 0;
+      static float swap_palette_worst = 0.0f;
+      if (g_draw_trace_swap_count != last_report_swap) {
+        if (swap_draws) {
+          REXGPU_INFO("[ICHECK] swap {}: {} draws checked, {} violations (total {} / {}), "
+                      "palette flags {} worst |v| {:.5g}",
+                      last_report_swap, swap_draws, swap_violations, violations, checked,
+                      swap_palette_flags, swap_palette_worst);
+        }
+        last_report_swap = g_draw_trace_swap_count;
+        swap_draws = 0;
+        swap_violations = 0;
+        swap_palette_flags = 0;
+        swap_palette_worst = 0.0f;
+      }
+      ++checked;
+      ++swap_draws;
+      if (REXCVAR_GET(gpu_check_staging_range) == "auto") {
+        // Follow the palette stream (the largest vertex buffer this draw binds)
+        // so the staging integrity check tracks it across runs.
+        uint32_t best_addr = 0, best_size = 0;
+        for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+          uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+          uint32_t j;
+          while (rex::bit_scan_forward(bits, &j)) {
+            bits &= ~(uint32_t(1) << j);
+            xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(i * 32 + j);
+            if ((vf.size << 2) > best_size) {
+              best_size = vf.size << 2;
+              best_addr = vf.address << 2;
+            }
+          }
+        }
+        if (best_size) {
+          SetStagingCheckRangeForDiagnostics(best_addr & ~0xFFFu,
+                                             (best_addr + best_size + 0xFFF) & ~0xFFFu);
+        }
+      }
+      auto cf = [&regs](uint32_t c, uint32_t comp) {
+        return regs.Get<float>(XE_GPU_REG_SHADER_CONSTANT_000_X + c * 4 + comp);
+      };
+      const float c55x = cf(55, 0), c55y = cf(55, 1), c255x = cf(255, 0), c255y = cf(255, 1);
+      std::string why;
+      if (!(c55y > 0.0f) || !std::isfinite(c55y)) why += fmt::format(" c55.y={}", c55y);
+      if (!std::isfinite(c55x) || c55x < 0.0f || c55x != std::floor(c55x) || c55x > 65536.0f) {
+        why += fmt::format(" c55.x={}", c55x);
+      }
+      if (c255x != 4.0f || c255y != 0.5f) why += fmt::format(" c255=({},{})", c255x, c255y);
+      // The host-side draw must be the plain vertex-shader path over the guest
+      // index buffer, or the vertex index the shader sees is a different one.
+      if (primitive_processing_result.host_vertex_shader_type !=
+              Shader::HostVertexShaderType::kVertex ||
+          primitive_processing_result.index_buffer_type !=
+              PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA ||
+          primitive_processing_result.host_draw_vertex_count != index_count ||
+          primitive_processing_result.host_primitive_type != prim_type ||
+          (index_buffer_info &&
+           primitive_processing_result.guest_index_base != index_buffer_info->guest_base)) {
+        why += fmt::format(" host_path(vs_type={} ibtype={} host_vtx={} host_prim={} base=0x{:08X})",
+                           uint32_t(primitive_processing_result.host_vertex_shader_type),
+                           uint32_t(primitive_processing_result.index_buffer_type),
+                           primitive_processing_result.host_draw_vertex_count,
+                           uint32_t(primitive_processing_result.host_primitive_type),
+                           primitive_processing_result.guest_index_base);
+      }
+      if (regs[XE_GPU_REG_VGT_MIN_VTX_INDX] != 0 ||
+          regs[XE_GPU_REG_VGT_MAX_VTX_INDX] < 0xFFFF) {
+        why += fmt::format(" vtx_clamp(min={} max={})", regs[XE_GPU_REG_VGT_MIN_VTX_INDX],
+                           regs[XE_GPU_REG_VGT_MAX_VTX_INDX]);
+      }
+      for (uint32_t c = 52; c <= 54; ++c) {
+        for (uint32_t comp = 0; comp < 3; ++comp) {
+          const float v = cf(c, comp);
+          if (!std::isfinite(v) || std::fabs(v) > 2.0f) why += fmt::format(" c{}.{}={}", c, comp, v);
+        }
+        const float t = cf(c, 3);
+        if (!std::isfinite(t) || std::fabs(t) > 100000.0f) why += fmt::format(" c{}.w={}", c, t);
+      }
+      uint32_t max_index = 0, min_index = UINT32_MAX, scanned = 0;
+      if (index_buffer_info && index_buffer_info->guest_base && memory_ &&
+          index_buffer_info->format == xenos::IndexFormat::kInt16 && index_count &&
+          index_buffer_info->guest_base + index_count * 2 <= SharedMemory::kBufferSize) {
+        const uint16_t* p =
+            memory_->TranslatePhysical<const uint16_t*>(index_buffer_info->guest_base);
+        const bool swap = index_buffer_info->endianness == xenos::Endian::k8in16;
+        const uint32_t base = regs[XE_GPU_REG_VGT_INDX_OFFSET];
+        for (uint32_t k = 0; k < index_count; ++k) {
+          uint16_t v = p[k];
+          if (swap) v = uint16_t((v >> 8) | (v << 8));
+          const uint32_t idx = uint32_t(v) + base;
+          max_index = std::max(max_index, idx);
+          min_index = std::min(min_index, idx);
+          ++scanned;
+        }
+        if (std::isfinite(c55y) && c55y > 0.0f && float(max_index) + c255y >= c55y) {
+          why += fmt::format(" max_index={} >= c55.y={} (min {}, base {})", max_index, c55y,
+                             min_index, base);
+        }
+      } else {
+        why += fmt::format(" (index buffer not checkable: ib={} fmt={} count={})",
+                           index_buffer_info ? index_buffer_info->guest_base : 0,
+                           index_buffer_info ? uint32_t(index_buffer_info->format) : 99,
+                           index_count);
+      }
+      // Skinning inputs: walk the index buffer to the mesh's per-vertex bone
+      // byte (dword 5 of the 28-byte vertex) and the palette bone at
+      // c55.x + bone (24 bytes: three rows of four halfs), and flag finite
+      // values no crowd matrix can legitimately hold. NaN halfs are part of
+      // the format (unused bones) and are discarded by the NaN kill.
+      if (scanned && memory_) {
+        uint32_t pal_addr = 0, pal_size = 0, mesh_addr = 0, mesh_size = 0;
+        for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+          uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+          uint32_t j;
+          while (rex::bit_scan_forward(bits, &j)) {
+            bits &= ~(uint32_t(1) << j);
+            xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(i * 32 + j);
+            const uint32_t a = vf.address << 2, sz = vf.size << 2;
+            if (sz > pal_size) {
+              mesh_addr = pal_addr;
+              mesh_size = pal_size;
+              pal_addr = a;
+              pal_size = sz;
+            } else if (sz > mesh_size) {
+              mesh_addr = a;
+              mesh_size = sz;
+            }
+          }
+        }
+        const uint32_t slot = uint32_t(std::max(c55x, 0.0f));
+        if (pal_size >= 24 && mesh_size >= 28 && pal_addr + pal_size <= SharedMemory::kBufferSize &&
+            mesh_addr + mesh_size <= SharedMemory::kBufferSize) {
+          const uint16_t* ip =
+              memory_->TranslatePhysical<const uint16_t*>(index_buffer_info->guest_base);
+          const bool swap = index_buffer_info->endianness == xenos::Endian::k8in16;
+          const uint8_t* mesh = memory_->TranslatePhysical<const uint8_t*>(mesh_addr);
+          const uint8_t* pal = memory_->TranslatePhysical<const uint8_t*>(pal_addr);
+          float worst = 0.0f;
+          uint32_t worst_bone = 0, worst_vertex = 0, worst_half = 0;
+          uint32_t bones_seen = 0;
+          for (uint32_t k = 0; k < index_count; ++k) {
+            uint16_t v = ip[k];
+            if (swap) v = uint16_t((v >> 8) | (v << 8));
+            const uint32_t vertex = uint32_t(v) + regs[XE_GPU_REG_VGT_INDX_OFFSET];
+            if (vertex * 28 + 24 > mesh_size) continue;
+            uint32_t bone_dword;
+            std::memcpy(&bone_dword, mesh + vertex * 28 + 20, 4);
+            const uint32_t bone = rex::byte_swap(bone_dword) & 0xFF;
+            const uint32_t bone_index = slot + bone;
+            if (bone_index * 24 + 24 > pal_size) {
+              worst = 1e30f;
+              worst_bone = bone;
+              worst_vertex = vertex;
+              break;
+            }
+            bones_seen |= uint32_t(1) << (bone & 31);
+            for (uint32_t d = 0; d < 6; ++d) {
+              uint32_t dw;
+              std::memcpy(&dw, pal + bone_index * 24 + d * 4, 4);
+              dw = rex::byte_swap(dw);
+              for (uint32_t hh = 0; hh < 2; ++hh) {
+                const uint16_t h = uint16_t(dw >> (hh * 16));
+                const uint32_t exp = (h >> 10) & 0x1F;
+                if (exp == 0x1F) continue;  // inf/NaN: format, killed
+                const uint32_t mant = h & 0x3FF;
+                float f = exp ? std::ldexp(1.0f + float(mant) / 1024.0f, int(exp) - 15)
+                              : std::ldexp(float(mant) / 1024.0f, -14);
+                if (f > worst) {
+                  worst = f;
+                  worst_bone = bone;
+                  worst_vertex = vertex;
+                  worst_half = d * 2 + hh;
+                }
+              }
+            }
+          }
+          // Bone 15 legitimately carries a ~4500 translation in every crowd
+          // pose; a flung vertex is an order of magnitude beyond that.
+          if (worst > swap_palette_worst) swap_palette_worst = worst;
+          if (worst > 8000.0f) {
+            ++swap_palette_flags;
+            why += fmt::format(" palette(slot={} bone={} vertex={} half#{} |v|={:.5g} bones=0x{:X})",
+                               slot, worst_bone, worst_vertex, worst_half, worst, bones_seen);
+          }
+        }
+      }
+      {
+        const std::string& dump_path = REXCVAR_GET(gpu_check_instanced_dump);
+        static FILE* dump_file = nullptr;
+        static bool dump_tried = false;
+        if (!dump_path.empty() && !dump_tried) {
+          dump_tried = true;
+          dump_file = fopen(dump_path.c_str(), "wb");
+        }
+        if (dump_file) {
+          uint32_t best_addr = 0, best_size = 0;
+          for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+            uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+            uint32_t j;
+            while (rex::bit_scan_forward(bits, &j)) {
+              bits &= ~(uint32_t(1) << j);
+              xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(i * 32 + j);
+              if ((vf.size << 2) > best_size) {
+                best_size = vf.size << 2;
+                best_addr = vf.address << 2;
+              }
+            }
+          }
+          // Second-largest stream = the mesh; dump each distinct mesh and index
+          // buffer once, the palette once per swap, beside the record file, so
+          // the shader can be replayed offline from exactly the CP's inputs.
+          uint32_t mesh_addr = 0, mesh_size = 0;
+          for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+            uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+            uint32_t j;
+            while (rex::bit_scan_forward(bits, &j)) {
+              bits &= ~(uint32_t(1) << j);
+              xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(i * 32 + j);
+              const uint32_t a = vf.address << 2, sz = vf.size << 2;
+              if (a != best_addr && sz > mesh_size) {
+                mesh_addr = a;
+                mesh_size = sz;
+              }
+            }
+          }
+          // Record v2 (200 bytes): v1 fields, then the host-side per-draw state
+          // the replay cannot see - viewport (offset, extent, z range, NDC
+          // scale/offset), scissor, an XXH3 of the system constants, and the
+          // bound pipeline handle.
+          uint32_t rec[8 + 32 + 10] = {g_draw_trace_swap_count,
+                                       frame_draw_index,
+                                       index_count,
+                                       index_buffer_info ? index_buffer_info->guest_base : 0u,
+                                       best_addr,
+                                       best_size,
+                                       mesh_addr,
+                                       mesh_size};
+          for (uint32_t k = 0; k < 16; ++k) {
+            rec[8 + k] = rex::byte_swap(regs[XE_GPU_REG_SHADER_CONSTANT_000_X + 52 * 4 + k]);
+            rec[24 + k] = rex::byte_swap(regs[XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * 4 + k]);
+          }
+          {
+            draw_util::Scissor dump_scissor;
+            draw_util::GetScissor(regs, dump_scissor);
+            const uint64_t sys_hash = XXH3_64bits(&system_constants_, sizeof(system_constants_));
+            const uint64_t pipe = uint64_t(reinterpret_cast<uintptr_t>(current_guest_graphics_pipeline_));
+            uint32_t* h = rec + 40;
+            h[0] = viewport_info.xy_offset[0] | (viewport_info.xy_offset[1] << 16);
+            h[1] = viewport_info.xy_extent[0] | (viewport_info.xy_extent[1] << 16);
+            std::memcpy(&h[2], &viewport_info.z_min, 4);
+            std::memcpy(&h[3], &viewport_info.z_max, 4);
+            h[4] = dump_scissor.offset[0] | (dump_scissor.offset[1] << 16);
+            h[5] = dump_scissor.extent[0] | (dump_scissor.extent[1] << 16);
+            h[6] = uint32_t(sys_hash);
+            h[7] = uint32_t(sys_hash >> 32);
+            h[8] = uint32_t(pipe);
+            h[9] = uint32_t(pipe >> 32);
+          }
+          fwrite(rec, sizeof(rec), 1, dump_file);
+          {
+            // NDC scale/offset are part of the system constants; keep them
+            // readable beside the hash, once per distinct value.
+            static float last_ndc[6] = {0, 0, 0, 0, 0, 0};
+            if (std::memcmp(last_ndc, viewport_info.ndc_scale, 12) ||
+                std::memcmp(last_ndc + 3, viewport_info.ndc_offset, 12)) {
+              std::memcpy(last_ndc, viewport_info.ndc_scale, 12);
+              std::memcpy(last_ndc + 3, viewport_info.ndc_offset, 12);
+              REXGPU_INFO("[ICHECK] swap {} draw {}: ndc_scale=({},{},{}) ndc_offset=({},{},{}) "
+                          "viewport=({},{} {}x{}) z=[{},{}]",
+                          g_draw_trace_swap_count, frame_draw_index, last_ndc[0], last_ndc[1],
+                          last_ndc[2], last_ndc[3], last_ndc[4], last_ndc[5],
+                          viewport_info.xy_offset[0], viewport_info.xy_offset[1],
+                          viewport_info.xy_extent[0], viewport_info.xy_extent[1],
+                          viewport_info.z_min, viewport_info.z_max);
+            }
+          }
+          if ((checked % 2048) == 0) fflush(dump_file);
+          if (memory_) {
+            static std::set<uint64_t> dumped_static;
+            static uint32_t palette_swap = UINT32_MAX;
+            const std::string dir = dump_path + ".d";
+            static bool dir_made = false;
+            if (!dir_made) {
+              dir_made = true;
+              std::filesystem::create_directories(dir);
+            }
+            auto dump_bytes = [&](const std::string& name, uint32_t addr, uint32_t size) {
+              if (!addr || !size || addr >= SharedMemory::kBufferSize ||
+                  size > SharedMemory::kBufferSize - addr) {
+                return;
+              }
+              if (FILE* f = fopen((dir + "/" + name).c_str(), "wb")) {
+                fwrite(memory_->TranslatePhysical<const void*>(addr), 1, size, f);
+                fclose(f);
+              }
+            };
+            if (mesh_size && dumped_static.insert((uint64_t(1) << 40) | mesh_addr).second) {
+              dump_bytes(fmt::format("mesh_{:08X}.bin", mesh_addr), mesh_addr, mesh_size);
+            }
+            if (index_buffer_info && index_buffer_info->guest_base &&
+                dumped_static.insert((uint64_t(2) << 40) | index_buffer_info->guest_base).second) {
+              dump_bytes(fmt::format("ib_{:08X}.bin", index_buffer_info->guest_base),
+                         index_buffer_info->guest_base, index_count * 2);
+            }
+            if (palette_swap != g_draw_trace_swap_count && best_size) {
+              palette_swap = g_draw_trace_swap_count;
+              dump_bytes(fmt::format("pal_{}_{:08X}.bin", g_draw_trace_swap_count, best_addr),
+                         best_addr, best_size);
+            }
+          }
+        }
+      }
+      if (!why.empty()) {
+        ++violations;
+        ++swap_violations;
+        if (violations <= 4000) {
+          REXGPU_ERROR("[ICHECK] swap={} draw={} count={}:{} | c52=({},{},{},{}) c53=({},{},{},{}) "
+                       "c54=({},{},{},{}) c55=({},{},{},{}) ib=0x{:08X} scanned={}",
+                       g_draw_trace_swap_count, frame_draw_index, index_count, why, cf(52, 0),
+                       cf(52, 1), cf(52, 2), cf(52, 3), cf(53, 0), cf(53, 1), cf(53, 2), cf(53, 3),
+                       cf(54, 0), cf(54, 1), cf(54, 2), cf(54, 3), c55x, c55y, cf(55, 2), cf(55, 3),
+                       index_buffer_info ? index_buffer_info->guest_base : 0, scanned);
+        }
+      }
+    }
+  }
+
+  // Diagnostic: suppress draws by vertex shader, either a fixed list
+  // (--gpu_skip_vs=HASH,HASH) or a sweep over every vertex shader seen
+  // (--gpu_skip_vs_sweep_frames=N, armed by the trace trigger file).
+  if (REXCVAR_GET(gpu_skip_vs_sweep_frames) || !REXCVAR_GET(gpu_skip_vs).empty()) {
+    const uint64_t vs_hash = vertex_shader->ucode_data_hash();
+    if (std::find(g_vs_sweep_order.begin(), g_vs_sweep_order.end(), vs_hash) ==
+        g_vs_sweep_order.end()) {
+      g_vs_sweep_order.push_back(vs_hash);
+      REXGPU_WARN("[VSSWEEP] vs #{} = {:016X} first seen at swap {}", g_vs_sweep_order.size() - 1,
+                  vs_hash, g_draw_trace_swap_count);
+    }
+    bool skip_vs = false;
+    if (g_vs_sweep_armed) {
+      const uint32_t per = std::max<uint32_t>(1, REXCVAR_GET(gpu_skip_vs_sweep_frames));
+      const uint32_t idx = REXCVAR_GET(gpu_skip_vs_sweep_start) +
+                           (g_draw_trace_swap_count - g_vs_sweep_start_swap) / per;
+      if (idx < g_vs_sweep_order.size()) {
+        if (idx != g_vs_sweep_last_index) {
+          g_vs_sweep_last_index = idx;
+          REXGPU_WARN("[VSSWEEP] swap {} suppressing vs #{} {:016X}", g_draw_trace_swap_count,
+                      idx, g_vs_sweep_order[idx]);
+        }
+        skip_vs = g_vs_sweep_order[idx] == vs_hash;
+      }
+    }
+    const std::string& vs_spec = REXCVAR_GET(gpu_skip_vs);
+    if (!skip_vs && !vs_spec.empty() &&
+        vs_spec.find(fmt::format("{:016X}", vs_hash)) != std::string::npos) {
+      skip_vs = true;
+    }
+    if (skip_vs) {
+      ++g_frame_draw_index;
+      ++g_skipped_range_draws;
+      return true;  // pretend the draw succeeded
+    }
+  }
 
   // Diagnostic: suppress an inclusive draw-index range (--gpu_skip_draws=first:last).
   // The index is the per-frame draw counter, the same one the per-draw trace prints,
@@ -4635,8 +5285,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   {
     uint32_t trace_start = g_draw_trace_forced_start ? g_draw_trace_forced_start
                                                      : REXCVAR_GET(gpu_draw_trace_start);
+    const std::string& trace_vs = REXCVAR_GET(gpu_draw_trace_vs);
     if (trace_start && g_draw_trace_swap_count >= trace_start &&
-        g_draw_trace_swap_count < trace_start + REXCVAR_GET(gpu_draw_trace_frames)) {
+        g_draw_trace_swap_count < trace_start + REXCVAR_GET(gpu_draw_trace_frames) &&
+        (trace_vs.empty() ||
+         trace_vs.find(fmt::format("{:016X}", vertex_shader->ucode_data_hash())) !=
+             std::string::npos)) {
       uint32_t di = frame_draw_index;
       auto vte = regs[XE_GPU_REG_PA_CL_VTE_CNTL];
       auto clip = regs[XE_GPU_REG_PA_CL_CLIP_CNTL];
@@ -4957,6 +5611,108 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
   }
 
+  // Diagnostic: GPU-side content check of the checked shader's palette stream
+  // (gpu_check_gpu_readback_every). Copies the range out of the shared memory
+  // buffer after this draw, waits, and compares it with guest memory, i.e. with
+  // what the upload was supposed to have written.
+  if (g_uniform_check_armed && REXCVAR_GET(gpu_check_gpu_readback_every)) {
+    static uint32_t readback_swap = UINT32_MAX, readback_draws_in_swap = 0;
+    static uint32_t readbacks = 0, readback_mismatches = 0;
+    if (readback_swap != g_draw_trace_swap_count) {
+      readback_swap = g_draw_trace_swap_count;
+      readback_draws_in_swap = 0;
+    }
+    const uint32_t draw_in_swap = readback_draws_in_swap++;
+    if ((draw_in_swap % REXCVAR_GET(gpu_check_gpu_readback_every)) == 0) {
+      uint32_t best_addr = 0, best_size = 0;
+      for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+        uint32_t bits = constant_map_vertex.vertex_fetch_bitmap[i];
+        uint32_t j;
+        while (rex::bit_scan_forward(bits, &j)) {
+          bits &= ~(uint32_t(1) << j);
+          xenos::xe_gpu_vertex_fetch_t vf = regs.GetVertexFetch(i * 32 + j);
+          if ((vf.size << 2) > best_size) {
+            best_size = vf.size << 2;
+            best_addr = vf.address << 2;
+          }
+        }
+      }
+      if (best_size && best_size <= (4u << 20) && best_addr < SharedMemory::kBufferSize &&
+          best_size <= SharedMemory::kBufferSize - best_addr) {
+        const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+        const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+        const VkDevice device = vulkan_device->device();
+        VkBuffer readback_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+        uint32_t readback_memory_type = UINT32_MAX;
+        VkDeviceSize readback_memory_size = 0;
+        if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
+                vulkan_device, best_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                ui::vulkan::util::MemoryPurpose::kReadback, readback_buffer, readback_memory,
+                &readback_memory_type, &readback_memory_size)) {
+          shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+          SubmitBarriers(true);
+          VkBufferCopy region = {};
+          region.srcOffset = best_addr;
+          region.dstOffset = 0;
+          region.size = best_size;
+          deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), readback_buffer, 1,
+                                                   &region);
+          PushBufferMemoryBarrier(readback_buffer, 0, best_size, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                  VK_ACCESS_HOST_READ_BIT);
+          if (AwaitAllQueueOperationsCompletion()) {
+            void* mapping = nullptr;
+            if (dfn.vkMapMemory(device, readback_memory, 0, VK_WHOLE_SIZE, 0, &mapping) ==
+                VK_SUCCESS) {
+              if (!(vulkan_device->memory_types().host_coherent &
+                    (uint32_t(1) << readback_memory_type))) {
+                VkMappedMemoryRange range = {};
+                range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+                range.memory = readback_memory;
+                range.offset = 0;
+                range.size = VK_WHOLE_SIZE;
+                dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
+              }
+              const uint8_t* gpu_bytes = reinterpret_cast<const uint8_t*>(mapping);
+              const uint8_t* guest_bytes = memory_->TranslatePhysical<const uint8_t*>(best_addr);
+              uint32_t first_diff = UINT32_MAX, diff_count = 0;
+              for (uint32_t k = 0; k < best_size; ++k) {
+                if (gpu_bytes[k] != guest_bytes[k]) {
+                  if (first_diff == UINT32_MAX) first_diff = k;
+                  ++diff_count;
+                }
+              }
+              ++readbacks;
+              if (diff_count) {
+                ++readback_mismatches;
+                if (readback_mismatches <= 50) {
+                  REXGPU_ERROR("[GPUREAD] swap={} draw={} vf range 0x{:08X}+0x{:X}: GPU copy "
+                               "differs from guest memory in {} bytes, first at +0x{:X} "
+                               "(gpu {:02X}{:02X}{:02X}{:02X} guest {:02X}{:02X}{:02X}{:02X})",
+                               g_draw_trace_swap_count, frame_draw_index, best_addr, best_size,
+                               diff_count, first_diff, gpu_bytes[first_diff & ~3u],
+                               gpu_bytes[(first_diff & ~3u) + 1], gpu_bytes[(first_diff & ~3u) + 2],
+                               gpu_bytes[(first_diff & ~3u) + 3], guest_bytes[first_diff & ~3u],
+                               guest_bytes[(first_diff & ~3u) + 1],
+                               guest_bytes[(first_diff & ~3u) + 2],
+                               guest_bytes[(first_diff & ~3u) + 3]);
+                }
+              }
+              if ((readbacks % 200) == 0) {
+                REXGPU_INFO("[GPUREAD] {} readbacks, {} mismatches", readbacks,
+                            readback_mismatches);
+              }
+              dfn.vkUnmapMemory(device, readback_memory);
+            }
+          }
+          dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
+          dfn.vkFreeMemory(device, readback_memory, nullptr);
+        }
+      }
+    }
+  }
+
   log_slow_stage("ownership_and_readback", kDrawStageOwnershipAndReadback);
   return true;
 }
@@ -5270,17 +6026,36 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     readback.memories[index] = new_memory;
     readback.mapped_data[index] = new_mapping;
     readback.sizes[index] = size;
+    readback.submission_written[index] = 0;
+    readback.written_size[index] = 0;
     return true;
   };
 
-  bool is_scaled = texture_cache_->IsDrawResolutionScaled();
+  bool is_scaled = texture_cache_->IsRangeScaledResolved(written_address, written_length);
   uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
   ReadbackBuffer& readback = readback_buffers_[resolve_key];
+  const uint64_t current_submission = GetCurrentSubmission();
+  const uint64_t previous_used_frame = readback.last_used_frame;
   readback.last_used_frame = frame_current_;
-  uint32_t write_index = readback.current_index;
+  const bool reused_submission_slot =
+      readback.submission_written[1 - readback.current_index] == current_submission;
+  uint32_t write_index =
+      reused_submission_slot ? (1 - readback.current_index) : readback.current_index;
   uint32_t readback_size = AlignReadbackBufferSize(written_length);
   if (!ensure_readback_slot(readback, write_index, readback_size)) {
     return true;
+  }
+  if (!reused_submission_slot && readback.submission_written[write_index] > submission_completed_) {
+    AccumulateCpuTime sync_timer(collect_stats ? &frame_stats_.readback_sync_ms : nullptr);
+    CheckSubmissionFenceAndDeviceLoss(readback.submission_written[write_index]);
+    if (device_lost_ || readback.submission_written[write_index] > submission_completed_) {
+      return true;
+    }
+  }
+  if (reused_submission_slot) {
+    PushBufferMemoryBarrier(readback.buffers[write_index], 0, written_length,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
   }
 
   if (is_scaled) {
@@ -5449,6 +6224,11 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   PushBufferMemoryBarrier(readback.buffers[write_index], 0, written_length,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  readback.submission_written[write_index] = GetCurrentSubmission();
+  readback.written_size[write_index] =
+      reused_submission_slot ? std::max(readback.written_size[write_index], written_length)
+                             : written_length;
+  readback.current_index = 1 - write_index;
 
   bool use_delayed_sync =
       readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
@@ -5464,19 +6244,34 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   bool is_cache_miss = false;
-  if (use_delayed_sync && (readback.buffers[read_index] == VK_NULL_HANDLE ||
-                           written_length > readback.sizes[read_index] ||
-                           readback.mapped_data[read_index] == nullptr)) {
+  if (use_delayed_sync &&
+      (previous_used_frame == 0 || frame_current_ > previous_used_frame + 2 ||
+       readback.buffers[read_index] == VK_NULL_HANDLE ||
+       written_length > readback.sizes[read_index] ||
+       written_length > readback.written_size[read_index] ||
+       readback.mapped_data[read_index] == nullptr ||
+       readback.submission_written[read_index] == 0)) {
     is_cache_miss = true;
     read_index = write_index;
     if (!await_readback()) {
       return true;
     }
+  } else if (use_delayed_sync && readback.submission_written[read_index] > submission_completed_) {
+    AccumulateCpuTime sync_timer(collect_stats ? &frame_stats_.readback_sync_ms : nullptr);
+    CheckSubmissionFenceAndDeviceLoss(readback.submission_written[read_index]);
+    if (device_lost_ || readback.submission_written[read_index] > submission_completed_) {
+      return true;
+    }
   }
 
-  bool should_copy = (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
+  bool should_copy = (readback_mode == ReadbackResolveMode::kSome)
+                         ? is_cache_miss
+                         : (!reused_submission_slot || is_cache_miss);
   if (should_copy && readback.buffers[read_index] != VK_NULL_HANDLE &&
-      written_length <= readback.sizes[read_index] && readback.mapped_data[read_index] != nullptr) {
+      written_length <= readback.sizes[read_index] &&
+      written_length <= readback.written_size[read_index] &&
+      readback.mapped_data[read_index] != nullptr &&
+      readback.submission_written[read_index] <= submission_completed_) {
     VkMappedMemoryRange readback_memory_range = {};
     readback_memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
     readback_memory_range.memory = readback.memories[read_index];
@@ -5495,7 +6290,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
     }
   }
 
-  readback.current_index = 1 - readback.current_index;
   return true;
 }
 
@@ -5515,7 +6309,8 @@ void VulkanCommandProcessor::EvictOldReadbackBuffers(
     ReadbackBuffer& readback = it->second;
     bool evict =
         buffer_map.size() > kMaxReadbackBuffers || readback.last_used_frame < eviction_frame_floor;
-    if (!evict) {
+    if (!evict || readback.submission_written[0] > submission_completed_ ||
+        readback.submission_written[1] > submission_completed_) {
       ++it;
       continue;
     }
@@ -5732,8 +6527,15 @@ uint64_t VulkanCommandProcessor::NormalizeOcclusionSamples(uint64_t samples) con
   if (samples == 0 || !texture_cache_) {
     return samples;
   }
-  uint64_t scale_x = texture_cache_->draw_resolution_scale_x();
-  uint64_t scale_y = texture_cache_->draw_resolution_scale_y();
+  // The scale of the pass the query ran under. With selective scaling this is
+  // the last bound set's class - queries are almost always issued and
+  // collected within one pass.
+  uint64_t scale_x =
+      render_target_cache_ ? render_target_cache_->current_draw_scale_x()
+                           : texture_cache_->draw_resolution_scale_x();
+  uint64_t scale_y =
+      render_target_cache_ ? render_target_cache_->current_draw_scale_y()
+                           : texture_cache_->draw_resolution_scale_y();
   uint64_t scale = scale_x * scale_y;
   if (scale <= 1) {
     return samples;
@@ -5991,6 +6793,18 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // Start a new deferred command buffer - will submit it to the real one in
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
+    if (!deferred_command_buffer_.empty()) {
+      // Anything recorded while no submission was open never reaches the GPU:
+      // an upload copy lost here leaves shared memory pages marked valid with
+      // stale contents.
+      static uint32_t lost_reports = 0;
+      if (lost_reports++ < 20) {
+        REXGPU_ERROR("[SUBMISSION] {} bytes of deferred commands recorded with no open "
+                     "submission are being discarded (submission {}, frame {}): {}",
+                     deferred_command_buffer_.size_bytes(), GetCurrentSubmission(),
+                     frame_current_, deferred_command_buffer_.DescribeCommands());
+      }
+    }
     deferred_command_buffer_.Reset();
 
     // Reset cached state of the command buffer.
@@ -6042,6 +6856,35 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // may be reused.
     // FIXME(Triang3l): This will result in a memory leak if the guest is not
     // presenting.
+    if (!g_uniform_checks.empty()) {
+      size_t kept = 0;
+      for (size_t i = 0; i < g_uniform_checks.size(); ++i) {
+        const UniformCheck& check = g_uniform_checks[i];
+        if (check.frame > frame_completed_) {
+          g_uniform_checks[kept++] = check;
+          continue;
+        }
+        ++g_uniform_checked;
+        const uint64_t now_hash = XXH3_64bits(check.mapping, check.size);
+        if (now_hash != check.hash) {
+          ++g_uniform_mismatches;
+          if (g_uniform_mismatches <= 50) {
+            REXGPU_ERROR("[UNIFORM] kind {} block of {} bytes for frame {} (completed {}) changed "
+                         "between record and completion: {:016X} -> {:016X}",
+                         check.kind, check.size, check.frame, frame_completed_, check.hash,
+                         now_hash);
+          }
+        }
+      }
+      g_uniform_checks.resize(kept);
+      static uint64_t next_report = 0;
+      if (g_uniform_checked >= next_report) {
+        next_report = g_uniform_checked + 20000;
+        REXGPU_INFO("[UNIFORM] {} constant blocks verified at frame completion, {} mismatches, "
+                    "{} pending",
+                    g_uniform_checked, g_uniform_mismatches, g_uniform_checks.size());
+      }
+    }
     uniform_buffer_pool_->Reclaim(frame_completed_);
     while (!single_transient_descriptors_used_.empty()) {
       const UsedSingleTransientDescriptor& used_transient_descriptor =
@@ -6248,6 +7091,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       return false;
     }
     deferred_command_buffer_.Execute(command_buffer.buffer);
+    // The stream has been recorded into the real command buffer; clear it now
+    // so that anything recorded before the next BeginSubmission is visible as
+    // such (see the [SUBMISSION] diagnostic there) instead of being mistaken
+    // for this submission's leftovers.
+    deferred_command_buffer_.Reset();
     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
       REXGPU_ERROR("Failed to end a Vulkan command buffer");
       return false;
@@ -6336,6 +7184,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
       ClearTransientDescriptorPools();
 
+      g_uniform_checks.clear();
       uniform_buffer_pool_->ClearCache();
 
       texture_cache_->ClearCache();
@@ -6532,8 +7381,10 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
-  uint32_t draw_resolution_scale_x = texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
-  uint32_t draw_resolution_scale_y = texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1;
+  uint32_t draw_resolution_scale_x =
+      render_target_cache_ ? render_target_cache_->current_draw_scale_x() : 1;
+  uint32_t draw_resolution_scale_y =
+      render_target_cache_ ? render_target_cache_->current_draw_scale_y() : 1;
 
   // Window parameters.
   // http://ftp.tku.edu.tw/NetBSD/NetBSD-current/xsrc/external/mit/xf86-video-ati/dist/src/r600_reg_auto_r6xx.h
@@ -6759,8 +7610,8 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 
   bool edram_fragment_shader_interlock =
       render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+  uint32_t draw_resolution_scale_x = render_target_cache_->current_draw_scale_x();
+  uint32_t draw_resolution_scale_y = render_target_cache_->current_draw_scale_y();
 
   // Get the color info register values for each render target. Also, for FSI,
   // exclude components that don't exist in the format from the write mask.
@@ -7245,6 +8096,14 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
+  {
+    const std::string& check_vs = REXCVAR_GET(gpu_check_instanced_vs);
+    g_uniform_check_armed =
+        !check_vs.empty() &&
+        check_vs.find(fmt::format("{:016X}", vertex_shader->ucode_data_hash())) !=
+            std::string::npos;
+  }
+
   // Invalidate constant buffers and descriptors for changed data.
 
   // Float constants.
@@ -7343,6 +8202,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
+      uint8_t* const float_constants_mapping_start = mapping;
       for (uint32_t i = 0; i < 4; ++i) {
         uint64_t float_constant_map_entry = current_float_constant_map_vertex_[i];
         const uint32_t* float_constants_base =
@@ -7360,6 +8220,14 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
               run_length >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << run_length) - 1);
           float_constant_map_entry &= ~(run_mask << float_constant_index);
         }
+      }
+      if (g_uniform_check_armed) {
+        UniformCheck& check = g_uniform_checks.emplace_back();
+        check.mapping = float_constants_mapping_start;
+        check.size = float_constants_size;
+        check.hash = XXH3_64bits(float_constants_mapping_start, float_constants_size);
+        check.frame = frame_current_;
+        check.kind = 1;
       }
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFloatVertex;
@@ -7434,6 +8302,14 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       }
       buffer_info.range = VkDeviceSize(kFetchConstantsSize);
       std::memcpy(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], kFetchConstantsSize);
+      if (g_uniform_check_armed) {
+        UniformCheck& check = g_uniform_checks.emplace_back();
+        check.mapping = mapping;
+        check.size = kFetchConstantsSize;
+        check.hash = XXH3_64bits(mapping, kFetchConstantsSize);
+        check.frame = frame_current_;
+        check.kind = 2;
+      }
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFetch;
     }

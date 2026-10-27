@@ -569,6 +569,12 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   dfn.vkUpdateDescriptorSets(device, 1, &edram_storage_buffer_descriptor_write, 0, nullptr);
 
   bool draw_resolution_scaled = IsDrawResolutionScaled();
+  // Selective per-class scaling (host-RT path only, decided in
+  // InitializeCommon below) needs both resolve-copy variants: scene resolves
+  // stay scaled while shadow/post resolves write back at 1x.
+  bool selective_rt_scale =
+      GetPath() == Path::kHostRenderTargets && draw_resolution_scaled &&
+      REXCVAR_GET(selective_rt_scale);
 
   // Resolve copy pipeline layout.
   VkDescriptorSetLayout resolve_copy_descriptor_set_layouts[kResolveCopyDescriptorSetCount] = {};
@@ -581,10 +587,12 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   resolve_copy_push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
   resolve_copy_push_constant_range.offset = 0;
   // Potentially binding all of the shared memory at 1x resolution, but only
-  // portions with scaled resolution.
+  // portions with scaled resolution. DestRelative is a prefix of the full
+  // constants, so the larger range covers both variants when both exist.
   resolve_copy_push_constant_range.size =
-      draw_resolution_scaled ? sizeof(draw_util::ResolveCopyShaderConstants::DestRelative)
-                             : sizeof(draw_util::ResolveCopyShaderConstants);
+      (draw_resolution_scaled && !selective_rt_scale)
+          ? sizeof(draw_util::ResolveCopyShaderConstants::DestRelative)
+          : sizeof(draw_util::ResolveCopyShaderConstants);
   VkPipelineLayoutCreateInfo resolve_copy_pipeline_layout_create_info;
   resolve_copy_pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   resolve_copy_pipeline_layout_create_info.pNext = nullptr;
@@ -632,31 +640,40 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
   create_direct_resolve_pipeline_layout(descriptor_set_layout_sampled_image_x2_,
                                         &direct_resolve_pipeline_layout_depth_);
 
-  // Resolve copy pipelines.
-  for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
-    const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
-        draw_util::resolve_copy_shader_info[i];
-    const ResolveCopyShaderCode& resolve_copy_shader_code = kResolveCopyShaders[i];
-    // Somewhat verification whether resolve_copy_shaders_ is up to date.
-    assert_true(resolve_copy_shader_code.unscaled && resolve_copy_shader_code.unscaled_size_bytes &&
-                resolve_copy_shader_code.scaled && resolve_copy_shader_code.scaled_size_bytes);
-    VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
-        vulkan_device, resolve_copy_pipeline_layout_,
-        draw_resolution_scaled ? resolve_copy_shader_code.scaled
-                               : resolve_copy_shader_code.unscaled,
-        draw_resolution_scaled ? resolve_copy_shader_code.scaled_size_bytes
-                               : resolve_copy_shader_code.unscaled_size_bytes);
-    if (resolve_copy_pipeline == VK_NULL_HANDLE) {
-      REXGPU_ERROR(
-          "VulkanRenderTargetCache: Failed to create the resolve copy "
-          "pipeline {}",
-          resolve_copy_shader_info.debug_name);
-      Shutdown();
-      return false;
+  // Resolve copy pipelines. Variant 0 is guest-resolution, variant 1 is
+  // draw_resolution_scale. Under selective scaling both are created.
+  for (size_t variant = 0; variant < 2; ++variant) {
+    bool variant_scaled = variant != 0;
+    if (variant_scaled != draw_resolution_scaled && !selective_rt_scale) {
+      continue;
     }
-    vulkan_device->SetObjectName(VK_OBJECT_TYPE_PIPELINE, resolve_copy_pipeline,
-                                 resolve_copy_shader_info.debug_name);
-    resolve_copy_pipelines_[i] = resolve_copy_pipeline;
+    for (size_t i = 0; i < size_t(draw_util::ResolveCopyShaderIndex::kCount); ++i) {
+      const draw_util::ResolveCopyShaderInfo& resolve_copy_shader_info =
+          draw_util::resolve_copy_shader_info[i];
+      const ResolveCopyShaderCode& resolve_copy_shader_code = kResolveCopyShaders[i];
+      // Somewhat verification whether resolve_copy_shaders_ is up to date.
+      assert_true(resolve_copy_shader_code.unscaled &&
+                  resolve_copy_shader_code.unscaled_size_bytes &&
+                  resolve_copy_shader_code.scaled &&
+                  resolve_copy_shader_code.scaled_size_bytes);
+      VkPipeline resolve_copy_pipeline = ui::vulkan::util::CreateComputePipeline(
+          vulkan_device, resolve_copy_pipeline_layout_,
+          variant_scaled ? resolve_copy_shader_code.scaled
+                         : resolve_copy_shader_code.unscaled,
+          variant_scaled ? resolve_copy_shader_code.scaled_size_bytes
+                         : resolve_copy_shader_code.unscaled_size_bytes);
+      if (resolve_copy_pipeline == VK_NULL_HANDLE) {
+        REXGPU_ERROR(
+            "VulkanRenderTargetCache: Failed to create the resolve copy "
+            "pipeline {}",
+            resolve_copy_shader_info.debug_name);
+        Shutdown();
+        return false;
+      }
+      vulkan_device->SetObjectName(VK_OBJECT_TYPE_PIPELINE, resolve_copy_pipeline,
+                                   resolve_copy_shader_info.debug_name);
+      resolve_copy_pipelines_[variant][i] = resolve_copy_pipeline;
+    }
   }
 
   if (path_ == Path::kHostRenderTargets) {
@@ -1019,10 +1036,12 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   dump_pipelines_.clear();
   for (const auto& direct_resolve_pipeline_pair : direct_resolve_pipelines_) {
     bool aliased_resolve_copy_pipeline = false;
-    for (VkPipeline resolve_copy_pipeline : resolve_copy_pipelines_) {
-      if (direct_resolve_pipeline_pair.second == resolve_copy_pipeline) {
-        aliased_resolve_copy_pipeline = true;
-        break;
+    for (const auto& resolve_copy_pipeline_variant : resolve_copy_pipelines_) {
+      for (VkPipeline resolve_copy_pipeline : resolve_copy_pipeline_variant) {
+        if (direct_resolve_pipeline_pair.second == resolve_copy_pipeline) {
+          aliased_resolve_copy_pipeline = true;
+          break;
+        }
       }
     }
     if (direct_resolve_pipeline_pair.second != VK_NULL_HANDLE && !aliased_resolve_copy_pipeline) {
@@ -1083,8 +1102,10 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   }
   render_passes_.clear();
 
-  for (VkPipeline& resolve_copy_pipeline : resolve_copy_pipelines_) {
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, resolve_copy_pipeline);
+  for (auto& resolve_copy_pipeline_variant : resolve_copy_pipelines_) {
+    for (VkPipeline& resolve_copy_pipeline : resolve_copy_pipeline_variant) {
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, resolve_copy_pipeline);
+    }
   }
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
                                          resolve_copy_pipeline_layout_);
@@ -1150,11 +1171,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   written_address_out = 0;
   written_length_out = 0;
 
-  bool draw_resolution_scaled = IsDrawResolutionScaled();
+  uint32_t resolve_scale_x = draw_resolution_scale_x();
+  uint32_t resolve_scale_y = draw_resolution_scale_y();
 
   draw_util::ResolveInfo resolve_info;
-  if (!draw_util::GetResolveInfo(register_file(), memory, draw_resolution_scale_x(),
-                                 draw_resolution_scale_y(), IsFixedRG16TruncatedToMinus1To1(),
+  if (!draw_util::GetResolveInfo(register_file(), memory, resolve_scale_x, resolve_scale_y,
+                                 IsFixedRG16TruncatedToMinus1To1(),
                                  IsFixedRGBA16TruncatedToMinus1To1(), resolve_info)) {
     return false;
   }
@@ -1163,6 +1185,64 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
     return true;
   }
+
+  // Selective scaling: the resolve destination's scale is that of the render
+  // targets owning the copied EDRAM span (the EDRAM tile span itself is
+  // scale-independent). Scene resolves stay scaled; 1x-class sources resolve
+  // directly into shared memory, unscaled.
+  if (GetPath() == Path::kHostRenderTargets && selective_rt_scale_ &&
+      resolve_info.copy_dest_extent_length) {
+    uint32_t dump_base, dump_row_length_used, dump_rows, dump_pitch;
+    resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+    GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
+                                   dump_rectangles_);
+    uint32_t source_scale_x = 0, source_scale_y = 0;
+    bool mixed_scales = false;
+    for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+      uint32_t rect_scale_x = ScaleForKeyX(rectangle.render_target->key());
+      uint32_t rect_scale_y = ScaleForKeyY(rectangle.render_target->key());
+      if (!source_scale_x) {
+        source_scale_x = rect_scale_x;
+        source_scale_y = rect_scale_y;
+      } else if (rect_scale_x != source_scale_x || rect_scale_y != source_scale_y) {
+        mixed_scales = true;
+      }
+    }
+    if (source_scale_x) {
+      if (mixed_scales) {
+        // One resolve can only be written at one scale, but the guest's
+        // destination is a single contiguous range regardless of which class
+        // each source target is in. Writing the whole span unscaled into
+        // shared memory is always valid for the guest; scaled-class sources
+        // in the span just resolve at 1x this once (typically title/menu
+        // surfaces, not the scene). Writing it scaled instead would put the
+        // data in the scaled resolve region, leaving the guest-visible shared
+        // memory stale for ranges the guest reads at 1x.
+        static bool mixed_scale_resolve_warned = false;
+        if (!mixed_scale_resolve_warned) {
+          mixed_scale_resolve_warned = true;
+          REXGPU_WARN(
+              "Selective scaling: resolve span covers render targets with "
+              "mixed scale classes - resolving the span unscaled");
+        }
+        source_scale_x = 1;
+        source_scale_y = 1;
+      }
+      if (source_scale_x != resolve_scale_x || source_scale_y != resolve_scale_y) {
+        resolve_scale_x = source_scale_x;
+        resolve_scale_y = source_scale_y;
+        if (!draw_util::GetResolveInfo(register_file(), memory, resolve_scale_x, resolve_scale_y,
+                                       IsFixedRG16TruncatedToMinus1To1(),
+                                       IsFixedRGBA16TruncatedToMinus1To1(), resolve_info)) {
+          return false;
+        }
+        if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
+          return true;
+        }
+      }
+    }
+  }
+  bool draw_resolution_scaled = resolve_scale_x > 1 || resolve_scale_y > 1;
 
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -1175,7 +1255,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
     draw_util::ResolveCopyShaderConstants copy_shader_constants;
     uint32_t copy_group_count_x, copy_group_count_y;
     draw_util::ResolveCopyShaderIndex copy_shader =
-        resolve_info.GetCopyShader(draw_resolution_scale_x(), draw_resolution_scale_y(),
+        resolve_info.GetCopyShader(resolve_scale_x, resolve_scale_y,
                                    copy_shader_constants, copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
     if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
@@ -1280,7 +1360,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           }
           UseEdramBuffer(EdramBufferUsage::kComputeRead);
           command_processor_.BindExternalComputePipeline(
-              resolve_copy_pipelines_[size_t(copy_shader)]);
+              resolve_copy_pipelines_[draw_resolution_scaled ? 1 : 0][size_t(copy_shader)]);
           VkDescriptorSet descriptor_sets[kResolveCopyDescriptorSetCount] = {};
           descriptor_sets[kResolveCopyDescriptorSetEdram] = edram_storage_buffer_descriptor_set_;
           descriptor_sets[kResolveCopyDescriptorSetDest] = descriptor_set_dest;
@@ -1306,7 +1386,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
 
           // Invalidate textures and mark the range as scaled if needed.
           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
-                                            resolve_info.copy_dest_extent_length);
+                                            resolve_info.copy_dest_extent_length,
+                                            draw_resolution_scaled);
           written_address_out = resolve_info.copy_dest_extent_start;
           written_length_out = resolve_info.copy_dest_extent_length;
           copied = true;
@@ -1351,7 +1432,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                                                resolve_fsi_clear_pipeline_layout_, 0, 1,
                                                &edram_storage_buffer_descriptor_set_, 0, nullptr);
         std::pair<uint32_t, uint32_t> clear_group_count = resolve_info.GetClearShaderGroupCount(
-            draw_resolution_scale_x(), draw_resolution_scale_y());
+            resolve_scale_x, resolve_scale_y);
         assert_true(clear_group_count.first && clear_group_count.second);
         if (clear_depth) {
           command_processor_.BindExternalComputePipeline(resolve_fsi_clear_32bpp_pipeline_);
@@ -1900,9 +1981,10 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
   image_create_info.pNext = nullptr;
   image_create_info.flags = 0;
   image_create_info.imageType = VK_IMAGE_TYPE_2D;
-  image_create_info.extent.width = key.GetWidth() * draw_resolution_scale_x();
+  image_create_info.extent.width = key.GetWidth() * ScaleForKeyX(key);
   image_create_info.extent.height =
-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) * draw_resolution_scale_y();
+      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples, ScaleForKeyY(key)) *
+      ScaleForKeyY(key);
   image_create_info.extent.depth = 1;
   image_create_info.mipLevels = 1;
   image_create_info.arrayLayers = 1;
@@ -2297,10 +2379,20 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
   framebuffer_create_info.attachmentCount = attachment_count;
   framebuffer_create_info.pAttachments = attachments;
   VkExtent2D host_extent;
+  uint32_t framebuffer_scale_x = draw_resolution_scale_x();
+  uint32_t framebuffer_scale_y = draw_resolution_scale_y();
   if (pitch_tiles_at_32bpp) {
+    // All attachments share pitch and MSAA, so they all fall into one scale
+    // class - classify once from the key fields.
+    RenderTargetKey class_key;
+    class_key.pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
+    class_key.msaa_samples = render_pass_key.msaa_samples;
+    framebuffer_scale_x = ScaleForKeyX(class_key);
+    framebuffer_scale_y = ScaleForKeyY(class_key);
     host_extent.width =
         RenderTargetKey::GetWidth(pitch_tiles_at_32bpp, render_pass_key.msaa_samples);
-    host_extent.height = GetRenderTargetHeight(pitch_tiles_at_32bpp, render_pass_key.msaa_samples);
+    host_extent.height = GetRenderTargetHeight(pitch_tiles_at_32bpp,
+                                               render_pass_key.msaa_samples, framebuffer_scale_y);
   } else {
     assert_zero(render_pass_key.depth_and_color_used);
     // Still needed for occlusion queries.
@@ -2310,10 +2402,10 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
   // Limiting to the device limit for the case of no attachments, for which
   // there's no limit imposed by the sizes of the attachments that have been
   // created successfully.
-  host_extent.width = std::min(host_extent.width * draw_resolution_scale_x(),
-                               device_properties.maxFramebufferWidth);
-  host_extent.height = std::min(host_extent.height * draw_resolution_scale_y(),
-                                device_properties.maxFramebufferHeight);
+  host_extent.width =
+      std::min(host_extent.width * framebuffer_scale_x, device_properties.maxFramebufferWidth);
+  host_extent.height =
+      std::min(host_extent.height * framebuffer_scale_y, device_properties.maxFramebufferHeight);
   framebuffer_create_info.width = host_extent.width;
   framebuffer_create_info.height = host_extent.height;
   framebuffer_create_info.layers = 1;
@@ -2645,8 +2737,30 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
   // Working with unsigned numbers for simplicity now, bitcasting to signed will
   // be done at texture fetch.
 
-  uint32_t tile_width_samples = xenos::kEdramTileWidthSamples * draw_resolution_scale_x();
-  uint32_t tile_height_samples = xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
+  const uint32_t dest_scale_x =
+      key.resolution_scaled_x ? draw_resolution_scale_x() : 1;
+  const uint32_t dest_scale_y =
+      key.resolution_scaled_y ? draw_resolution_scale_y() : 1;
+  const uint32_t source_scale_x =
+      key.source_resolution_scaled_x ? draw_resolution_scale_x() : 1;
+  const uint32_t source_scale_y =
+      key.source_resolution_scaled_y ? draw_resolution_scale_y() : 1;
+  // Different scale classes - the destination position is normalized to guest
+  // units before the layout remap (which is defined in guest units), and the
+  // resulting source position is scaled back to source host pixels.
+  const bool resampled_transfer =
+      dest_scale_x != source_scale_x || dest_scale_y != source_scale_y;
+
+  uint32_t tile_width_samples =
+      xenos::kEdramTileWidthSamples *
+      (key.resolution_scaled_x ? draw_resolution_scale_x() : 1);
+  uint32_t tile_height_samples =
+      xenos::kEdramTileHeightSamples *
+      (key.resolution_scaled_y ? draw_resolution_scale_y() : 1);
+  const uint32_t source_tile_width_samples =
+      xenos::kEdramTileWidthSamples * source_scale_x;
+  const uint32_t source_tile_height_samples =
+      xenos::kEdramTileHeightSamples * source_scale_y;
 
   // Split the destination pixel index into 32bpp tile and 32bpp-tile-relative
   // pixel index.
@@ -2679,6 +2793,17 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
       builder.createBinOp(spv::OpUDiv, type_uint, dest_pixel_y, const_dest_tile_height_pixels);
   spv::Id dest_tile_pixel_y =
       builder.createBinOp(spv::OpUMod, type_uint, dest_pixel_y, const_dest_tile_height_pixels);
+
+  if (resampled_transfer) {
+    // The remap below operates on guest-space positions - take the host-space
+    // destination position down to guest units first.
+    dest_tile_pixel_x =
+        builder.createBinOp(spv::OpUDiv, type_uint, dest_tile_pixel_x,
+                            builder.makeUintConstant(dest_scale_x));
+    dest_tile_pixel_y =
+        builder.createBinOp(spv::OpUDiv, type_uint, dest_tile_pixel_y,
+                            builder.makeUintConstant(dest_scale_y));
+  }
 
   assert_true(push_constants_member_address != UINT32_MAX);
   id_vector_temp.clear();
@@ -2997,6 +3122,17 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
     }
   }
 
+  if (resampled_transfer) {
+    // The remap produced a source position in guest units - bring it back to
+    // source host pixels (nearest sample of the scaled source).
+    source_tile_pixel_x =
+        builder.createBinOp(spv::OpIMul, type_uint, source_tile_pixel_x,
+                            builder.makeUintConstant(source_scale_x));
+    source_tile_pixel_y =
+        builder.createBinOp(spv::OpIMul, type_uint, source_tile_pixel_y,
+                            builder.makeUintConstant(source_scale_y));
+  }
+
   uint32_t source_pixel_width_dwords_log2 =
       uint32_t(key.source_msaa_samples >= xenos::MsaaSamples::k4X) + uint32_t(source_is_64bpp);
 
@@ -3004,7 +3140,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
     // Copying between color and depth / stencil - swap 40-32bpp-sample columns
     // in the pixel index within the source 32bpp tile.
     uint32_t source_32bpp_tile_half_pixels =
-        tile_width_samples >> (1 + source_pixel_width_dwords_log2);
+        source_tile_width_samples >> (1 + source_pixel_width_dwords_log2);
     source_tile_pixel_x = builder.createUnaryOp(
         spv::OpBitcast, type_uint,
         builder.createBinOp(
@@ -3051,7 +3187,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
           spv::OpIAdd, type_uint,
           builder.createBinOp(
               spv::OpIMul, type_uint,
-              builder.makeUintConstant(tile_width_samples >> source_pixel_width_dwords_log2),
+              builder.makeUintConstant(source_tile_width_samples >>
+                                       source_pixel_width_dwords_log2),
               source_tile_index_x),
           source_tile_pixel_x));
   spv::Id source_pixel_y_int = builder.createUnaryOp(
@@ -3060,8 +3197,9 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
           spv::OpIAdd, type_uint,
           builder.createBinOp(
               spv::OpIMul, type_uint,
-              builder.makeUintConstant(tile_height_samples >> uint32_t(key.source_msaa_samples >=
-                                                                       xenos::MsaaSamples::k2X)),
+              builder.makeUintConstant(source_tile_height_samples >>
+                                       uint32_t(key.source_msaa_samples >=
+                                                xenos::MsaaSamples::k2X)),
               source_tile_index_y),
           source_tile_pixel_y));
 
@@ -4590,21 +4728,6 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
 
   bool resolve_clear_needed = render_target_resolve_clear_values && resolve_clear_rectangle;
-  VkClearRect resolve_clear_rect;
-  if (resolve_clear_needed) {
-    // Assuming the rectangle is already clamped by the setup function from the
-    // common render target cache.
-    resolve_clear_rect.rect.offset.x =
-        int32_t(resolve_clear_rectangle->x_pixels * draw_resolution_scale_x());
-    resolve_clear_rect.rect.offset.y =
-        int32_t(resolve_clear_rectangle->y_pixels * draw_resolution_scale_y());
-    resolve_clear_rect.rect.extent.width =
-        resolve_clear_rectangle->width_pixels * draw_resolution_scale_x();
-    resolve_clear_rect.rect.extent.height =
-        resolve_clear_rectangle->height_pixels * draw_resolution_scale_y();
-    resolve_clear_rect.baseArrayLayer = 0;
-    resolve_clear_rect.layerCount = 1;
-  }
 
   // Do host depth storing for the depth destination (assuming there can be only
   // one depth destination) where depth destination == host depth source.
@@ -4639,8 +4762,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             host_depth_store_descriptor_sets, 0, nullptr);
         // Render target constant.
         HostDepthStoreRenderTargetConstant host_depth_store_render_target_constant =
-            GetHostDepthStoreRenderTargetConstant(dest_rt_key.pitch_tiles_at_32bpp,
-                                                  msaa_2x_attachments_supported_);
+            GetHostDepthStoreRenderTargetConstant(
+                dest_rt_key.pitch_tiles_at_32bpp, ScaleForKeyX(dest_rt_key),
+                ScaleForKeyY(dest_rt_key), msaa_2x_attachments_supported_);
         command_buffer.CmdVkPushConstants(
             host_depth_store_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
             uint32_t(offsetof(HostDepthStoreConstants, render_target)),
@@ -4674,6 +4798,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       for (uint32_t j = 0; j < transfer_rectangle_count; ++j) {
         uint32_t group_count_x, group_count_y;
         GetHostDepthStoreRectangleInfo(transfer_rectangles[j], dest_rt_key.msaa_samples,
+                                       ScaleForKeyX(dest_rt_key), ScaleForKeyY(dest_rt_key),
                                        host_depth_store_rectangle_constant, group_count_x,
                                        group_count_y);
         command_buffer.CmdVkPushConstants(
@@ -4883,6 +5008,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       TransferShaderKey new_transfer_shader_key;
       new_transfer_shader_key.dest_msaa_samples = dest_rt_key.msaa_samples;
       new_transfer_shader_key.dest_resource_format = dest_rt_key.resource_format;
+      // Source and destination scales are verified equal above.
+      new_transfer_shader_key.resolution_scaled_x = ScaleForKeyX(dest_rt_key) > 1 ? 1 : 0;
+      new_transfer_shader_key.resolution_scaled_y = ScaleForKeyY(dest_rt_key) > 1 ? 1 : 0;
       uint32_t stencil_clear_rectangle_count = 0;
       for (uint32_t j = 0; j <= uint32_t(need_stencil_bit_draws); ++j) {
         // j == 0 - color or depth.
@@ -4913,6 +5041,43 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             source_vulkan_rt.SetTemporarySortIndex(rt_sort_index++);
           }
           RenderTargetKey source_rt_key = source_vulkan_rt.key();
+          new_transfer_shader_key.source_resolution_scaled_x =
+              ScaleForKeyX(source_rt_key) > 1 ? 1 : 0;
+          new_transfer_shader_key.source_resolution_scaled_y =
+              ScaleForKeyY(source_rt_key) > 1 ? 1 : 0;
+          if (ScaleForKeyX(source_rt_key) != ScaleForKeyX(dest_rt_key) ||
+              ScaleForKeyY(source_rt_key) != ScaleForKeyY(dest_rt_key) ||
+              (host_depth_source_vulkan_rt &&
+               host_depth_source_vulkan_rt != &dest_vulkan_rt &&
+               (ScaleForKeyX(host_depth_source_vulkan_rt->key()) !=
+                    ScaleForKeyX(dest_rt_key) ||
+                ScaleForKeyY(host_depth_source_vulkan_rt->key()) !=
+                    ScaleForKeyY(dest_rt_key)))) {
+            // A resampled transfer can only carry same-aspect, same-format
+            // content between scale classes - the tile remap below is
+            // evaluated in guest coordinates in that case. Host depth
+            // composites and 32bpp<->64bpp reinterpretation still can't cross
+            // classes: ownership is updated, but the new target doesn't get
+            // the old contents.
+            if (source_rt_key.is_depth != dest_rt_key.is_depth ||
+                source_rt_key.resource_format != dest_rt_key.resource_format ||
+                (host_depth_source_vulkan_rt &&
+                 host_depth_source_vulkan_rt != &dest_vulkan_rt)) {
+              static int cross_class_transfer_warned = 0;
+              if (cross_class_transfer_warned < 40) {
+                ++cross_class_transfer_warned;
+                REXGPU_WARN(
+                    "Selective scaling: skipping a render target ownership "
+                    "transfer between different scale classes ({}xMSAA {} "
+                    "pitch={} -> {}xMSAA {} pitch={})",
+                    uint32_t(1) << uint32_t(source_rt_key.msaa_samples),
+                    source_rt_key.GetFormatName(), source_rt_key.GetWidth(),
+                    uint32_t(1) << uint32_t(dest_rt_key.msaa_samples),
+                    dest_rt_key.GetFormatName(), dest_rt_key.GetWidth());
+              }
+              continue;
+            }
+          }
           new_transfer_shader_key.source_msaa_samples = source_rt_key.msaa_samples;
           new_transfer_shader_key.source_resource_format = source_rt_key.resource_format;
           bool host_depth_source_is_copy = host_depth_source_vulkan_rt == &dest_vulkan_rt;
@@ -5018,13 +5183,13 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
             const Transfer::Rectangle& stencil_clear_rectangle =
                 transfer_stencil_clear_rectangles[j];
             stencil_clear_rect_write_ptr->rect.offset.x =
-                int32_t(stencil_clear_rectangle.x_pixels * draw_resolution_scale_x());
+                int32_t(stencil_clear_rectangle.x_pixels * ScaleForKeyX(dest_rt_key));
             stencil_clear_rect_write_ptr->rect.offset.y =
-                int32_t(stencil_clear_rectangle.y_pixels * draw_resolution_scale_y());
+                int32_t(stencil_clear_rectangle.y_pixels * ScaleForKeyY(dest_rt_key));
             stencil_clear_rect_write_ptr->rect.extent.width =
-                stencil_clear_rectangle.width_pixels * draw_resolution_scale_x();
+                stencil_clear_rectangle.width_pixels * ScaleForKeyX(dest_rt_key);
             stencil_clear_rect_write_ptr->rect.extent.height =
-                stencil_clear_rectangle.height_pixels * draw_resolution_scale_y();
+                stencil_clear_rectangle.height_pixels * ScaleForKeyY(dest_rt_key);
             stencil_clear_rect_write_ptr->baseArrayLayer = 0;
             stencil_clear_rect_write_ptr->layerCount = 1;
             ++stencil_clear_rect_write_ptr;
@@ -5046,8 +5211,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       transfer_viewport.minDepth = 0.0f;
       transfer_viewport.maxDepth = 1.0f;
       command_processor_.SetViewport(transfer_viewport);
-      float pixels_to_ndc_x = (2.0f / transfer_viewport.width) * float(draw_resolution_scale_x());
-      float pixels_to_ndc_y = (2.0f / transfer_viewport.height) * float(draw_resolution_scale_y());
+      float pixels_to_ndc_x = (2.0f / transfer_viewport.width) * float(ScaleForKeyX(dest_rt_key));
+      float pixels_to_ndc_y = (2.0f / transfer_viewport.height) * float(ScaleForKeyY(dest_rt_key));
       VkRect2D transfer_scissor;
       transfer_scissor.offset.x = 0;
       transfer_scissor.offset.y = 0;
@@ -5434,6 +5599,19 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
           } break;
         }
       }
+      // The rectangle is in guest pixels - scale it to the destination render
+      // target's class scale.
+      VkClearRect resolve_clear_rect;
+      resolve_clear_rect.rect.offset.x =
+          int32_t(resolve_clear_rectangle->x_pixels * ScaleForKeyX(dest_rt_key));
+      resolve_clear_rect.rect.offset.y =
+          int32_t(resolve_clear_rectangle->y_pixels * ScaleForKeyY(dest_rt_key));
+      resolve_clear_rect.rect.extent.width =
+          resolve_clear_rectangle->width_pixels * ScaleForKeyX(dest_rt_key);
+      resolve_clear_rect.rect.extent.height =
+          resolve_clear_rectangle->height_pixels * ScaleForKeyY(dest_rt_key);
+      resolve_clear_rect.baseArrayLayer = 0;
+      resolve_clear_rect.layerCount = 1;
       command_buffer.CmdVkClearAttachments(1, &resolve_clear_attachment, 1, &resolve_clear_rect);
     }
   }
@@ -5557,14 +5735,16 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
   spv::Id global_invocation_id = builder.createLoad(input_global_invocation_id, spv::NoPrecision);
   spv::Id rectangle_sample_x = builder.createCompositeExtract(global_invocation_id, type_uint, 0);
   uint32_t tile_width =
-      (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) * draw_resolution_scale_x();
+      (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) *
+      (key.resolution_scaled_x ? draw_resolution_scale_x() : 1);
   spv::Id const_tile_width = builder.makeUintConstant(tile_width);
   spv::Id rectangle_tile_index_x =
       builder.createBinOp(spv::OpUDiv, type_uint, rectangle_sample_x, const_tile_width);
   spv::Id tile_sample_x =
       builder.createBinOp(spv::OpUMod, type_uint, rectangle_sample_x, const_tile_width);
   spv::Id rectangle_sample_y = builder.createCompositeExtract(global_invocation_id, type_uint, 1);
-  uint32_t tile_height = xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
+  uint32_t tile_height = xenos::kEdramTileHeightSamples *
+                         (key.resolution_scaled_y ? draw_resolution_scale_y() : 1);
   spv::Id const_tile_height = builder.makeUintConstant(tile_height);
   spv::Id rectangle_tile_index_y =
       builder.createBinOp(spv::OpUDiv, type_uint, rectangle_sample_y, const_tile_height);
@@ -5997,7 +6177,7 @@ VkPipeline VulkanRenderTargetCache::GetDirectResolvePipeline(DirectResolvePipeli
   // direct preflight path.
   size_t copy_shader_index = size_t(key.copy_shader);
   if (copy_shader_index < size_t(draw_util::ResolveCopyShaderIndex::kCount)) {
-    pipeline = resolve_copy_pipelines_[copy_shader_index];
+    pipeline = resolve_copy_pipelines_[key.draw_resolution_scaled ? 1 : 0][copy_shader_index];
   }
   direct_resolve_pipelines_.emplace(key, pipeline);
   return pipeline;
@@ -6034,6 +6214,8 @@ bool VulkanRenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInf
     dump_pipeline_key.msaa_samples = render_target->key().msaa_samples;
     dump_pipeline_key.resource_format = render_target->key().resource_format;
     dump_pipeline_key.is_depth = render_target->key().is_depth;
+    dump_pipeline_key.resolution_scaled_x = ScaleForKeyX(render_target->key()) > 1 ? 1 : 0;
+    dump_pipeline_key.resolution_scaled_y = ScaleForKeyY(render_target->key()) > 1 ? 1 : 0;
     if (GetDumpPipeline(dump_pipeline_key) == VK_NULL_HANDLE) {
       return false;
     }
@@ -6090,6 +6272,8 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     pipeline_key.msaa_samples = rt_key.msaa_samples;
     pipeline_key.resource_format = rt_key.resource_format;
     pipeline_key.is_depth = rt_key.is_depth;
+    pipeline_key.resolution_scaled_x = ScaleForKeyX(rt_key) > 1 ? 1 : 0;
+    pipeline_key.resolution_scaled_y = ScaleForKeyY(rt_key) > 1 ? 1 : 0;
     dump_invocations_.emplace_back(rectangle, pipeline_key);
   }
 
@@ -6169,12 +6353,12 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
       }
       command_processor_.SubmitBarriers(true, VulkanCommandProcessor::kBarrierRenderTarget);
       command_buffer.CmdVkDispatch(
-          (draw_resolution_scale_x() *
+          (ScaleForKeyX(rt_key) *
                (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) *
                dispatch.width_tiles +
            (kDumpSamplesPerGroupX - 1)) /
               kDumpSamplesPerGroupX,
-          (draw_resolution_scale_y() * xenos::kEdramTileHeightSamples * dispatch.height_tiles +
+          (ScaleForKeyY(rt_key) * xenos::kEdramTileHeightSamples * dispatch.height_tiles +
            (kDumpSamplesPerGroupY - 1)) /
               kDumpSamplesPerGroupY,
           1);

@@ -17,6 +17,8 @@
 REXCVAR_DECLARE(bool, vsync);
 REXCVAR_DECLARE(int32_t, vsync_fps_cap);
 REXCVAR_DECLARE(bool, clear_memory_page_state);
+REXCVAR_DECLARE(bool, gpu_vertex_nan_kill_debug);
+REXCVAR_DECLARE(bool, gpu_bulk_register_writes);
 REXCVAR_DECLARE(bool, half_pixel_offset);
 REXCVAR_DECLARE(bool, async_shader_compilation);
 REXCVAR_DECLARE(std::string, texture_swizzle_override);
@@ -52,6 +54,10 @@ REXCVAR_DECLARE(bool, native_2x_msaa);
 REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
 REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
 REXCVAR_DECLARE(bool, direct_host_resolve);
+REXCVAR_DECLARE(bool, selective_rt_scale);
+REXCVAR_DECLARE(bool, rt_scale_shadow);
+REXCVAR_DECLARE(bool, rt_scale_reflection);
+REXCVAR_DECLARE(bool, rt_scale_post);
 
 // GPU Textures
 REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);

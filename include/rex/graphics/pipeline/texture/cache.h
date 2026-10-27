@@ -80,7 +80,12 @@ class TextureCache {
   virtual void BeginSubmission(uint64_t new_submission_index);
   virtual void BeginFrame();
 
-  void MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled);
+  void MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled,
+                           bool scaled = true);
+
+  // Checks if there are any pages that contain scaled resolve data within the
+  // range.
+  bool IsRangeScaledResolved(uint32_t start_unscaled, uint32_t length_unscaled);
   // Ensures the memory backing the range in the scaled resolve address space is
   // allocated and returns whether it is.
   virtual bool EnsureScaledResolveMemoryCommitted(uint32_t /*start_unscaled*/,
@@ -505,6 +510,7 @@ class TextureCache {
   // Returns nullptr not only if the key is not supported, but also if couldn't
   // create the texture - if it's nullptr, occasionally a recreation attempt
   // should be made.
+  void SubstituteNativeFmvPlane(const TextureKey& key);
   void DumpTextureToDisk(const TextureKey& key, const std::string& dir);
   Texture* FindOrCreateTexture(TextureKey key);
 
@@ -560,9 +566,6 @@ class TextureCache {
   static void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock,
                             void* context, void* data, uint64_t argument, bool invalidated_by_gpu);
 
-  // Checks if there are any pages that contain scaled resolve data within the
-  // range.
-  bool IsRangeScaledResolved(uint32_t start_unscaled, uint32_t length_unscaled);
   // Global shared memory invalidation callback for invalidating scaled resolved
   // texture data.
   static void ScaledResolveGlobalWatchCallbackThunk(

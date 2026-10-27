@@ -304,3 +304,142 @@ if(REXGLUE_USE_VULKAN)
         OGLCompiler
     )
 endif()
+
+#==============================================================================
+# rexgpu-stub: headless guest GPU plugin
+#
+# Selected at runtime with --gpu_plugin stub (loads librexgpu-stub.so).
+# Reuses the backend-agnostic PM4 command processor and GraphicsSystem base
+# (register MMIO, ring tracking, vblank, fence/writeback packets, swap
+# counters) but renders nothing: draws/copies are counted and skipped and
+# no provider or presenter is created. For per-title bring-up and for
+# isolating guest CPU cost from GPU emulation cost.
+#==============================================================================
+set(REXGPU_STUB_SOURCES
+    stub/plugin_main.cpp
+    stub/graphics_system.cpp
+    stub/command_processor.cpp
+
+    # Shared, game-agnostic PM4 + Xenos base (same subset rexgpu-native
+    # compiles for itself; the stub uses none of the rendering backends).
+    flags.cpp
+    register_file.cpp
+    registers.cpp
+    sampler_info.cpp
+    graphics_system.cpp
+    command_processor.cpp
+    packet_disassembler.cpp
+    # command_processor.cpp references g_shmem_force_log_until_ns
+    shared_memory.cpp
+)
+
+add_library(rexgpu-stub SHARED ${REXGPU_STUB_SOURCES})
+add_library(rex::gpu-stub ALIAS rexgpu-stub)
+
+set_target_properties(rexgpu-stub PROPERTIES
+    EXPORT_NAME gpu-stub
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+if(WIN32)
+    set_target_properties(rexgpu-stub PROPERTIES PREFIX "")
+endif()
+
+target_include_directories(rexgpu-stub PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${REXGLUE_ROOT}/thirdparty/renderdoc
+)
+
+target_compile_options(rexgpu-stub PRIVATE -Wno-unused-variable)
+
+target_link_libraries(rexgpu-stub PRIVATE
+    rexruntime
+    xxHash::xxhash
+)
+
+#==============================================================================
+# rexshader-translator (rex::shader-translator): linkable Xenos shader
+# translator for native device layers inside a port.
+#
+# Exactly the microcode -> SPIR-V translator and the Xenos register/ucode
+# model, and nothing of the emulation around it: no EDRAM render-target cache,
+# no write-watch shared memory, no primitive processor, no PM4 command
+# processor. A port links it with
+#     target_link_libraries(<port> PRIVATE rex::shader-translator)
+# after rexglue_setup_target(). See docs/native/SHADER_TRANSLATOR_TARGET.md.
+#
+# Compiled separately from the plugins on purpose: the plugins build with
+# hidden visibility and their own flags.cpp, and a static library shared with
+# them would either export their internals or collide on cvar registration.
+#==============================================================================
+if(REXGLUE_USE_VULKAN)
+    if(REXGLUE_GPU_BUILTIN)
+        # The builtin Xenos backend is already a static library linked into
+        # rexruntime; a second copy of these objects would duplicate symbols.
+        # Reuse it (this drags the rest of the backend along, which the
+        # builtin title carries anyway).
+        add_library(rexshader-translator INTERFACE)
+        target_link_libraries(rexshader-translator INTERFACE
+            rexgpu-xenos Vulkan::Headers glslang::SPIRV renderdoc)
+    else()
+        set(REXSHADER_TRANSLATOR_SOURCES
+            # Register / microcode model.
+            register_file.cpp
+            registers.cpp
+            format/ucode.cpp
+            # Shader analysis, ucode disassembly and the translator base.
+            pipeline/shader/shader.cpp
+            pipeline/shader/translator.cpp
+            pipeline/shader/translator_disasm.cpp
+            # Standalone cvar storage and the two draw_util constant tables
+            # (see the files for why they are not taken from flags.cpp /
+            # util/draw.cpp).
+            pipeline/shader/standalone_flags.cpp
+            pipeline/shader/standalone_draw_util.cpp
+            # Microcode -> SPIR-V.
+            ${REXGPU_XENOS_SPIRV_SOURCES}
+        )
+        add_library(rexshader-translator STATIC ${REXSHADER_TRANSLATOR_SOURCES})
+        set_target_properties(rexshader-translator PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+        )
+        target_compile_definitions(rexshader-translator PRIVATE
+            REX_SHADER_TRANSLATOR_STANDALONE=1)
+        target_compile_options(rexshader-translator PRIVATE -Wno-unused-variable)
+        rex_target_pch(rexshader-translator
+            <rex/math.h>
+            <rex/memory.h>
+            <rex/graphics/xenos.h>
+            <rex/graphics/registers.h>
+            <rex/graphics/format/ucode.h>
+            <rex/graphics/pipeline/shader/shader.h>
+        )
+        # PUBLIC: the headers a consumer includes (spirv_translator.h ->
+        # ui/vulkan/device.h -> Vulkan + renderdoc; spirv_builder.h ->
+        # SPIRV/SpvBuilder.h) and the runtime whose cvar/log/assert/filesystem
+        # services the sources call. The glslang internals are link-only.
+        target_link_libraries(rexshader-translator
+            PUBLIC
+                rexruntime
+                Vulkan::Headers
+                glslang::SPIRV
+                renderdoc
+            PRIVATE
+                glslang
+                MachineIndependent
+                GenericCodeGen
+                OSDependent
+                OGLCompiler
+        )
+    endif()
+    add_library(rex::shader-translator ALIAS rexshader-translator)
+    set_target_properties(rexshader-translator PROPERTIES EXPORT_NAME shader-translator)
+
+    # Host test: translates every dumped ucode file in a directory. Not part of
+    # ALL; build with --target shader_translator_test.
+    if(EXISTS ${REXGLUE_ROOT}/tests/shader_translator/CMakeLists.txt AND NOT REXGLUE_GPU_BUILTIN)
+        add_subdirectory(${REXGLUE_ROOT}/tests/shader_translator
+            ${CMAKE_BINARY_DIR}/tests/shader_translator EXCLUDE_FROM_ALL)
+    endif()
+endif()

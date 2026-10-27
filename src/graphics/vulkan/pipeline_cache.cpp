@@ -65,6 +65,10 @@ REXCVAR_DEFINE_STRING(
     "during the first frame that needs each one. A relative path is resolved "
     "against the executable's folder. Empty disables seeding.");
 
+REXCVAR_DEFINE_BOOL(gpu_vertex_nan_kill, false, "GPU",
+                    "Discard primitives that contain a vertex with a NaN position, as the Xbox "
+                    "360 does, via an extra clip distance. Titles hide geometry this way (PGR4 "
+                    "crowd instances); without it NVIDIA rasterizes huge stray triangles.");
 REXCVAR_DEFINE_BOOL(vulkan_pipeline_background_optimization, false, "GPU/Vulkan",
     "Create complete first-use pipelines without optimization, then optimize in background")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -1069,6 +1073,38 @@ VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
   return shader;
 }
 
+// Whether the current draw uses the NaN vertex kill, and if so the total clip
+// distance count (user clip planes in clip mode plus the NaN one) that both the
+// vertex and the pixel shader must declare. 0 if not used: the primitive types
+// that may go through a geometry shader (points, rectangle and quad lists) are
+// excluded because the geometry shaders do not forward the extra distance, as
+// is a full clip distance budget.
+uint32_t VulkanPipelineCache::GetNanKillClipDistanceCount() const {
+  const auto& regs = register_file_;
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      command_processor_.GetVulkanDevice()->properties();
+  if (!REXCVAR_GET(gpu_vertex_nan_kill) || !device_properties.shaderClipDistance) {
+    return 0;
+  }
+  xenos::PrimitiveType prim_type = regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type;
+  if (prim_type == xenos::PrimitiveType::kPointList ||
+      prim_type == xenos::PrimitiveType::kRectangleList ||
+      prim_type == xenos::PrimitiveType::kQuadList) {
+    return 0;
+  }
+  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  uint32_t user_clip_planes = pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+  uint32_t user_clip_distances = 0;
+  if (user_clip_planes &&
+      !(pa_cl_clip_cntl.ucp_cull_only_ena && device_properties.shaderCullDistance)) {
+    user_clip_distances = rex::bit_count(user_clip_planes);
+  }
+  if (user_clip_distances + 1 > 8) {
+    return 0;
+  }
+  return user_clip_distances + 1;
+}
+
 SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderModification(
     const Shader& shader, Shader::HostVertexShaderType host_vertex_shader_type,
     uint32_t interpolator_mask, bool ps_param_gen_used) const {
@@ -1121,6 +1157,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
       device_properties.shaderCullDistance &&
       (shader.writes_point_size_edge_flag_kill_vertex() & 0b100) && !pa_cl_clip_cntl.vtx_kill_or);
 
+  // NaN vertex kill through an extra clip distance (see GetNanKillClipDistanceCount).
+  modification.vertex.nan_kill = uint32_t(GetNanKillClipDistanceCount() != 0);
+  assert_true(!modification.vertex.nan_kill ||
+              modification.GetVertexClipDistanceCount() == GetNanKillClipDistanceCount());
+
   return modification;
 }
 
@@ -1136,6 +1177,12 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
           shader.GetDynamicAddressableRegisterCount(regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
 
   modification.pixel.interpolator_mask = interpolator_mask;
+  {
+    // Must match the vertex shader's clip distance output (NaN vertex kill).
+    uint32_t nan_kill_clip_distances = GetNanKillClipDistanceCount();
+    modification.pixel.nan_kill = uint32_t(nan_kill_clip_distances != 0);
+    modification.pixel.clip_distance_count = nan_kill_clip_distances;
+  }
   modification.pixel.interpolators_centroid =
       interpolator_mask & ~xenos::GetInterpolatorSamplingPattern(
                               regs.Get<reg::RB_SURFACE_INFO>().msaa_samples,
@@ -1163,7 +1210,7 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
                                                   ? DepthStencilMode::kFloat24Rounding
                                                   : DepthStencilMode::kFloat24Truncating;
     } else {
-      if (shader.implicit_early_z_write_allowed() &&
+      if (shader.implicit_early_z_write_allowed() && !modification.pixel.nan_kill &&
           (!shader.writes_color_target(0) ||
            !draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>()))) {
         modification.pixel.depth_stencil_mode = DepthStencilMode::kEarlyHint;

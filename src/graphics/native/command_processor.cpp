@@ -729,7 +729,7 @@ bool NativeCommandProcessor::CreateDrawResources() {
                vulkan_device_->properties().maxStorageBufferRange);
 
   const VkShaderStageFlags guest_stages =
-      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
   // Set 0: shared memory storage buffer (array of shared_memory_binding_count_).
   VkDescriptorSetLayoutBinding shared_binding = {};
@@ -1007,6 +1007,7 @@ void NativeCommandProcessor::BeginFrameIfNeeded() {
   phases_.clear();
   base_clear_point_.clear();
   base_last_resolve_.clear();
+  base_last_published_.clear();
   acquired_dest_keys_this_frame_.clear();
   // Reclaim slots displaced by a same-frame duplicate resolve. The submit that
   // used them completed before this point, so they are safe to destroy now.
@@ -3172,29 +3173,23 @@ bool NativeCommandProcessor::IssueCopy() {
     base_clear_point_[src_base] = phase.end_draw;
   }
 
-  // Re-publication: this resolve owns no new draws, so it is copying EDRAM
-  // content some earlier resolve of the same base already captured. Point the
-  // new destination at that image instead of rendering nothing.
+  // Re-publication copies the same EDRAM content to a different guest texture.
+  // Replay its draw range into a separate destination-sized image: the previous
+  // destination may be a small post-process target, and aliasing it would both
+  // produce invalid copy extents and sample the wrong normalized texture size.
+  // Draw indices from an earlier frame do not describe this frame's EDRAM.
   if (phase.end_draw <= phase.first_draw) {
     auto prev = base_last_published_.find(src_base);
-    if (prev != base_last_published_.end() &&
-        prev->second.index < resolved_target_storage_.size()) {
-      const ResolvedTarget& img = resolved_target_storage_[prev->second.index];
-      if (img.view != VK_NULL_HANDLE) {
-        resolved_target_views_[dest_key] = img.view;
-        resolved_target_index_[dest_key] = prev->second.index;
-        resolved_target_dims_[dest_key] = {img.width, img.height};
-        phase.first_draw = prev->second.first_draw;
-        phase.end_draw = prev->second.end_draw;
-        phase.resolved_index = prev->second.index;
-        phase.republished = true;
-        phases_.push_back(phase);
-        copy_exit("REPUBLISHED");
-        return true;
-      }
+    if (prev != base_last_published_.end() && !phase.clears_color &&
+        prev->second.first_draw <= prev->second.end_draw &&
+        prev->second.end_draw == phase.end_draw &&
+        prev->second.end_draw <= deferred_draws_.size()) {
+      phase.first_draw = prev->second.first_draw;
+      phase.end_draw = prev->second.end_draw;
+    } else {
+      copy_exit("empty_no_current_frame_publish");
+      return true;
     }
-    copy_exit("empty_no_prior_publish");
-    return true;
   }
 
   if (resolves_this_frame_ >= kMaxResolveCapturesPerFrame) {
@@ -3244,7 +3239,7 @@ bool NativeCommandProcessor::IssueCopy() {
   ++resolve_count_;
   ++resolves_this_frame_;
   copy_exit("BECAME_PHASE");
-  base_last_published_[src_base] = {resolved_index, phase.first_draw, phase.end_draw};
+  base_last_published_[src_base] = {phase.first_draw, phase.end_draw};
   if (REXCVAR_GET(native_log_draws)) {
     // TEMP-DIAG: EDRAM geometry + the RT bases of the phase's draws, to ground
     // the draw-range <-> resolve mapping in real data.
@@ -3739,6 +3734,17 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &buf_barrier,
                                    0, nullptr);
+          if (uint64_t(p.dest_x) + p.rect_w > resolved.width ||
+              uint64_t(p.dest_y) + p.rect_h > resolved.height) {
+            static uint32_t copy_bounds_log_count = 0;
+            if (copy_bounds_log_count++ < 8) {
+              REXLOG_WARN("rexgpu-native: resolve copy out of bounds dest=0x{:08X} rect={}x{}+{}+{} "
+                          "image={}x{}",
+                          p.dest_key, p.rect_w, p.rect_h, p.dest_x, p.dest_y, resolved.width,
+                          resolved.height);
+            }
+            continue;
+          }
           VkBufferImageCopy dst_region = src_region;
           dst_region.imageOffset = {int32_t(p.dest_x), int32_t(p.dest_y), 0};
           dfn.vkCmdCopyBufferToImage(command_buffer_, resolve_staging_buffer_, resolved.image,
@@ -3807,11 +3813,8 @@ void NativeCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         if (present_index != SIZE_MAX &&
             resolved_target_storage_[present_index].layout !=
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-          // Republication aliases two destination keys onto one image, so a
-          // key's tracked layout can lag what the other key did to it. Only
-          // blit from an image we know is in the layout we are about to claim -
-          // declaring the wrong oldLayout is VUID-VkImageMemoryBarrier-01213
-          // and makes the whole submit invalid.
+          // Only blit from an image whose layout we know - declaring the wrong
+          // oldLayout makes the whole submit invalid.
           present_index = SIZE_MAX;
         }
         if (present_index != SIZE_MAX) {

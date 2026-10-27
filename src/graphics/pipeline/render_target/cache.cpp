@@ -45,6 +45,28 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                     "Resolve from host render targets directly to shared memory when possible")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// Selective scaling: only the scene render targets (guest pitch 1280) are
+// created at resolution_scale; every other pass (shadow, reflection, post,
+// and everything else) stays at guest resolution. The value those passes add
+// is roughly proportional to the guest texture size, not the host one, so
+// the ~9x fragment cost at 3x is mostly wasted on them. Init-only: a target
+// keeps the scale it was created with.
+REXCVAR_DEFINE_BOOL(selective_rt_scale, true, "GPU",
+                    "Only scale scene render targets; keep shadow/reflection/post buffers "
+                    "at guest resolution (host-RT path only)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// Per-class opt-ins for targets selective_rt_scale leaves at 1x.
+REXCVAR_DEFINE_BOOL(rt_scale_shadow, false, "GPU",
+                    "Also scale 640-pitch 4x-MSAA (shadow) render targets")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(rt_scale_reflection, false, "GPU",
+                    "Also scale 520-pitch 4x-MSAA (reflection) render targets")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(rt_scale_post, false, "GPU",
+                    "Also scale 640/320-pitch 1x (post chain) render targets")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 namespace rex::graphics {
 
 void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
@@ -338,10 +360,56 @@ RenderTargetCache::~RenderTargetCache() {
 }
 
 void RenderTargetCache::InitializeCommon() {
+  // Selective scaling only applies to the host-render-target path (FSI/PSI
+  // render into guest-sized memory images where the class split doesn't map).
+  selective_rt_scale_ =
+      GetPath() == Path::kHostRenderTargets && REXCVAR_GET(selective_rt_scale);
+  rt_scale_shadow_ = REXCVAR_GET(rt_scale_shadow);
+  rt_scale_reflection_ = REXCVAR_GET(rt_scale_reflection);
+  rt_scale_post_ = REXCVAR_GET(rt_scale_post);
   assert_true(ownership_ranges_.empty());
   ownership_ranges_.emplace(std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
                             std::forward_as_tuple(xenos::kEdramTileCount, RenderTargetKey(),
                                                   RenderTargetKey(), RenderTargetKey()));
+}
+
+RenderTargetCache::ScaleClass RenderTargetCache::ClassOf(RenderTargetKey key) const {
+  const uint32_t pitch_pixels = key.GetWidth();
+  switch (key.msaa_samples) {
+    case xenos::MsaaSamples::k4X:
+      if (pitch_pixels == 640) return ScaleClass::kShadow;
+      if (pitch_pixels == 520) return ScaleClass::kReflection;
+      break;
+    case xenos::MsaaSamples::k1X:
+      if (pitch_pixels == 640 || pitch_pixels == 320) return ScaleClass::kPost;
+      break;
+    default:
+      break;
+  }
+  if (pitch_pixels == 1280) return ScaleClass::kScene;
+  return ScaleClass::kBase;
+}
+
+uint32_t RenderTargetCache::ScaleForKeyX(RenderTargetKey key) const {
+  if (!selective_rt_scale_) return draw_resolution_scale_x();
+  switch (ClassOf(key)) {
+    case ScaleClass::kScene: return draw_resolution_scale_x();
+    case ScaleClass::kShadow: return rt_scale_shadow_ ? draw_resolution_scale_x() : 1;
+    case ScaleClass::kReflection: return rt_scale_reflection_ ? draw_resolution_scale_x() : 1;
+    case ScaleClass::kPost: return rt_scale_post_ ? draw_resolution_scale_x() : 1;
+    default: return 1;
+  }
+}
+
+uint32_t RenderTargetCache::ScaleForKeyY(RenderTargetKey key) const {
+  if (!selective_rt_scale_) return draw_resolution_scale_y();
+  switch (ClassOf(key)) {
+    case ScaleClass::kScene: return draw_resolution_scale_y();
+    case ScaleClass::kShadow: return rt_scale_shadow_ ? draw_resolution_scale_y() : 1;
+    case ScaleClass::kReflection: return rt_scale_reflection_ ? draw_resolution_scale_y() : 1;
+    case ScaleClass::kPost: return rt_scale_post_ ? draw_resolution_scale_y() : 1;
+    default: return 1;
+  }
 }
 
 void RenderTargetCache::DestroyAllRenderTargets(bool shutting_down) {
@@ -434,10 +502,20 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   uint32_t pitch_tiles_at_32bpp =
       ((pitch_pixels << msaa_samples_x_log2) + (xenos::kEdramTileWidthSamples - 1)) /
       xenos::kEdramTileWidthSamples;
+  // The class scale for this draw. All bound targets share pitch and MSAA,
+  // so they all land in one scale class - colour and depth are never
+  // scaled differently.
+  if (selective_rt_scale_) {
+    RenderTargetKey draw_key;
+    draw_key.pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
+    draw_key.msaa_samples = msaa_samples;
+    current_draw_scale_x_ = ScaleForKeyX(draw_key);
+    current_draw_scale_y_ = ScaleForKeyY(draw_key);
+  }
   if (!interlock_barrier_only) {
     uint32_t pitch_pixels_tile_aligned_scaled =
         pitch_tiles_at_32bpp * (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2) *
-        draw_resolution_scale_x();
+        current_draw_scale_x_;
     uint32_t max_render_target_width = GetMaxRenderTargetWidth();
     if (pitch_pixels_tile_aligned_scaled > max_render_target_width) {
       // TODO(Triang3l): If really needed for some game on some device, clamp
@@ -571,7 +649,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   // Estimate height used by render targets (for color for writes, for depth /
   // stencil for both reads and writes) from various sources.
   uint32_t height_used =
-      std::min(GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples),
+      std::min(GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples, current_draw_scale_y_),
                draw_extent_estimator_.EstimateMaxY(
                    interlock_barrier_only
                        ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
@@ -817,7 +895,8 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
 }
 
 uint32_t RenderTargetCache::GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
-                                                  xenos::MsaaSamples msaa_samples) const {
+                                                  xenos::MsaaSamples msaa_samples,
+                                                  uint32_t resolution_scale_y) const {
   if (!pitch_tiles_at_32bpp) {
     return 0;
   }
@@ -830,9 +909,9 @@ uint32_t RenderTargetCache::GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
                 "Maximum guest render target height is assumed to always be a multiple "
                 "of an EDRAM tile height");
   uint32_t max_height_scaled = std::min(
-      xenos::kTexture2DCubeMaxWidthHeight * draw_resolution_scale_y(), GetMaxRenderTargetHeight());
+      xenos::kTexture2DCubeMaxWidthHeight * resolution_scale_y, GetMaxRenderTargetHeight());
   uint32_t msaa_samples_y_log2 = uint32_t(msaa_samples >= xenos::MsaaSamples::k2X);
-  uint32_t tile_height_samples_scaled = xenos::kEdramTileHeightSamples * draw_resolution_scale_y();
+  uint32_t tile_height_samples_scaled = xenos::kEdramTileHeightSamples * resolution_scale_y;
   tile_rows =
       std::min(tile_rows, (max_height_scaled << msaa_samples_y_log2) / tile_height_samples_scaled);
   assert_not_zero(tile_rows);
@@ -841,6 +920,7 @@ uint32_t RenderTargetCache::GetRenderTargetHeight(uint32_t pitch_tiles_at_32bpp,
 
 void RenderTargetCache::GetHostDepthStoreRectangleInfo(
     const Transfer::Rectangle& transfer_rectangle, xenos::MsaaSamples msaa_samples,
+    uint32_t resolution_scale_x, uint32_t resolution_scale_y,
     HostDepthStoreRectangleConstant& rectangle_constant_out, uint32_t& group_count_x_out,
     uint32_t& group_count_y_out) const {
   // Initialize to all bits zeroed.
@@ -857,9 +937,9 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
   rectangle_constant.width_pixels_div_8_minus_1 = (transfer_rectangle.width_pixels >> 3) - 1;
   rectangle_constant_out = rectangle_constant;
   // 1 thread group = 64x8 host samples.
-  uint32_t pixel_size_x = draw_resolution_scale_x()
+  uint32_t pixel_size_x = resolution_scale_x
                           << uint32_t(msaa_samples >= xenos::MsaaSamples::k4X);
-  uint32_t pixel_size_y = draw_resolution_scale_y()
+  uint32_t pixel_size_y = resolution_scale_y
                           << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X);
   group_count_x_out = (transfer_rectangle.width_pixels * pixel_size_x + 63) >> 6;
   group_count_y_out = (transfer_rectangle.height_pixels * pixel_size_y) >> 3;
@@ -1009,7 +1089,13 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
   }
   uint32_t pitch_pixels =
       pitch_tiles_at_32bpp * (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2);
-  uint32_t pitch_pixels_scaled = pitch_pixels * draw_resolution_scale_x();
+  RenderTargetKey clear_key;
+  clear_key.pitch_tiles_at_32bpp = pitch_tiles_at_32bpp;
+  clear_key.msaa_samples = msaa_samples;
+  uint32_t clear_scale_x = ScaleForKeyX(clear_key);
+  uint32_t clear_scale_y = ScaleForKeyY(clear_key);
+
+  uint32_t pitch_pixels_scaled = pitch_pixels * clear_scale_x;
   uint32_t max_render_target_width = GetMaxRenderTargetWidth();
   if (pitch_pixels_scaled > max_render_target_width) {
     // TODO(Triang3l): If really needed for some game on some device, clamp the
@@ -1021,7 +1107,8 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
     return false;
   }
 
-  uint32_t render_target_height_pixels = GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples);
+  uint32_t render_target_height_pixels =
+      GetRenderTargetHeight(pitch_tiles_at_32bpp, msaa_samples, clear_scale_y);
   uint32_t base_offset_rows_at_32bpp = base_offset_tiles_at_32bpp / pitch_tiles_at_32bpp;
   Transfer::Rectangle clear_rectangle;
   clear_rectangle.x_pixels =
@@ -1182,7 +1269,8 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
   } else {
     render_target = CreateRenderTarget(key);
     uint32_t width = key.GetWidth();
-    uint32_t height = GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples);
+    uint32_t height =
+        GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples, ScaleForKeyY(key));
     if (render_target) {
       REXGPU_DEBUG(
           "Created a {}x{} {}xMSAA {} render target with guest format {} at "

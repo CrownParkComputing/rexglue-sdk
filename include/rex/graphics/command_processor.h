@@ -18,6 +18,8 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <deque>
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -86,6 +88,10 @@ class CommandProcessor {
   virtual ~CommandProcessor();
 
   uint32_t counter() const { return counter_; }
+  // Swaps (VdSwap packets) the command processor has fully executed. VdSwap
+  // compares this with the swaps the guest has issued to keep the CPU from
+  // running more than gpu_max_frames_ahead frames ahead of the GPU thread.
+  uint32_t swaps_processed() const { return swaps_processed_.load(std::memory_order_acquire); }
   void increment_counter() { counter_++; }
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
@@ -188,7 +194,8 @@ class CommandProcessor {
   bool ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
   bool ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* reader, uint32_t packet,
                                           uint32_t count);
-  bool ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
+  virtual bool ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet,
+                                               uint32_t count);
   bool ExecutePacketType3_REG_RMW(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
   bool ExecutePacketType3_REG_TO_MEM(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
   bool ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader, uint32_t packet, uint32_t count);
@@ -249,6 +256,7 @@ class CommandProcessor {
   std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
+  std::atomic<uint32_t> swaps_processed_{0};
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;
@@ -259,6 +267,14 @@ class CommandProcessor {
 
   std::unique_ptr<rex::thread::Event> write_ptr_index_event_;
   std::atomic<uint32_t> write_ptr_index_;
+  // Kick throttle (gpu_max_kicks_ahead): write pointers the guest has
+  // submitted that the worker has not yet reached. Guarded by kicks_mutex_.
+  std::mutex kicks_mutex_;
+  std::deque<std::pair<uint32_t, std::chrono::steady_clock::time_point>> kicks_pending_;
+  std::atomic<uint32_t> kicks_pending_count_{0};
+  std::atomic<uint32_t> kick_timeouts_{0};
+  std::atomic<uint32_t> wait_reg_mem_memory_{0};
+  std::atomic<uint32_t> wait_reg_mem_register_{0};
 
   // Some titles submit writes beyond the emulated register file range in PM4
   // packets. Preserve these values so dependent packet logic can still observe

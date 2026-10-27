@@ -376,18 +376,15 @@ class NativeCommandProcessor : public CommandProcessor {
     uint32_t dest_x = 0;
     uint32_t dest_y = 0;
     size_t resolved_index = SIZE_MAX;
-    // This phase rendered no new draws; it re-publishes an earlier resolve of
-    // the same EDRAM base to a second address (typically the frontbuffer).
-    bool republished = false;
     // The guest asked this resolve to clear the EDRAM surface afterwards. A
     // resolve that does NOT clear leaves the surface live, and the draws that
     // follow composite onto what is already there.
     bool clears_color = false;
   };
-  // Per EDRAM base, the last resolve that actually captured an image, so a
-  // later zero-draw resolve of that base can republish it.
+  // The last captured draw range for each EDRAM base in this frame. A zero-draw
+  // resolve replays this range into its own destination-sized image, rather
+  // than aliasing a differently-sized destination from an earlier resolve.
   struct PublishedPhase {
-    size_t index = SIZE_MAX;
     uint32_t first_draw = 0;
     uint32_t end_draw = 0;
   };
@@ -424,8 +421,8 @@ class NativeCommandProcessor : public CommandProcessor {
   VkBuffer resolve_staging_buffer_ = VK_NULL_HANDLE;
   VkDeviceMemory resolve_staging_memory_ = VK_NULL_HANDLE;
   VkDeviceSize resolve_staging_size_ = 0;
-  // Per-frame resolved images (freed at BeginFrameIfNeeded) and their address
-  // aliases (key: guest byte address masked to the physical page range).
+  // Persistent resolved images and their address aliases (key: guest byte
+  // address masked to the physical page range).
   std::vector<ResolvedTarget> resolved_target_storage_;
   std::unordered_map<uint32_t, VkImageView> resolved_target_views_;
   // dest_key -> index into resolved_target_storage_, so a re-resolve of the

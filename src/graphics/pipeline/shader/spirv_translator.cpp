@@ -23,6 +23,9 @@
 #include <rex/assert.h>
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
+#include <rex/cvar.h>
+#include <rex/logging.h>
+#include <rex/graphics/flags.h>
 #include <rex/math.h>
 #include <rex/string/buffer.h>
 
@@ -118,6 +121,7 @@ void SpirvShaderTranslator::Reset() {
   input_patch_control_point_indices_ = spv::NoResult;
   input_point_coordinates_ = spv::NoResult;
   input_fragment_coordinates_ = spv::NoResult;
+  input_clip_distance_ = spv::NoResult;
   input_front_facing_ = spv::NoResult;
   input_sample_id_ = spv::NoResult;
   input_sample_mask_ = spv::NoResult;
@@ -2439,6 +2443,74 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
 void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
   Modification shader_modification = GetSpirvShaderModification();
 
+  // NaN vertex kill (Modification::vertex.nan_kill): a primitive with a NaN
+  // vertex position must not be rasterized. Write a clip distance that is
+  // hugely negative for such a vertex (and positive otherwise) so a primitive
+  // whose vertices are all NaN is clipped away entirely, and one that mixes
+  // NaN and finite vertices - degenerate bridge triangles between visible and
+  // hidden instances in one strip - is clipped down to a zero-area sliver at
+  // its finite vertices. The NaN position itself is replaced by a finite point
+  // so the clipper's interpolation stays finite.
+  auto apply_nan_kill = [&](spv::Id host_position) -> spv::Id {
+    // Logged whenever the state differs from the previous translation, so a
+    // run's log shows whether the kill was ever compiled in.
+    static uint32_t nan_kill_last_logged = UINT32_MAX;
+    const uint32_t nan_kill_now = uint32_t(shader_modification.vertex.nan_kill) |
+                                  (output_per_vertex_member_clip_distance_ == UINT32_MAX ? 0u : 2u);
+    if (nan_kill_now != nan_kill_last_logged) {
+      nan_kill_last_logged = nan_kill_now;
+      REXLOG_WARN("[NANKILL] translating vertex shader {:016X}: nan_kill={} clip_member={}",
+                  current_shader().ucode_data_hash(),
+                  uint32_t(shader_modification.vertex.nan_kill),
+                  output_per_vertex_member_clip_distance_);
+    }
+    if (!shader_modification.vertex.nan_kill ||
+        output_per_vertex_member_clip_distance_ == UINT32_MAX) {
+      return host_position;
+    }
+    // Infinity counts too: on the guest 0 * inf is 0, but any inf that survives
+    // into the position divides to NaN in the clipper just the same.
+    spv::Id is_nan = builder_->createUnaryOp(
+        spv::OpAny, type_bool_,
+        builder_->createBinOp(spv::OpLogicalOr, type_bool4_,
+                              builder_->createUnaryOp(spv::OpIsNan, type_bool4_, host_position),
+                              builder_->createUnaryOp(spv::OpIsInf, type_bool4_, host_position)));
+    if (REXCVAR_GET(gpu_vertex_nan_kill_debug)) {
+      // Debug: show the killed vertices at the centre of the screen instead.
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(const_float_0_);
+      id_vector_temp_.push_back(const_float_0_);
+      id_vector_temp_.push_back(builder_->makeFloatConstant(0.5f));
+      id_vector_temp_.push_back(const_float_1_);
+      spv::Id centre = builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+      return builder_->createTriOp(spv::OpSelect, type_float4_, is_nan, centre, host_position);
+    }
+    uint32_t nan_clip_distance_index = shader_modification.GetVertexClipDistanceCount() - 1;
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(int(output_per_vertex_member_clip_distance_)));
+    id_vector_temp_.push_back(builder_->makeIntConstant(int(nan_clip_distance_index)));
+    // NaN, not merely negative: a negative distance only clips this vertex
+    // off, leaving the rest of the primitive (PGR4 crowd parts mix NaN, normal
+    // and far-parked vertices in one triangle). NaN interpolates to NaN across
+    // the whole primitive, and the pixel shader discards on it.
+    builder_->createStore(
+        builder_->createTriOp(spv::OpSelect, type_float_, is_nan,
+                              builder_->createUnaryOp(
+                                  spv::OpBitcast, type_float_,
+                                  builder_->makeUintConstant(UINT32_C(0x7FC00000))),
+                              builder_->makeFloatConstant(1.0f)),
+        builder_->createAccessChain(spv::StorageClassOutput, output_per_vertex_, id_vector_temp_));
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(const_float_0_);
+    id_vector_temp_.push_back(const_float_0_);
+    id_vector_temp_.push_back(const_float_0_);
+    id_vector_temp_.push_back(const_float_1_);
+    spv::Id finite_position = builder_->makeCompositeConstant(type_float4_, id_vector_temp_);
+    return builder_->createTriOp(spv::OpSelect, type_float4_, is_nan, finite_position,
+                                 host_position);
+  };
+
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeIntConstant(kOutputPerVertexMemberPosition));
   spv::Id position_ptr =
@@ -2728,7 +2800,7 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       position = composite_construct_op->getResultId();
       builder_->getBuildPoint()->addInstruction(std::move(composite_construct_op));
     }
-    builder_->createStore(position, position_ptr);
+    builder_->createStore(apply_nan_kill(position), position_ptr);
 
     // Write the point coordinates.
     if (output_point_coordinates_ != spv::NoResult) {
@@ -2812,7 +2884,7 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
       position = composite_construct_op->getResultId();
       builder_->getBuildPoint()->addInstruction(std::move(composite_construct_op));
     }
-    builder_->createStore(position, position_ptr);
+    builder_->createStore(apply_nan_kill(position), position_ptr);
   }
 }
 
@@ -2909,6 +2981,19 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     main_interface_.push_back(input_fragment_coordinates_);
   }
 
+  // Clip distances, for the NaN vertex kill.
+  input_clip_distance_ = spv::NoResult;
+  if (shader_modification.pixel.nan_kill && shader_modification.pixel.clip_distance_count) {
+    builder_->addCapability(spv::CapabilityClipDistance);
+    spv::Id type_clip_distance = builder_->makeArrayType(
+        type_float_, builder_->makeUintConstant(shader_modification.pixel.clip_distance_count), 0);
+    input_clip_distance_ = builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                                    type_clip_distance, "gl_ClipDistance");
+    builder_->addDecoration(input_clip_distance_, spv::DecorationBuiltIn,
+                            spv::BuiltInClipDistance);
+    main_interface_.push_back(input_clip_distance_);
+  }
+
   // Is front facing.
   if (edram_fragment_shader_interlock_ ||
       (param_gen_needed && !GetSpirvShaderModification().pixel.param_gen_point)) {
@@ -2988,6 +3073,26 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
 }
 
 void SpirvShaderTranslator::StartFragmentShaderInMain() {
+  // NaN vertex kill: a primitive with a NaN-position vertex must not produce
+  // fragments (Xenos and Direct3D discard it; Vulkan leaves it undefined). The
+  // vertex shader writes NaN to the last clip distance for such a vertex, and
+  // NaN interpolates to NaN everywhere in the primitive.
+  if (input_clip_distance_ != spv::NoResult) {
+    Modification shader_modification = GetSpirvShaderModification();
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(
+        builder_->makeIntConstant(int(shader_modification.pixel.clip_distance_count - 1)));
+    spv::Id nan_distance = builder_->createLoad(
+        builder_->createAccessChain(spv::StorageClassInput, input_clip_distance_, id_vector_temp_),
+        spv::NoPrecision);
+    SpirvBuilder::IfBuilder nan_kill_if(
+        builder_->createUnaryOp(spv::OpIsNan, type_bool_, nan_distance),
+        spv::SelectionControlDontFlattenMask, *builder_);
+    builder_->createNoResultOp(spv::OpKill);
+    // OpKill terminates the block.
+    nan_kill_if.makeEndIf();
+  }
+
   // Set up pixel killing from within the translated shader without affecting
   // the control flow (unlike with OpKill), similarly to how pixel killing works
   // on the Xenos, and also keeping a single critical section exit and return
